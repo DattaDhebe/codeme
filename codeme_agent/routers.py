@@ -1,11 +1,105 @@
-from fastapi import APIRouter, Depends, HTTPException, status
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from codeme_agent import crud, ollama, schemas
+from codeme_agent import crud, ollama, schemas, workspace
 from codeme_agent.db import get_db
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/workspaces", response_model=list[schemas.WorkspaceRead])
+def list_workspaces(db: Session = Depends(get_db)):
+    return crud.list_workspaces(db)
+
+
+@router.post("/workspaces", response_model=schemas.WorkspaceRead, status_code=status.HTTP_201_CREATED)
+def create_workspace(request: schemas.WorkspaceCreate, db: Session = Depends(get_db)):
+    root = workspace.normalize_workspace_root(request.path)
+    root_path = str(root)
+    existing = crud.get_workspace_by_root(db, root_path)
+    if existing:
+        return existing
+    display_name = request.display_name or root.name or root_path
+    return crud.create_workspace(db, display_name, root_path)
+
+
+@router.delete("/workspaces/{workspace_id}", status_code=status.HTTP_204_NO_CONTENT)
+def delete_workspace(workspace_id: int, db: Session = Depends(get_db)):
+    if crud.get_workspace(db, workspace_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    crud.delete_workspace(db, workspace_id)
+
+
+@router.get("/workspaces/{workspace_id}/files", response_model=schemas.FileListResponse)
+def list_files(
+    workspace_id: int,
+    path: str | None = Query(None),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=250),
+    db: Session = Depends(get_db),
+):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    entries, has_more = workspace.list_directory(Path(workspace_record.root_path), path, page, page_size)
+    return schemas.FileListResponse(entries=entries, page=page, page_size=page_size, has_more=has_more)
+
+
+@router.get("/workspaces/{workspace_id}/files/metadata", response_model=schemas.FileMetadata)
+def get_file_metadata(workspace_id: int, path: str = Query(""), db: Session = Depends(get_db)):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.get_file_metadata(Path(workspace_record.root_path), path)
+
+
+@router.get("/workspaces/{workspace_id}/files/content", response_model=schemas.FileRead)
+def read_file(workspace_id: int, path: str = Query(...), db: Session = Depends(get_db)):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.read_file(Path(workspace_record.root_path), path)
+
+
+@router.get("/workspaces/{workspace_id}/search", response_model=schemas.SearchResponse)
+def search_code(
+    workspace_id: int,
+    query: str = Query(..., min_length=1),
+    page: int = Query(1, ge=1),
+    page_size: int = Query(50, ge=1, le=200),
+    db: Session = Depends(get_db),
+):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.search_code(Path(workspace_record.root_path), query, page, page_size)
+
+
+@router.get("/workspaces/{workspace_id}/git/status", response_model=schemas.GitStatusResponse)
+def get_git_status(workspace_id: int, db: Session = Depends(get_db)):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.get_git_status(Path(workspace_record.root_path))
+
+
+@router.get("/workspaces/{workspace_id}/git/diff", response_model=schemas.GitDiffResponse)
+def get_git_diff(workspace_id: int, path: str = Query(...), db: Session = Depends(get_db)):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.get_git_diff(Path(workspace_record.root_path), path)
+
+
+@router.get("/workspaces/{workspace_id}/agents", response_model=schemas.AgentInstructionsResponse)
+def get_agent_instructions(workspace_id: int, path: str | None = Query(None), db: Session = Depends(get_db)):
+    workspace_record = crud.get_workspace(db, workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    return workspace.find_agent_instructions(Path(workspace_record.root_path), path)
 
 
 @router.get("/conversations", response_model=list[schemas.ConversationSummary])

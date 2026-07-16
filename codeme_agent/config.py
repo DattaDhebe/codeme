@@ -14,6 +14,9 @@ class Settings(BaseSettings):
     database_url: str = "sqlite:///./codeme.db"
     ollama_url: AnyHttpUrl = "http://127.0.0.1:11434"
     default_model: str = "qwen2.5-coder:7b"
+    default_workspace_root: str = "."
+    allow_unc_paths: bool = False
+    max_file_size: int = 1_500_000
 
     class Config:
         env_file = ".env"

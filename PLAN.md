@@ -93,6 +93,23 @@ Personal Codex is a local-first coding assistant with a ChatGPT-style web UI and
 - Multi-model orchestration beyond default model selection
 - Docker Compose production stack beyond placeholder compose files
 
+## Phase 3 Scope
+### Workspace registration and browsing
+- Register local workspace roots securely with canonical path normalization.
+- Block UNC paths when disabled and prevent traversal outside the registered project.
+- Hide excluded directories and sensitive files from listings and content previews.
+- Provide read-only file browsing and file content preview.
+
+### Repository tools
+- Search code using ripgrep and return paginated matches.
+- Expose Git status and diff details for tracked repositories.
+- Read AGENTS.md instructions from workspace roots in a secure read-only manner.
+
+### Security guarantees
+- All workspace requests are confined to the registered root.
+- Binary files, excluded directories, and secret files are not exposed.
+- File reads are capped by configured file size limits.
+
 ## Next steps
-1. Review PLAN.md and approve Phase 1 implementation.
-2. After approval, scaffold backend and frontend directories and implement Phase 1 features.
+1. Review PLAN.md and approve Phase 3 implementation.
+2. Add Phase 3.5 for local VS Code extension tooling after workspace browser completion.

@@ -1,7 +1,33 @@
-from sqlalchemy import delete, select, update
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from codeme_agent import models
+
+
+def get_workspace(db: Session, workspace_id: int) -> models.Workspace | None:
+    return db.scalar(select(models.Workspace).where(models.Workspace.id == workspace_id))
+
+
+def list_workspaces(db: Session) -> list[models.Workspace]:
+    stmt = select(models.Workspace).order_by(models.Workspace.updated_at.desc())
+    return list(db.scalars(stmt))
+
+
+def get_workspace_by_root(db: Session, root_path: str) -> models.Workspace | None:
+    return db.scalar(select(models.Workspace).where(models.Workspace.root_path == root_path))
+
+
+def create_workspace(db: Session, display_name: str, root_path: str) -> models.Workspace:
+    workspace = models.Workspace(display_name=display_name, root_path=root_path)
+    db.add(workspace)
+    db.commit()
+    db.refresh(workspace)
+    return workspace
+
+
+def delete_workspace(db: Session, workspace_id: int) -> None:
+    db.execute(delete(models.Workspace).where(models.Workspace.id == workspace_id))
+    db.commit()
 
 
 def get_conversation(db: Session, conversation_id: int) -> models.Conversation | None:

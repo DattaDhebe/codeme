@@ -7,6 +7,12 @@ Personal Codex is a local-first coding assistant with a ChatGPT-style interface.
 - Frontend: Angular 18+ standalone app scaffold
 - Streaming chat and conversation persistence implemented
 
+## Phase 3 Status
+- Workspace registration and secure root path canonicalization
+- Repository browsing with file listing and content preview
+- Read-only local workspace search with ripgrep integration
+- Git status and diff support for registered repositories
+
 ## Setup
 
 1. Create and activate a Python environment:

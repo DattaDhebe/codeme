@@ -1,7 +1,101 @@
 <mat-card>
-  <mat-card-title>Settings</mat-card-title>
+  <mat-card-title>Workspace Explorer</mat-card-title>
   <mat-card-content>
-    <p>This settings page is a placeholder for theme, model, and workspace controls.</p>
-    <button mat-flat-button color="primary" routerLink="/">Back to chat</button>
+    <div class="workspace-form">
+      <mat-form-field appearance="fill" class="workspace-field">
+        <mat-label>Workspace path</mat-label>
+        <input matInput placeholder="Path to local repository" [(ngModel)]="workspacePath" />
+      </mat-form-field>
+      <mat-form-field appearance="fill" class="workspace-field">
+        <mat-label>Display name</mat-label>
+        <input matInput placeholder="Friendly workspace name" [(ngModel)]="workspaceName" />
+      </mat-form-field>
+      <button mat-flat-button color="primary" (click)="registerWorkspace()">Register Workspace</button>
+    </div>
+
+    <div class="workspace-list">
+      <h3>Registered Workspaces</h3>
+      <mat-nav-list>
+        <button
+          mat-list-item
+          *ngFor="let workspace of workspaces"
+          [class.selected]="workspace.id === selectedWorkspace?.id"
+          (click)="selectWorkspace(workspace)"
+        >
+          <div class="workspace-item">
+            <div>
+              <strong>{{ workspace.display_name }}</strong>
+              <div class="workspace-path">{{ workspace.root_path }}</div>
+            </div>
+            <button mat-icon-button color="warn" (click)="removeWorkspace(workspace.id); $event.stopPropagation();" aria-label="Remove workspace">
+              <mat-icon>delete</mat-icon>
+            </button>
+          </div>
+        </button>
+      </mat-nav-list>
+    </div>
+
+    <div *ngIf="selectedWorkspace" class="workspace-details">
+      <h3>Explorer: {{ selectedWorkspace.display_name }}</h3>
+
+      <div class="explorer-actions">
+        <button mat-stroked-button color="primary" (click)="loadExplorer()">Refresh Files</button>
+        <button mat-stroked-button color="accent" (click)="loadGitStatus()">Refresh Git Status</button>
+      </div>
+
+      <div class="workspace-panels">
+        <div class="file-pane">
+          <h4>Files</h4>
+          <mat-nav-list>
+            <button mat-list-item *ngFor="let entry of fileEntries" (click)="openEntry(entry)">
+              <mat-icon>{{ entry.is_dir ? 'folder' : 'description' }}</mat-icon>
+              <span class="entry-name">{{ entry.name }}</span>
+              <span class="entry-meta">{{ entry.is_dir ? 'Directory' : (entry.size + ' bytes') }}</span>
+            </button>
+          </mat-nav-list>
+        </div>
+
+        <div class="file-preview">
+          <h4>Preview</h4>
+          <div *ngIf="selectedFile; else noFile">
+            <h5>{{ selectedFile.path }}</h5>
+            <pre>{{ selectedFile.content }}</pre>
+            <div *ngIf="gitDiff" class="git-diff">
+              <h5>Git Diff</h5>
+              <pre>{{ gitDiff }}</pre>
+            </div>
+          </div>
+          <ng-template #noFile>
+            <p>Select a file to preview its content.</p>
+          </ng-template>
+        </div>
+      </div>
+
+      <div class="workspace-search">
+        <h4>Search</h4>
+        <mat-form-field appearance="fill" class="workspace-field">
+          <mat-label>Search query</mat-label>
+          <input matInput placeholder="Search files" [(ngModel)]="searchQuery" />
+        </mat-form-field>
+        <button mat-stroked-button color="primary" (click)="searchWorkspace()">Search</button>
+        <div *ngIf="searchResults.length > 0" class="search-results">
+          <h5>Results</h5>
+          <mat-nav-list>
+            <button mat-list-item *ngFor="let result of searchResults" (click)="openEntry({ path: result.path, name: result.path, is_dir: false, size: 0, modified_at: null })">
+              <div>
+                <strong>{{ result.path }}</strong>
+                <div>{{ result.line }}:{{ result.column }} - {{ result.text }}</div>
+              </div>
+            </button>
+          </mat-nav-list>
+        </div>
+      </div>
+    </div>
+
+    <div *ngIf="error" class="error-banner">{{ error }}</div>
+
+    <div class="navigation-actions">
+      <button mat-flat-button color="primary" routerLink="/">Back to chat</button>
+    </div>
   </mat-card-content>
 </mat-card>

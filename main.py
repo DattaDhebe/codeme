@@ -1,11 +1,13 @@
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 
 from codeme_agent.config import settings
 from codeme_agent.db import Base, engine
 from codeme_agent.routers import router
 from codeme_agent.schemas import GenerateRequest, GenerateResponse
 from codeme_agent.prompt_engine import build_prompt, generate_code
+from codeme_agent.workspace import WorkspaceError
 
 app = FastAPI(
     title=settings.app_name,
@@ -26,6 +28,11 @@ app.include_router(router)
 @app.on_event("startup")
 def on_startup():
     Base.metadata.create_all(bind=engine)
+
+
+@app.exception_handler(WorkspaceError)
+def workspace_error_handler(request, exc: WorkspaceError):
+    return JSONResponse(status_code=400, content={"detail": str(exc)})
 
 
 @app.get("/health")

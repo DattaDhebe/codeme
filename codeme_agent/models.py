@@ -6,6 +6,21 @@ from sqlalchemy.orm import relationship
 from codeme_agent.db import Base
 
 
+class Workspace(Base):
+    __tablename__ = "workspaces"
+
+    id = Column(Integer, primary_key=True, index=True)
+    display_name = Column(String(200), nullable=False)
+    root_path = Column(String(1024), nullable=False, unique=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(
+        DateTime(timezone=True),
+        default=datetime.utcnow,
+        onupdate=datetime.utcnow,
+        nullable=False,
+    )
+
+
 class Conversation(Base):
     __tablename__ = "conversations"
 
