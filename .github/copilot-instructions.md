@@ -1,0 +1,4 @@
+- Create a Python FastAPI code-generation assistant scaffold in the current workspace.
+- Include an API endpoint `/generate` and request/response schemas.
+- Provide a README with setup and example request details.
+- Add a VS Code task to launch `uvicorn main:app --reload`.
