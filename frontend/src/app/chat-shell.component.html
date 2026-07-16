@@ -1,0 +1,55 @@
+<mat-sidenav-container class="chat-shell">
+  <mat-sidenav mode="side" opened class="sidebar">
+    <div class="sidebar-header">
+      <h2>Conversations</h2>
+      <button mat-mini-fab color="primary" (click)="createConversation()">
+        <mat-icon>add</mat-icon>
+      </button>
+    </div>
+
+    <mat-nav-list>
+      <button
+        mat-list-item
+        *ngFor="let conversation of conversations"
+        [class.active]="conversation.id === activeConversation?.id"
+        (click)="selectConversation(conversation)"
+      >
+        {{ conversation.title }}
+      </button>
+    </mat-nav-list>
+  </mat-sidenav>
+
+  <mat-sidenav-content>
+    <mat-toolbar color="primary" class="chat-toolbar">
+      <div>
+        <button mat-icon-button routerLink="/settings" aria-label="Settings">
+          <mat-icon>settings</mat-icon>
+        </button>
+        <span>{{ activeConversation?.title || 'Select a conversation' }}</span>
+      </div>
+    </mat-toolbar>
+
+    <div class="chat-body">
+      <div *ngIf="error" class="error-banner">{{ error }}</div>
+
+      <div class="message-list">
+        <ng-container *ngFor="let message of messages">
+          <mat-card [class.user-message]="message.role === 'user'" [class.assistant-message]="message.role === 'assistant'">
+            <div class="message-role">{{ message.role }}</div>
+            <div class="message-content" [innerHTML]="message.content | markdown"></div>
+          </mat-card>
+        </ng-container>
+      </div>
+
+      <div class="chat-footer">
+        <textarea matInput placeholder="Type a message..." [(ngModel)]="inputText" rows="3"></textarea>
+        <div class="footer-actions">
+          <button mat-flat-button color="primary" (click)="sendMessage()" [disabled]="streaming || !inputText.trim()">
+            Send
+          </button>
+          <button mat-stroked-button color="warn" (click)="stopGeneration()" [disabled]="!streaming">Stop</button>
+        </div>
+      </div>
+    </div>
+  </mat-sidenav-content>
+</mat-sidenav-container>

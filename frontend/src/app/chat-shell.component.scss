@@ -1,0 +1,95 @@
+:host {
+  height: 100vh;
+  display: block;
+}
+
+.chat-shell {
+  height: 100%;
+}
+
+.sidebar {
+  width: 320px;
+  border-right: 1px solid rgba(0, 0, 0, 0.08);
+}
+
+.sidebar-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px;
+}
+
+mat-nav-list button {
+  width: 100%;
+  text-align: left;
+}
+
+mat-nav-list button.active {
+  background-color: rgba(0, 0, 0, 0.06);
+}
+
+.chat-toolbar {
+  display: flex;
+  justify-content: space-between;
+}
+
+.chat-body {
+  display: flex;
+  flex-direction: column;
+  height: calc(100vh - 64px);
+  padding: 16px;
+}
+
+.message-list {
+  overflow-y: auto;
+  flex: 1;
+  display: grid;
+  gap: 12px;
+  padding-bottom: 12px;
+}
+
+mat-card {
+  padding: 16px;
+}
+
+.user-message {
+  background: #e3f2fd;
+  align-self: flex-end;
+}
+
+.assistant-message {
+  background: #f5f5f5;
+  align-self: flex-start;
+}
+
+.message-role {
+  font-size: 0.75rem;
+  font-weight: 700;
+  margin-bottom: 8px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.message-content {
+  white-space: pre-wrap;
+}
+
+.chat-footer {
+  border-top: 1px solid rgba(0, 0, 0, 0.08);
+  padding-top: 16px;
+}
+
+.footer-actions {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 12px;
+}
+
+.error-banner {
+  background-color: #ffebee;
+  color: #b00020;
+  padding: 12px;
+  border-radius: 8px;
+  margin-bottom: 12px;
+}

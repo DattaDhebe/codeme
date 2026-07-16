@@ -1,14 +1,13 @@
-# Codeme Agent
+# Personal Codex
 
-A standalone Python FastAPI scaffold for a code-generation assistant inspired by OpenAI Codex.
+Personal Codex is a local-first coding assistant with a ChatGPT-style interface.
 
-## Features
-- FastAPI backend
-- `/generate` API endpoint for code prompt requests
-- Request/response schemas using Pydantic
-- Local prompt handling and a simple generation stub
+## Phase 2 Status
+- Backend: FastAPI, SQLite, SQLAlchemy 2, Alembic, Ollama local HTTP client
+- Frontend: Angular 18+ standalone app scaffold
+- Streaming chat and conversation persistence implemented
 
-## Getting started
+## Setup
 
 1. Create and activate a Python environment:
    ```powershell
@@ -16,24 +15,29 @@ A standalone Python FastAPI scaffold for a code-generation assistant inspired by
    .\.venv\Scripts\Activate.ps1
    ```
 
-2. Install dependencies:
+2. Install backend dependencies:
    ```powershell
-   pip install -r requirements.txt
+   python -m pip install -r requirements.txt
    ```
 
-3. Run the app:
+3. Install frontend dependencies:
+   ```powershell
+   cd frontend
+   npm install
+   ```
+
+4. Run the backend:
    ```powershell
    uvicorn main:app --reload
    ```
 
-4. Send a request to `http://127.0.0.1:8000/generate`.
+5. Run the frontend:
+   ```powershell
+   cd frontend
+   npm start
+   ```
 
-## Example request payload
-
-```json
-{
-  "language": "python",
-  "task": "build a function to reverse a string",
-  "context": "Use Python standard library only."
-}
-```
+## Notes
+- Ollama must be running locally and accessible at `http://127.0.0.1:11434`.
+- The default model is `qwen2.5-coder:7b`.
+- API Base URL: `http://127.0.0.1:8000/api`.

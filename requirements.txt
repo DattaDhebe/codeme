@@ -1,3 +1,9 @@
-fastapi==0.111.3
+fastapi==0.139.2
 uvicorn[standard]==0.24.0
-pydantic==2.10.16
+pydantic==2.10.3
+sqlalchemy==2.0.34
+alembic==1.11.1
+httpx==0.24.2
+python-dotenv==1.2.2
+pytest==8.4.3
+pytest-asyncio==0.22.0
