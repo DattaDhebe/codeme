@@ -1,0 +1,194 @@
+{
+  "name": "personal-codex",
+  "displayName": "Personal Codex",
+  "publisher": "personal-codex-local",
+  "description": "A thin VS Code client for the Personal Codex local FastAPI backend.",
+  "repository": "https://github.com/personal-codex-local/personal-codex",
+  "license": "MIT",
+  "version": "0.1.0",
+  "engines": {
+    "vscode": "^1.90.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [
+    "onCommand:personalCodex.openChat",
+    "onCommand:personalCodex.newChat",
+    "onCommand:personalCodex.explainSelection",
+    "onCommand:personalCodex.fixSelection",
+    "onCommand:personalCodex.refactorSelection",
+    "onCommand:personalCodex.generateTests",
+    "onCommand:personalCodex.askCurrentFile",
+    "onCommand:personalCodex.reviewChanges",
+    "onCommand:personalCodex.registerWorkspace",
+    "onCommand:personalCodex.checkBackend",
+    "onCommand:personalCodex.startBackend",
+    "onView:personalCodexSidebar"
+  ],
+  "main": "./dist/extension.js",
+  "scripts": {
+    "build:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --sourcemap",
+    "build:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --sourcemap",
+    "build": "npm run build:extension && npm run build:webview",
+    "watch:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --watch",
+    "watch:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --watch",
+    "watch": "npm-run-all --parallel watch:extension watch:webview",
+    "lint": "eslint 'src/**/*.ts'",
+    "test": "vitest run --config vitest.config.ts",
+    "test:integration": "node ./dist/test/runTest.js",
+    "package": "vsce package --out personal-codeme-0.1.0.vsix"
+  },
+  "files": [
+    "dist/**",
+    "media/**",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.90.0",
+    "@vscode/test-electron": "^2.5.0",
+    "esbuild": "^0.19.4",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.5.4",
+    "vitest": "^1.5.6",
+    "vsce": "^2.11.1",
+    "eslint": "^8.57.0",
+    "eslint-plugin-import": "^2.29.1",
+    "eslint-plugin-node": "^11.1.0"
+  },
+  "dependencies": {
+    "marked": "^9.1.6",
+    "prismjs": "^1.30.0"
+  },
+  "contributes": {
+    "configuration": {
+      "title": "Personal Codex",
+      "properties": {
+        "personalCodex.backendUrl": {
+          "type": "string",
+          "default": "http://127.0.0.1:8000",
+          "description": "Local Personal Codex backend URL."
+        },
+        "personalCodex.defaultModel": {
+          "type": "string",
+          "default": "qwen2.5-coder:7b",
+          "description": "Default model to request from the Personal Codex backend."
+        },
+        "personalCodex.autoRegisterWorkspace": {
+          "type": "boolean",
+          "default": false,
+          "description": "Ask before registering an opened workspace folder with Personal Codex backend."
+        },
+        "personalCodex.requireWriteApproval": {
+          "type": "boolean",
+          "default": true,
+          "description": "Require user approval for write or tool-execution actions."
+        },
+        "personalCodex.showNotifications": {
+          "type": "boolean",
+          "default": true,
+          "description": "Show Personal Codex notifications for backend status and workspace actions."
+        }
+      }
+    },
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "personalCodex",
+          "title": "Personal Codex",
+          "icon": "media/personal-codex.svg"
+        }
+      ]
+    },
+    "views": {
+      "personalCodex": [
+        {
+          "id": "personalCodexSidebar",
+          "name": "Personal Codex"
+        }
+      ]
+    },
+    "commands": [
+      {
+        "command": "personalCodex.openChat",
+        "title": "Personal Codex: Open Chat"
+      },
+      {
+        "command": "personalCodex.newChat",
+        "title": "Personal Codex: New Chat"
+      },
+      {
+        "command": "personalCodex.explainSelection",
+        "title": "Personal Codex: Explain Selected Code"
+      },
+      {
+        "command": "personalCodex.fixSelection",
+        "title": "Personal Codex: Fix Selected Code"
+      },
+      {
+        "command": "personalCodex.refactorSelection",
+        "title": "Personal Codex: Refactor Selected Code"
+      },
+      {
+        "command": "personalCodex.generateTests",
+        "title": "Personal Codex: Generate Tests"
+      },
+      {
+        "command": "personalCodex.askCurrentFile",
+        "title": "Personal Codex: Ask About Current File"
+      },
+      {
+        "command": "personalCodex.reviewChanges",
+        "title": "Personal Codex: Review Current Changes"
+      },
+      {
+        "command": "personalCodex.registerWorkspace",
+        "title": "Personal Codex: Register Workspace"
+      },
+      {
+        "command": "personalCodex.checkBackend",
+        "title": "Personal Codex: Check Backend Connection"
+      },
+      {
+        "command": "personalCodex.startBackend",
+        "title": "Personal Codex: Start Local Backend"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        { "command": "personalCodex.openChat" },
+        { "command": "personalCodex.newChat" },
+        { "command": "personalCodex.explainSelection" },
+        { "command": "personalCodex.fixSelection" },
+        { "command": "personalCodex.refactorSelection" },
+        { "command": "personalCodex.generateTests" },
+        { "command": "personalCodex.askCurrentFile" },
+        { "command": "personalCodex.reviewChanges" },
+        { "command": "personalCodex.registerWorkspace" },
+        { "command": "personalCodex.checkBackend" },
+        { "command": "personalCodex.startBackend" }
+      ],
+      "editor/context": [
+        {
+          "command": "personalCodex.explainSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        },
+        {
+          "command": "personalCodex.fixSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        },
+        {
+          "command": "personalCodex.refactorSelection",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        },
+        {
+          "command": "personalCodex.generateTests",
+          "when": "editorHasSelection",
+          "group": "navigation"
+        }
+      ]
+    }
+  }
+}

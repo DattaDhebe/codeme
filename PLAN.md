@@ -110,6 +110,59 @@ Personal Codex is a local-first coding assistant with a ChatGPT-style web UI and
 - Binary files, excluded directories, and secret files are not exposed.
 - File reads are capped by configured file size limits.
 
+## Phase 3.5 Scope
+### Personal Codex VS Code extension
+- Build a thin local VS Code client only.
+- Do not duplicate AI model execution or conversation storage.
+- Reuse the existing FastAPI backend for all chat, workspace, and code tooling.
+- Maintain strictly local-only connectivity and no cloud APIs.
+
+### User interface and integration
+- Add a Personal Codex Activity Bar pane using `WebviewViewProvider`.
+- Provide a sidebar with conversation list, new-chat action, chat UI, model selector, backend status, workspace status, approval controls, and tool execution cards.
+- Render markdown securely and highlight code using bundled syntax highlighting.
+- Use VS Code theme variables for native appearance.
+- Enforce a strict CSP with nonces; block remote resources and unsafe inline execution.
+
+### Backend connectivity
+- Add VS Code settings for backend URL, default model, auto-register workspace, write approval, and notifications.
+- Check backend health with timeout, retry/backoff, and friendly offline messages.
+- Stream assistant output from `/api/conversations/{id}/chat` and support cancellation.
+- Use a typed client for all backend API calls.
+
+### Workspace integration
+- Detect open `vscode.workspace.workspaceFolders` and support multi-root workspaces.
+- Ask the user before registering folders with the backend; do not silently register.
+- Send canonical workspace paths and let the backend authorize final access.
+- Show active registered workspace state in the sidebar.
+
+### Editor commands and context
+- Contribute commands for chat, new chat, explain selected code, fix selected code, refactor selected code, generate tests, ask about current file, review current changes, register workspace, check connection, and start the local backend.
+- Add editor context menu entries for selected-code actions.
+- Send selected text, relative path, language ID, selection range, and workspace ID to the backend.
+- Support references such as `@currentFile`, `@selection`, `@workspace`, `@problems`, and `@gitDiff` by resolving them in the extension before sending.
+- Enforce explicit selection for large context and apply client-side size limits.
+
+### Diagnostics and Git integration
+- Use `vscode.languages.getDiagnostics` to collect diagnostics for current files.
+- Allow commands to explain diagnostics, suggest fixes, and send selected diagnostics to chat without editing.
+- Use VS Code/Git APIs to show current branch, modified files, staged files, and untracked files.
+- Send only diff metadata and relevant file information to the backend.
+
+### Security and boundaries
+- Default to localhost backend connection only; warn on non-local URLs.
+- Do not read outside opened workspace folders.
+- Do not read excluded or secret files from the extension.
+- Do not execute shell commands or perform file writes during Phase 3.5.
+- Treat webview messages as untrusted and validate all message payloads at runtime.
+- Escape rendered markdown and disable raw HTML in the UI.
+
+### Testing and packaging
+- Add unit tests with Vitest and integration tests with `@vscode/test-electron`.
+- Add scripts for build, watch, lint, test, test:integration, and package.
+- Package a local `.vsix` file for manual installation.
+
 ## Next steps
-1. Review PLAN.md and approve Phase 3 implementation.
-2. Add Phase 3.5 for local VS Code extension tooling after workspace browser completion.
+1. Review PLAN.md and approve Phase 3.5 extension design.
+2. Implement the `vscode-extension/` folder and build the local VS Code client.
+3. Run unit and integration tests, then package `personal-codex-0.1.0.vsix`.

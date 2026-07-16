@@ -1,0 +1,12 @@
+node_modules
+.vscode
+dist/test
+out
+README.md
+**/*.ts
+**/*.map
+coverage
+.git
+.gitignore
+npm-debug.log*
+.vscode-test
