@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
@@ -153,10 +154,10 @@ def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depen
             for chunk in client.stream_chat(history, model=request.model):
                 if chunk:
                     crud.append_message_content(db, assistant_message.id, chunk)
-                    yield f"data: {chunk}\n\n"
+                    yield f"data: {json.dumps(chunk)}\n\n"
             yield "event: done\ndata: [DONE]\n\n"
         except ollama.OllamaError as exc:
-            error = {"error": str(exc)}
+            error = json.dumps({"error": str(exc)})
             yield f"event: error\ndata: {error}\n\n"
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")

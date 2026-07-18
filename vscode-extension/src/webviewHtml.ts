@@ -16,9 +16,6 @@ export function webviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
 </head>
 <body>
   <div id="app"></div>
-  <script nonce="${nonce}">
-    const vscodeApi = acquireVsCodeApi();
-  </script>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

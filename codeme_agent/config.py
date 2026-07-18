@@ -1,10 +1,12 @@
 from typing import List
 
 from pydantic import AnyHttpUrl
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
+    model_config = SettingsConfigDict(env_file=".env", extra="forbid")
+
     app_name: str = "Personal Codex"
     description: str = "Local ChatGPT-style coding agent"
     version: str = "0.1.0"
@@ -17,10 +19,5 @@ class Settings(BaseSettings):
     default_workspace_root: str = "."
     allow_unc_paths: bool = False
     max_file_size: int = 1_500_000
-
-    class Config:
-        env_file = ".env"
-        extra = "forbid"
-
 
 settings = Settings()

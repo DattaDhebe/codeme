@@ -23,6 +23,10 @@ npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
+.runtime/
+
+# Local application state
+codeme.db
 
 # OS files
 .DS_Store

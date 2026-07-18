@@ -16,35 +16,41 @@ class OllamaClient:
 
     def stream_chat(self, messages: list[dict[str, str]], model: str | None = None, timeout: int = 120):
         model = model or self.default_model
-        url = f"{self.base_url}/chat?model={model}"
-        payload = {"messages": messages, "stream": True}
+        url = f"{self.base_url.rstrip('/')}/api/chat"
+        payload = {"model": model, "messages": messages, "stream": True}
 
         try:
-            with httpx.stream("POST", url, json=payload, headers={"Accept": "text/event-stream"}, timeout=timeout) as response:
+            with httpx.stream("POST", url, json=payload, timeout=timeout) as response:
                 if response.status_code != 200:
-                    raise OllamaError("Ollama unavailable or returned error")
+                    raise OllamaError(f"Ollama returned HTTP {response.status_code}")
 
-                buffer = ""
                 for raw_line in response.iter_lines():
-                    if raw_line is None:
+                    if not raw_line:
                         continue
-                    line = raw_line.decode("utf-8").strip()
-                    if not line or line.startswith(":"):
-                        continue
-                    if line.startswith("event:"):
-                        continue
-                    if line.startswith("data:"):
-                        data = line[len("data:"):].strip()
-                        if data == "[DONE]":
-                            break
-                        try:
-                            decoded = json.loads(data)
-                        except json.JSONDecodeError:
-                            continue
-                        text = decoded.get("content") or decoded.get("message", {}).get("content") or ""
-                        buffer += text
+                    line = raw_line.decode("utf-8") if isinstance(raw_line, bytes) else raw_line
+                    try:
+                        decoded = json.loads(line)
+                    except json.JSONDecodeError as exc:
+                        raise OllamaError("Ollama returned an invalid stream response") from exc
+
+                    if decoded.get("error"):
+                        raise OllamaError(str(decoded["error"]))
+
+                    text = decoded.get("message", {}).get("content", "")
+                    if text:
                         yield text
+                    if decoded.get("done"):
+                        break
         except httpx.RequestError as exc:
             raise OllamaError(f"Ollama request failed: {exc}") from exc
-        except httpx.HTTPStatusError as exc:
-            raise OllamaError(f"Ollama returned HTTP error: {exc.response.status_code}") from exc
+
+    def list_models(self, timeout: int = 5) -> list[str]:
+        url = f"{self.base_url.rstrip('/')}/api/tags"
+        try:
+            response = httpx.get(url, timeout=timeout)
+            if response.status_code != 200:
+                raise OllamaError(f"Ollama returned HTTP {response.status_code}")
+            data = response.json()
+            return [item["name"] for item in data.get("models", []) if item.get("name")]
+        except (httpx.RequestError, ValueError) as exc:
+            raise OllamaError(f"Unable to query Ollama models: {exc}") from exc

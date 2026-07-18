@@ -2,7 +2,6 @@ import * as vscode from 'vscode';
 import { PersonalCodexSidebarProvider } from './sidebarProvider';
 import { BackendClient } from './backendClient';
 import { ContextReferenceResolver } from './contextResolver';
-import { webviewHtml } from './webviewHtml';
 
 export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration('personalCodex');
@@ -12,7 +11,7 @@ export function activate(context: vscode.ExtensionContext): void {
   const sidebarProvider = new PersonalCodexSidebarProvider(context, backendClient, resolver);
   context.subscriptions.push(
     vscode.window.registerWebviewViewProvider('personalCodemeSidebar', sidebarProvider, {
-      webviewOptions: { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')] }
+      webviewOptions: { retainContextWhenHidden: true }
     })
   );
 
@@ -29,8 +28,10 @@ export function activate(context: vscode.ExtensionContext): void {
   registerCommand('personalCodex.askCurrentFile', async () => sidebarProvider.handleFileCommand('ask'));
   registerCommand('personalCodex.reviewChanges', async () => sidebarProvider.reviewChanges());
   registerCommand('personalCodex.registerWorkspace', async () => sidebarProvider.registerWorkspace());
-  registerCommand('personalCodex.checkBackend', async () => backendClient.checkConnection(true));
-  registerCommand('personalCodex.startBackend', async () => vscode.window.showInformationMessage('Personal Codex does not start backend processes in Phase 3.5.'));
+  registerCommand('personalCodex.checkBackend', async () => {
+    await backendClient.checkConnection(true);
+  });
+  registerCommand('personalCodex.startBackend', async () => sidebarProvider.startBackend());
 
   context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.refreshWorkspaceState()));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(() => sidebarProvider.updateConfiguration()));

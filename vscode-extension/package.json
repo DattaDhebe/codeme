@@ -2,10 +2,10 @@
   "name": "personal-codeme",
   "displayName": "Personal Codeme",
   "publisher": "personal-codex-local",
-  "description": "A thin VS Code client for the Personal Codeme local FastAPI backend.",
+  "description": "A local-first Copilot-style coding assistant powered by Ollama.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -27,15 +27,16 @@
   "main": "./dist/extension.js",
   "scripts": {
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --sourcemap",
-    "build:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --sourcemap",
+    "build:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --sourcemap --minify",
     "build": "npm run build:extension && npm run build:webview",
     "watch:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --watch",
     "watch:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --watch",
     "watch": "npm-run-all --parallel watch:extension watch:webview",
-    "lint": "eslint 'src/**/*.ts'",
+    "lint": "npm run typecheck",
+    "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.1.0.vsix"
+    "package": "vsce package --out personal-codeme-0.2.0.vsix"
   },
   "files": [
     "dist/**",
@@ -61,22 +62,22 @@
   },
   "contributes": {
     "configuration": {
-      "title": "Personal Codex",
+      "title": "Personal Codeme",
       "properties": {
         "personalCodex.backendUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8000",
-          "description": "Local Personal Codex backend URL."
+          "description": "Local Personal Codeme backend URL."
         },
         "personalCodex.defaultModel": {
           "type": "string",
           "default": "qwen2.5-coder:7b",
-          "description": "Default model to request from the Personal Codex backend."
+          "description": "Default Ollama model requested by Personal Codeme."
         },
         "personalCodex.autoRegisterWorkspace": {
           "type": "boolean",
           "default": false,
-          "description": "Ask before registering an opened workspace folder with Personal Codex backend."
+          "description": "Ask before registering an opened workspace folder with Personal Codeme."
         },
         "personalCodex.requireWriteApproval": {
           "type": "boolean",
@@ -86,7 +87,7 @@
         "personalCodex.showNotifications": {
           "type": "boolean",
           "default": true,
-          "description": "Show Personal Codex notifications for backend status and workspace actions."
+          "description": "Show Personal Codeme notifications for backend status and workspace actions."
         }
       }
     },
@@ -103,7 +104,8 @@
       "personalCodeme": [
         {
           "id": "personalCodemeSidebar",
-          "name": "Personal Codeme"
+          "name": "Personal Codeme",
+          "type": "webview"
         }
       ]
     },

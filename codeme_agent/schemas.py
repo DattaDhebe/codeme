@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 
 class GenerateRequest(BaseModel):
@@ -28,14 +28,12 @@ class ConversationUpdate(ConversationBase):
 
 
 class ConversationSummary(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     title: str
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
 
 class WorkspaceCreate(BaseModel):
     path: str | None = Field(
@@ -46,15 +44,13 @@ class WorkspaceCreate(BaseModel):
 
 
 class WorkspaceRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     display_name: str
     root_path: str
     created_at: datetime
     updated_at: datetime
-
-    class Config:
-        orm_mode = True
-
 
 class PageRequest(BaseModel):
     page: int = Field(1, ge=1)
@@ -128,19 +124,17 @@ class AgentInstructionsResponse(BaseModel):
 
 
 class MessageCreate(BaseModel):
-    role: str = Field(..., regex="^(user|assistant|system|tool)$")
+    role: str = Field(..., pattern="^(user|assistant|system|tool)$")
     content: str = Field(..., min_length=1)
 
 
 class MessageRead(BaseModel):
+    model_config = ConfigDict(from_attributes=True)
+
     id: int
     role: str
     content: str
     created_at: datetime
-
-    class Config:
-        orm_mode = True
-
 
 class ChatRequest(BaseModel):
     model: str | None = None

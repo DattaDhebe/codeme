@@ -13,6 +13,11 @@ export interface GitDiffContext {
   changes: string;
 }
 
+interface GitRepository {
+  state: { HEAD?: { name?: string } };
+  diff(cached?: boolean): Promise<string>;
+}
+
 export class ContextReferenceResolver {
   public async resolveSelection(editor: vscode.TextEditor): Promise<SelectionContext> {
     const document = editor.document;
@@ -47,7 +52,7 @@ export class ContextReferenceResolver {
     return { branch, changes };
   }
 
-  private async getGitRepository(workspaceFolder: vscode.WorkspaceFolder): Promise<vscode.SourceControlResourceGroup | undefined> {
+  private async getGitRepository(workspaceFolder: vscode.WorkspaceFolder): Promise<GitRepository | undefined> {
     const gitExtension = vscode.extensions.getExtension('vscode.git')?.exports;
     if (!gitExtension) {
       return undefined;
@@ -57,8 +62,8 @@ export class ContextReferenceResolver {
     return repo;
   }
 
-  private async getDiffFromRepository(repo: any): Promise<string> {
-    const diffs = await Promise.all(repo.state.workingTreeChanges.map(async (change: any) => change.uri.fsPath));
-    return diffs.join('\n');
+  private async getDiffFromRepository(repo: GitRepository): Promise<string> {
+    const [workingTree, staged] = await Promise.all([repo.diff(false), repo.diff(true)]);
+    return [workingTree, staged].filter(Boolean).join('\n\n');
   }
 }
