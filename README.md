@@ -13,6 +13,13 @@ Personal Codex is a local-first coding assistant with a ChatGPT-style interface.
 - Read-only local workspace search with ripgrep integration
 - Git status and diff support for registered repositories
 
+## Agent Runtime
+
+- Native Ollama tool loop with compatibility handling for Qwen 2.5 Coder tool JSON
+- Automatic, grounded whole-project analysis across backend, frontend, and VS Code extension manifests and entry points
+- Read-only workspace tools run automatically; file writes and terminal commands remain approval-gated in VS Code
+- Copilot-style Ask/Agent modes, live tool activity, conversation history, and actionable change proposals
+
 ## Setup
 
 1. Create and activate a Python environment:

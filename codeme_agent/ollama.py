@@ -44,6 +44,37 @@ class OllamaClient:
         except httpx.RequestError as exc:
             raise OllamaError(f"Ollama request failed: {exc}") from exc
 
+    def chat_with_tools(
+        self,
+        messages: list[dict],
+        tools: list[dict],
+        model: str | None = None,
+        timeout: int = 180,
+    ) -> dict:
+        """Run one non-streaming native Ollama tool-calling turn."""
+        model = model or self.default_model
+        url = f"{self.base_url.rstrip('/')}/api/chat"
+        payload = {
+            "model": model,
+            "messages": messages,
+            "stream": False,
+        }
+        if tools:
+            payload["tools"] = tools
+        try:
+            response = httpx.post(url, json=payload, timeout=timeout)
+            if response.status_code != 200:
+                raise OllamaError(f"Ollama returned HTTP {response.status_code}: {response.text[:500]}")
+            decoded = response.json()
+            if decoded.get("error"):
+                raise OllamaError(str(decoded["error"]))
+            message = decoded.get("message")
+            if not isinstance(message, dict):
+                raise OllamaError("Ollama returned a response without an assistant message")
+            return message
+        except (httpx.RequestError, ValueError) as exc:
+            raise OllamaError(f"Ollama request failed: {exc}") from exc
+
     def list_models(self, timeout: int = 5) -> list[str]:
         url = f"{self.base_url.rstrip('/')}/api/tags"
         try:

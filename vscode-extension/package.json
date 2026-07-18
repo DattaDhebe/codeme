@@ -5,7 +5,7 @@
   "description": "A local-first Copilot-style coding assistant powered by Ollama.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -36,7 +36,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.2.0.vsix"
+    "package": "vsce package --out personal-codeme-0.3.0.vsix"
   },
   "files": [
     "dist/**",

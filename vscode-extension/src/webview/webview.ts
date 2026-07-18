@@ -33,6 +33,23 @@ interface ChatMessage {
   content: string;
   attachments?: Attachment[];
   error?: boolean;
+  activities?: AgentActivity[];
+  proposals?: AgentProposal[];
+}
+
+interface AgentActivity {
+  name: string;
+  summary: string;
+  status: 'running' | 'complete';
+}
+
+interface AgentProposal {
+  kind: 'file_change' | 'command';
+  path?: string;
+  content?: string;
+  command?: string;
+  explanation: string;
+  applied?: boolean;
 }
 
 interface Conversation {
@@ -59,6 +76,8 @@ interface UiState {
   historyOpen: boolean;
   contextMenuOpen: boolean;
   conversationSearch: string;
+  mode: 'ask' | 'agent';
+  workspaceRegistered: boolean;
 }
 
 const vscode = acquireVsCodeApi();
@@ -81,6 +100,8 @@ const state: UiState = {
   historyOpen: false,
   contextMenuOpen: false,
   conversationSearch: '',
+  mode: persisted.mode || 'agent',
+  workspaceRegistered: false,
 };
 
 let toastTimer: number | undefined;
@@ -106,6 +127,8 @@ const icons: Record<string, string> = {
   pencil: '<path d="M12 20h9M16.5 3.5a2.1 2.1 0 0 1 3 3L8 18l-4 1 1-4Z"/>',
   external: '<path d="M14 3h7v7M10 14 21 3"/><path d="M21 14v5a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h5"/>',
   apply: '<path d="M5 12h14M13 6l6 6-6 6"/>',
+  terminal: '<path d="m4 17 6-6-6-6M12 19h8"/>',
+  check: '<path d="m5 12 4 4L19 6"/>',
 };
 
 function icon(name: string, size = 16): string {
@@ -245,14 +268,41 @@ function renderMessage(message: ChatMessage, index: number): string {
     return `<div class="system-message">${icon('paperclip', 13)} ${renderMarkdown(message.content)}</div>`;
   }
   const streaming = isLast && state.streaming;
+  const activities = message.activities?.length ? `<div class="agent-activity">
+    <div class="agent-activity-title">${icon('spark', 13)} Working in ${escapeHtml(state.workspace || 'workspace')}</div>
+    ${message.activities.map((item) => `<div class="agent-step ${item.status}"><span>${item.status === 'complete' ? icon('check', 12) : '<i></i>'}</span><strong>${escapeHtml(toolLabel(item.name))}</strong><small>${escapeHtml(item.summary)}</small></div>`).join('')}
+  </div>` : '';
+  const proposals = message.proposals?.map((proposal, proposalIndex) => renderProposal(proposal, index, proposalIndex)).join('') || '';
   return `<article class="message-row assistant-row ${message.error ? 'has-error' : ''}" data-message-index="${index}">
     <div class="assistant-avatar">${icon('spark', 15)}</div>
     <div class="assistant-content">
       <div class="assistant-label">CODEME <span>${escapeHtml(state.selectedModel)}</span></div>
+      ${activities}
       <div class="markdown-body">${renderMarkdown(message.content)}${streaming ? '<span class="stream-cursor"></span>' : ''}</div>
+      ${proposals ? `<div class="proposal-list">${proposals}</div>` : ''}
       ${!streaming && message.content ? `<div class="message-actions"><button data-action="copyMessage" data-index="${index}" title="Copy response">${icon('copy', 13)} Copy</button><button data-action="reusePrompt" data-index="${index}" title="Reuse previous prompt">${icon('refresh', 13)} Retry</button></div>` : ''}
     </div>
   </article>`;
+}
+
+function renderProposal(proposal: AgentProposal, messageIndex: number, proposalIndex: number): string {
+  const isFile = proposal.kind === 'file_change';
+  const title = isFile ? proposal.path || 'File change' : proposal.command || 'Terminal command';
+  return `<section class="proposal-card ${proposal.applied ? 'applied' : ''}">
+    <div class="proposal-icon">${icon(isFile ? 'file' : 'terminal', 15)}</div>
+    <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation)}</span></div>
+    <button data-action="${isFile ? 'applyProposal' : 'runProposal'}" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : isFile ? 'Apply' : 'Run'}</button>
+  </section>`;
+}
+
+function toolLabel(name: string): string {
+  const labels: Record<string, string> = {
+    status: 'Planning', list_files: 'Listed files', read_file: 'Read file', search_code: 'Searched code',
+    project_snapshot: 'Inspected project architecture',
+    git_status: 'Checked Git status', git_diff: 'Read Git diff', read_instructions: 'Read instructions',
+    propose_file_change: 'Prepared file change', propose_command: 'Prepared command',
+  };
+  return labels[name] || name.replace(/_/g, ' ');
 }
 
 function renderComposer(): string {
@@ -267,6 +317,11 @@ function renderComposer(): string {
     </div>` : '';
   return `
     <footer class="composer-wrap">
+      <div class="mode-switch" role="tablist" aria-label="Chat mode">
+        <button data-action="setMode" data-mode="ask" class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
+        <button data-action="setMode" data-mode="agent" class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
+        <span>${state.mode === 'agent' ? (state.workspaceRegistered ? 'Can inspect and propose changes' : 'Needs an open workspace') : 'Chat with attached context'}</span>
+      </div>
       ${attachments ? `<div class="attachment-list">${attachments}</div>` : ''}
       <div class="composer ${state.streaming ? 'streaming' : ''}">
         <textarea id="prompt" rows="1" placeholder="Ask Codeme about your code…" ${state.streaming ? 'disabled' : ''}>${escapeHtml(state.composer)}</textarea>
@@ -355,6 +410,7 @@ function persistState(): void {
     models: state.models,
     workspace: state.workspace,
     rootPath: state.rootPath,
+    mode: state.mode,
   });
 }
 
@@ -417,6 +473,7 @@ function submitPrompt(): void {
       conversationId: state.currentConversationId,
       model: state.selectedModel,
       context: attachments,
+      mode: state.mode,
     },
   });
 }
@@ -493,6 +550,7 @@ if (app) {
     if (action === 'requestContext') vscode.postMessage({ command: 'requestContext', args: { kind: button.dataset.kind } });
     if (action === 'removeAttachment') { state.attachments.splice(Number(button.dataset.index), 1); render(); focusComposer(); }
     if (action === 'send') submitPrompt();
+    if (action === 'setMode') { state.mode = button.dataset.mode === 'ask' ? 'ask' : 'agent'; render(); focusComposer(); }
     if (action === 'stop') vscode.postMessage({ command: 'cancelStream' });
     if (action === 'quickPrompt') {
       state.composer = button.dataset.prompt || '';
@@ -538,6 +596,14 @@ if (app) {
         render();
         focusComposer();
       }
+    }
+    if (action === 'applyProposal' || action === 'runProposal') {
+      const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
+      if (!item) return;
+      vscode.postMessage({
+        command: action === 'applyProposal' ? 'applyFileChange' : 'runProposedCommand',
+        args: { path: item.path, content: item.content, command: item.command, explanation: item.explanation },
+      });
     }
   });
 
@@ -593,6 +659,7 @@ window.addEventListener('message', (event) => {
     case 'workspaceState':
       state.workspace = message.payload?.workspace || null;
       state.rootPath = message.payload?.rootPath || null;
+      state.workspaceRegistered = Boolean(message.payload?.registered);
       render();
       break;
     case 'conversationsUpdated':
@@ -642,6 +709,32 @@ window.addEventListener('message', (event) => {
       render();
       break;
     }
+    case 'agentEvent': {
+      const agentEvent = message.payload?.event;
+      let assistant = state.messages[state.messages.length - 1];
+      if (assistant?.role !== 'assistant') {
+        assistant = { role: 'assistant', content: '', activities: [], proposals: [] };
+        state.messages.push(assistant);
+      }
+      if (agentEvent?.type === 'status') {
+        assistant.activities ||= [];
+        assistant.activities.push({ name: 'status', summary: agentEvent.label || 'Inspecting workspace', status: 'running' });
+      } else if (agentEvent?.type === 'tool') {
+        assistant.activities ||= [];
+        const running = [...assistant.activities].reverse().find((item) => item.name === agentEvent.name && item.summary === agentEvent.summary && item.status === 'running');
+        if (agentEvent.status === 'complete' && running) running.status = 'complete';
+        else assistant.activities.push({ name: agentEvent.name, summary: agentEvent.summary, status: agentEvent.status });
+      } else if (agentEvent?.type === 'proposal') {
+        assistant.proposals ||= [];
+        assistant.proposals.push(agentEvent as AgentProposal);
+      } else if (agentEvent?.type === 'message') {
+        assistant.content = agentEvent.content || '';
+        assistant.activities?.forEach((item) => { item.status = 'complete'; });
+      }
+      state.streaming = true;
+      render();
+      break;
+    }
     case 'streamComplete':
       state.streaming = false;
       render();
@@ -663,8 +756,19 @@ window.addEventListener('message', (event) => {
       showToast(message.payload?.message || 'Operation failed');
       break;
     case 'workspaceRegistered':
+      state.workspaceRegistered = true;
       showToast('Workspace registered');
       break;
+    case 'proposalApplied': {
+      const kind = message.payload?.kind;
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.kind === kind && (item.path === message.payload?.path || item.command === message.payload?.command));
+        if (proposal) proposal.applied = true;
+      }
+      render();
+      showToast(kind === 'command' ? 'Command started in terminal' : 'File change applied');
+      break;
+    }
   }
 });
 

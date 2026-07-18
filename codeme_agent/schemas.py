@@ -141,6 +141,13 @@ class ChatRequest(BaseModel):
     messages: list[MessageCreate]
 
 
+class AgentRequest(BaseModel):
+    model: str | None = None
+    prompt: str = Field(..., min_length=1, max_length=100_000)
+    workspace_id: int
+    context: str | None = Field(None, max_length=200_000)
+
+
 class ChatResponseChunk(BaseModel):
     delta: str
     done: bool = False

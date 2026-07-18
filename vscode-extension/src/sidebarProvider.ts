@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { BackendClient } from './backendClient';
+import { AgentEvent, BackendClient } from './backendClient';
 import { ContextReferenceResolver } from './contextResolver';
 import { webviewHtml } from './webviewHtml';
 
@@ -14,12 +14,14 @@ interface ChatRequestArgs {
   conversationId?: number | null;
   model?: string;
   context?: Array<{ label: string; kind: string; content: string; language?: string }>;
+  mode?: 'ask' | 'agent';
 }
 
 export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private webviewReady = false;
   private pendingMessages: WebviewMessage[] = [];
+  private currentWorkspaceId?: number;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -143,6 +145,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       return;
     }
     const workspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+    this.currentWorkspaceId = workspaceId;
     await this.send({ command: 'workspaceRegistered', payload: { workspaceId, rootPath: folder.uri.fsPath } });
     await this.refreshWorkspaceState();
   }
@@ -176,6 +179,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         workspace: folder?.name ?? null,
         rootPath: folder?.uri.fsPath ?? null,
         folders: vscode.workspace.workspaceFolders?.length ?? 0,
+        workspaceId: this.currentWorkspaceId ?? null,
+        registered: Boolean(this.currentWorkspaceId),
       },
     });
   }
@@ -192,13 +197,24 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async initialize(conversationId?: number | null): Promise<void> {
-    await Promise.all([
-      this.refreshBackendStatus(false),
-      this.refreshWorkspaceState(),
-      this.refreshConversations(),
-    ]);
+    await this.refreshBackendStatus(false);
+    await this.autoRegisterActiveWorkspace();
+    await Promise.all([this.refreshWorkspaceState(), this.refreshConversations()]);
     if (conversationId) {
       await this.loadConversation(conversationId);
+    }
+  }
+
+  private async autoRegisterActiveWorkspace(): Promise<void> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) {
+      this.currentWorkspaceId = undefined;
+      return;
+    }
+    try {
+      this.currentWorkspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+    } catch {
+      this.currentWorkspaceId = undefined;
     }
   }
 
@@ -327,6 +343,16 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
           await this.applyCodeToEditor(message.args.text);
         }
         break;
+      case 'applyFileChange':
+        if (typeof message.args?.path === 'string' && typeof message.args?.content === 'string') {
+          await this.applyFileChange(message.args.path, message.args.content, String(message.args?.explanation || ''));
+        }
+        break;
+      case 'runProposedCommand':
+        if (typeof message.args?.command === 'string') {
+          await this.runProposedCommand(message.args.command, String(message.args?.explanation || ''));
+        }
+        break;
       case 'openSettings':
         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:personal-codex-local.personal-codeme');
         break;
@@ -420,6 +446,32 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       .join('\n\n');
     const content = contextText ? `${prompt}\n\n${contextText}` : prompt;
     await this.send({ command: 'streamStarted', payload: { conversationId } });
+    if (args.mode === 'agent') {
+      if (!this.currentWorkspaceId) {
+        await this.autoRegisterActiveWorkspace();
+      }
+      if (!this.currentWorkspaceId) {
+        await this.send({ command: 'streamError', payload: { conversationId, message: 'Open a workspace and start the backend to use Agent mode.' } });
+        return;
+      }
+      await this.backend.streamAgent(
+        conversationId,
+        prompt,
+        this.currentWorkspaceId,
+        contextText || undefined,
+        args.model,
+        (event: AgentEvent) => void this.send({ command: 'agentEvent', payload: { conversationId, event } }),
+        () => {
+          void this.send({ command: 'streamComplete', payload: { conversationId } });
+          void this.refreshConversations();
+        },
+        (error) => {
+          void this.send({ command: 'streamError', payload: { conversationId, message: error.message } });
+          void this.refreshConversations();
+        }
+      );
+      return;
+    }
     await this.backend.streamChat(
       conversationId,
       [{ role: 'user', content }],
@@ -480,5 +532,55 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     if (!applied) {
       void vscode.window.showErrorMessage('Unable to apply the generated code.');
     }
+  }
+
+  private resolveWorkspaceFile(relativePath: string): vscode.Uri | undefined {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder || !relativePath || path.isAbsolute(relativePath) || relativePath.includes('\0')) return undefined;
+    const root = path.resolve(folder.uri.fsPath);
+    const target = path.resolve(root, relativePath);
+    const relative = path.relative(root, target);
+    if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) return undefined;
+    return vscode.Uri.file(target);
+  }
+
+  private async applyFileChange(relativePath: string, content: string, explanation: string): Promise<void> {
+    const target = this.resolveWorkspaceFile(relativePath);
+    if (!target) {
+      void vscode.window.showErrorMessage('The proposed file path is outside the active workspace.');
+      return;
+    }
+    const requireApproval = vscode.workspace.getConfiguration('personalCodex').get('requireWriteApproval', true);
+    if (requireApproval) {
+      const choice = await vscode.window.showWarningMessage(
+        `Apply agent change to ${relativePath}?${explanation ? `\n${explanation}` : ''}`,
+        { modal: true },
+        'Apply change'
+      );
+      if (choice !== 'Apply change') return;
+    }
+    await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(target.fsPath)));
+    await vscode.workspace.fs.writeFile(target, Buffer.from(content, 'utf8'));
+    const document = await vscode.workspace.openTextDocument(target);
+    await vscode.window.showTextDocument(document, { preview: false });
+    await this.send({ command: 'proposalApplied', payload: { kind: 'file_change', path: relativePath } });
+  }
+
+  private async runProposedCommand(command: string, explanation: string): Promise<void> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder || !command.trim() || /[\r\n]/.test(command) || command.length > 2_000) {
+      void vscode.window.showErrorMessage('The proposed terminal command is invalid.');
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      `Run this command in ${folder.name}?\n\n${command}${explanation ? `\n\n${explanation}` : ''}`,
+      { modal: true },
+      'Run command'
+    );
+    if (choice !== 'Run command') return;
+    const terminal = vscode.window.createTerminal({ name: 'Codeme Agent', cwd: folder.uri });
+    terminal.show(true);
+    terminal.sendText(command, true);
+    await this.send({ command: 'proposalApplied', payload: { kind: 'command', command } });
   }
 }

@@ -29,6 +29,13 @@ interface WorkspaceResponse {
   id: number;
 }
 
+export type AgentEvent =
+  | { type: 'status'; label: string; detail?: string }
+  | { type: 'tool'; name: string; summary: string; status: 'running' | 'complete' }
+  | { type: 'proposal'; kind: 'file_change'; path: string; content: string; explanation: string }
+  | { type: 'proposal'; kind: 'command'; command: string; explanation: string }
+  | { type: 'message'; content: string };
+
 const LOCALHOST_URLS = ['http://127.0.0.1', 'http://localhost'];
 
 export class BackendClient {
@@ -172,6 +179,68 @@ export class BackendClient {
       } else {
         onError(error as Error);
       }
+    } finally {
+      this.controller = undefined;
+    }
+  }
+
+  public async streamAgent(
+    conversationId: number,
+    prompt: string,
+    workspaceId: number,
+    context: string | undefined,
+    model: string | undefined,
+    onEvent: (event: AgentEvent) => void,
+    onComplete: () => void,
+    onError: (error: Error) => void
+  ): Promise<void> {
+    const url = this.getUrl(`/conversations/${conversationId}/agent`);
+    this.controller = new AbortController();
+    try {
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify({ model: model || this.configuredModel, prompt, workspace_id: workspaceId, context }),
+        signal: this.controller.signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error('The backend response stream is unavailable.');
+      }
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let completed = false;
+      while (!completed) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split('\n\n');
+        buffer = blocks.pop() ?? '';
+        for (const block of blocks) {
+          let eventName = 'message';
+          let data = '';
+          for (const line of block.split('\n')) {
+            if (line.startsWith('event:')) eventName = line.slice(6).trim();
+            if (line.startsWith('data:')) data += line.slice(5).trim();
+          }
+          if (eventName === 'done' || data === '[DONE]') {
+            completed = true;
+            break;
+          }
+          if (!data) continue;
+          const decoded = JSON.parse(data) as AgentEvent | { error?: string };
+          if (eventName === 'error' || 'error' in decoded) {
+            throw new Error('error' in decoded ? decoded.error : 'Agent request failed.');
+          }
+          onEvent(decoded as AgentEvent);
+        }
+      }
+      onComplete();
+    } catch (error: unknown) {
+      onError((error as Error)?.name === 'AbortError' ? new Error('Generation stopped.') : error as Error);
     } finally {
       this.controller = undefined;
     }

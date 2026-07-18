@@ -261,16 +261,25 @@ def get_git_status(root: Path) -> dict:
 
 
 def get_git_diff(root: Path, path: str | None = None) -> dict:
+    status = get_git_status(root)
+    if not status["is_git"]:
+        return {"path": path, "diff": ""}
+
     if path is None:
-        return {"path": None, "diff": ""}
+        working = _git_command(root, ["diff", "--no-ext-diff", "--relative"])
+        staged = _git_command(root, ["diff", "--cached", "--no-ext-diff", "--relative"])
+        if working.returncode not in (0, 1) or staged.returncode not in (0, 1):
+            raise WorkspaceError("Git diff failed")
+        sections = []
+        if working.stdout:
+            sections.append("# Working tree\n" + working.stdout)
+        if staged.stdout:
+            sections.append("# Staged changes\n" + staged.stdout)
+        return {"path": None, "diff": "\n".join(sections)}
 
     target = canonicalize_workspace_path(root, path)
     if is_excluded_path(target, root):
         raise WorkspaceSecurityError("Requested file is excluded")
-
-    status = get_git_status(root)
-    if not status["is_git"]:
-        return {"path": str(target.relative_to(root).as_posix()), "diff": ""}
 
     rel_path = str(target.relative_to(root))
     diff_result = _git_command(root, ["diff", "--no-ext-diff", "--relative", "--", rel_path])

@@ -14,6 +14,10 @@ Personal Codeme is a local-first, Copilot-style coding assistant powered by Olla
 - Installed Ollama model selector and live backend/model status
 - Stop generation, retry prompts, and persistent sidebar state
 - Workspace registration and local repository context
+- Ask mode for focused chat with attached editor context
+- Agent mode with automatic repository listing, file reads, code search, Git inspection, and `AGENTS.md` support
+- Grounded whole-project analysis using README files, manifests, entry points, and component structure
+- File-change and terminal-command proposals with explicit VS Code approval before execution
 
 ## Setup
 
@@ -44,7 +48,7 @@ Personal Codeme is a local-first, Copilot-style coding assistant powered by Olla
    npm run package
    ```
 
-The package command generates `personal-codeme-0.2.0.vsix`.
+The package command generates `personal-codeme-0.3.0.vsix`.
 
 ## Configuration
 

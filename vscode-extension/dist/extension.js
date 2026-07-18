@@ -189,6 +189,7 @@ var PersonalCodexSidebarProvider = class {
       return;
     }
     const workspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+    this.currentWorkspaceId = workspaceId;
     await this.send({ command: "workspaceRegistered", payload: { workspaceId, rootPath: folder.uri.fsPath } });
     await this.refreshWorkspaceState();
   }
@@ -217,7 +218,9 @@ var PersonalCodexSidebarProvider = class {
       payload: {
         workspace: folder?.name ?? null,
         rootPath: folder?.uri.fsPath ?? null,
-        folders: vscode2.workspace.workspaceFolders?.length ?? 0
+        folders: vscode2.workspace.workspaceFolders?.length ?? 0,
+        workspaceId: this.currentWorkspaceId ?? null,
+        registered: Boolean(this.currentWorkspaceId)
       }
     });
   }
@@ -231,13 +234,23 @@ var PersonalCodexSidebarProvider = class {
     return vscode2.workspace.workspaceFolders?.[0];
   }
   async initialize(conversationId) {
-    await Promise.all([
-      this.refreshBackendStatus(false),
-      this.refreshWorkspaceState(),
-      this.refreshConversations()
-    ]);
+    await this.refreshBackendStatus(false);
+    await this.autoRegisterActiveWorkspace();
+    await Promise.all([this.refreshWorkspaceState(), this.refreshConversations()]);
     if (conversationId) {
       await this.loadConversation(conversationId);
+    }
+  }
+  async autoRegisterActiveWorkspace() {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) {
+      this.currentWorkspaceId = void 0;
+      return;
+    }
+    try {
+      this.currentWorkspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+    } catch {
+      this.currentWorkspaceId = void 0;
     }
   }
   async refreshBackendStatus(userTriggered) {
@@ -359,6 +372,16 @@ var PersonalCodexSidebarProvider = class {
           await this.applyCodeToEditor(message.args.text);
         }
         break;
+      case "applyFileChange":
+        if (typeof message.args?.path === "string" && typeof message.args?.content === "string") {
+          await this.applyFileChange(message.args.path, message.args.content, String(message.args?.explanation || ""));
+        }
+        break;
+      case "runProposedCommand":
+        if (typeof message.args?.command === "string") {
+          await this.runProposedCommand(message.args.command, String(message.args?.explanation || ""));
+        }
+        break;
       case "openSettings":
         await vscode2.commands.executeCommand("workbench.action.openSettings", "@ext:personal-codex-local.personal-codeme");
         break;
@@ -449,6 +472,32 @@ ${item.content}
 
 ${contextText}` : prompt;
     await this.send({ command: "streamStarted", payload: { conversationId } });
+    if (args.mode === "agent") {
+      if (!this.currentWorkspaceId) {
+        await this.autoRegisterActiveWorkspace();
+      }
+      if (!this.currentWorkspaceId) {
+        await this.send({ command: "streamError", payload: { conversationId, message: "Open a workspace and start the backend to use Agent mode." } });
+        return;
+      }
+      await this.backend.streamAgent(
+        conversationId,
+        prompt,
+        this.currentWorkspaceId,
+        contextText || void 0,
+        args.model,
+        (event) => void this.send({ command: "agentEvent", payload: { conversationId, event } }),
+        () => {
+          void this.send({ command: "streamComplete", payload: { conversationId } });
+          void this.refreshConversations();
+        },
+        (error) => {
+          void this.send({ command: "streamError", payload: { conversationId, message: error.message } });
+          void this.refreshConversations();
+        }
+      );
+      return;
+    }
     await this.backend.streamChat(
       conversationId,
       [{ role: "user", content }],
@@ -512,6 +561,62 @@ ${contextText}` : prompt;
     if (!applied) {
       void vscode2.window.showErrorMessage("Unable to apply the generated code.");
     }
+  }
+  resolveWorkspaceFile(relativePath) {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder || !relativePath || path.isAbsolute(relativePath) || relativePath.includes("\0"))
+      return void 0;
+    const root = path.resolve(folder.uri.fsPath);
+    const target = path.resolve(root, relativePath);
+    const relative2 = path.relative(root, target);
+    if (!relative2 || relative2.startsWith("..") || path.isAbsolute(relative2))
+      return void 0;
+    return vscode2.Uri.file(target);
+  }
+  async applyFileChange(relativePath, content, explanation) {
+    const target = this.resolveWorkspaceFile(relativePath);
+    if (!target) {
+      void vscode2.window.showErrorMessage("The proposed file path is outside the active workspace.");
+      return;
+    }
+    const requireApproval = vscode2.workspace.getConfiguration("personalCodex").get("requireWriteApproval", true);
+    if (requireApproval) {
+      const choice = await vscode2.window.showWarningMessage(
+        `Apply agent change to ${relativePath}?${explanation ? `
+${explanation}` : ""}`,
+        { modal: true },
+        "Apply change"
+      );
+      if (choice !== "Apply change")
+        return;
+    }
+    await vscode2.workspace.fs.createDirectory(vscode2.Uri.file(path.dirname(target.fsPath)));
+    await vscode2.workspace.fs.writeFile(target, Buffer.from(content, "utf8"));
+    const document = await vscode2.workspace.openTextDocument(target);
+    await vscode2.window.showTextDocument(document, { preview: false });
+    await this.send({ command: "proposalApplied", payload: { kind: "file_change", path: relativePath } });
+  }
+  async runProposedCommand(command, explanation) {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder || !command.trim() || /[\r\n]/.test(command) || command.length > 2e3) {
+      void vscode2.window.showErrorMessage("The proposed terminal command is invalid.");
+      return;
+    }
+    const choice = await vscode2.window.showWarningMessage(
+      `Run this command in ${folder.name}?
+
+${command}${explanation ? `
+
+${explanation}` : ""}`,
+      { modal: true },
+      "Run command"
+    );
+    if (choice !== "Run command")
+      return;
+    const terminal = vscode2.window.createTerminal({ name: "Codeme Agent", cwd: folder.uri });
+    terminal.show(true);
+    terminal.sendText(command, true);
+    await this.send({ command: "proposalApplied", payload: { kind: "command", command } });
   }
 };
 
@@ -641,6 +746,62 @@ var BackendClient = class {
       this.controller = void 0;
     }
   }
+  async streamAgent(conversationId, prompt, workspaceId, context, model, onEvent, onComplete, onError) {
+    const url = this.getUrl(`/conversations/${conversationId}/agent`);
+    this.controller = new AbortController();
+    try {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+        body: JSON.stringify({ model: model || this.configuredModel, prompt, workspace_id: workspaceId, context }),
+        signal: this.controller.signal
+      });
+      if (!response.ok) {
+        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
+      }
+      const reader = response.body?.getReader();
+      if (!reader) {
+        throw new Error("The backend response stream is unavailable.");
+      }
+      const decoder = new TextDecoder();
+      let buffer = "";
+      let completed = false;
+      while (!completed) {
+        const { done, value } = await reader.read();
+        if (done)
+          break;
+        buffer += decoder.decode(value, { stream: true });
+        const blocks = buffer.split("\n\n");
+        buffer = blocks.pop() ?? "";
+        for (const block of blocks) {
+          let eventName = "message";
+          let data = "";
+          for (const line of block.split("\n")) {
+            if (line.startsWith("event:"))
+              eventName = line.slice(6).trim();
+            if (line.startsWith("data:"))
+              data += line.slice(5).trim();
+          }
+          if (eventName === "done" || data === "[DONE]") {
+            completed = true;
+            break;
+          }
+          if (!data)
+            continue;
+          const decoded = JSON.parse(data);
+          if (eventName === "error" || "error" in decoded) {
+            throw new Error("error" in decoded ? decoded.error : "Agent request failed.");
+          }
+          onEvent(decoded);
+        }
+      }
+      onComplete();
+    } catch (error) {
+      onError(error?.name === "AbortError" ? new Error("Generation stopped.") : error);
+    } finally {
+      this.controller = void 0;
+    }
+  }
   cancel() {
     this.controller?.abort();
   }
@@ -666,7 +827,7 @@ var BackendClient = class {
         return await response.json();
       } catch (error) {
         if (count < retries && error.name !== "AbortError") {
-          await new Promise((resolve) => setTimeout(resolve, 200 * count));
+          await new Promise((resolve2) => setTimeout(resolve2, 200 * count));
           return attempt(count + 1);
         }
         throw error;

@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from codeme_agent import crud, ollama, schemas, workspace
+from codeme_agent import agent, crud, ollama, schemas, workspace
 from codeme_agent.db import get_db
 
 router = APIRouter(prefix="/api")
@@ -88,7 +88,7 @@ def get_git_status(workspace_id: int, db: Session = Depends(get_db)):
 
 
 @router.get("/workspaces/{workspace_id}/git/diff", response_model=schemas.GitDiffResponse)
-def get_git_diff(workspace_id: int, path: str = Query(...), db: Session = Depends(get_db)):
+def get_git_diff(workspace_id: int, path: str | None = Query(None), db: Session = Depends(get_db)):
     workspace_record = crud.get_workspace(db, workspace_id)
     if workspace_record is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
@@ -157,6 +157,37 @@ def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depen
                     yield f"data: {json.dumps(chunk)}\n\n"
             yield "event: done\ndata: [DONE]\n\n"
         except ollama.OllamaError as exc:
+            error = json.dumps({"error": str(exc)})
+            yield f"event: error\ndata: {error}\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/conversations/{conversation_id}/agent")
+def run_agent(conversation_id: int, request: schemas.AgentRequest, db: Session = Depends(get_db)):
+    conversation = crud.get_conversation(db, conversation_id)
+    if conversation is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    workspace_record = crud.get_workspace(db, request.workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+
+    history = crud.get_conversation_messages_for_model(db, conversation_id)
+    crud.add_message(db, conversation_id, role="user", content=request.prompt)
+    runtime = agent.WorkspaceAgent(Path(workspace_record.root_path))
+
+    def event_stream():
+        final_content = ""
+        try:
+            for event in runtime.run(request.prompt, history, model=request.model, context=request.context):
+                if event.get("type") == "message":
+                    final_content = str(event.get("content", ""))
+                event_name = str(event.get("type", "agent"))
+                yield f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
+            if final_content:
+                crud.add_message(db, conversation_id, role="assistant", content=final_content)
+            yield "event: done\ndata: [DONE]\n\n"
+        except (ollama.OllamaError, workspace.WorkspaceError) as exc:
             error = json.dumps({"error": str(exc)})
             yield f"event: error\ndata: {error}\n\n"
 
