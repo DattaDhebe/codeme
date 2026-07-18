@@ -20,7 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(command, callback));
   };
 
-  registerCommand('personalCodex.openChat', async () => sidebarProvider.reveal());
+  registerCommand('personalCodeMe.openChat', async () => sidebarProvider.reveal());
   registerCommand('personalCodex.newChat', async () => sidebarProvider.createNewChat());
   registerCommand('personalCodex.explainSelection', async () => sidebarProvider.handleSelectionCommand('explain'));
   registerCommand('personalCodex.fixSelection', async () => sidebarProvider.handleSelectionCommand('fix'));

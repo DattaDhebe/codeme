@@ -53,7 +53,10 @@ var PersonalCodexSidebarProvider = class {
     webviewView.webview.onDidReceiveMessage((data) => this.handleMessage(data));
     this.initialize();
   }
-  reveal() {
+  async reveal() {
+    if (!this.view) {
+      await vscode.commands.executeCommand("workbench.view.extension.personalCodex");
+    }
     this.view?.show?.(true);
   }
   async createNewChat() {
@@ -377,7 +380,7 @@ function activate(context) {
   const registerCommand = (command, callback) => {
     context.subscriptions.push(vscode4.commands.registerCommand(command, callback));
   };
-  registerCommand("personalCodex.openChat", async () => sidebarProvider.reveal());
+  registerCommand("personalCodeMe.openChat", async () => sidebarProvider.reveal());
   registerCommand("personalCodex.newChat", async () => sidebarProvider.createNewChat());
   registerCommand("personalCodex.explainSelection", async () => sidebarProvider.handleSelectionCommand("explain"));
   registerCommand("personalCodex.fixSelection", async () => sidebarProvider.handleSelectionCommand("fix"));

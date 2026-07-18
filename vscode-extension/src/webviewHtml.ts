@@ -12,7 +12,7 @@ export function webviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${styleUri}" rel="stylesheet" />
-  <title>Personal Codex</title>
+  <title>Personal Codeme</title>
 </head>
 <body>
   <div id="app"></div>

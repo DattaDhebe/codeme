@@ -4018,7 +4018,7 @@ ${content}</tr>
     app.innerHTML = `
     <div class="pc-shell">
       <div class="pc-header">
-        <h1>Personal Codex</h1>
+        <h1>Personal Codeme</h1>
         <button id="health">Check backend</button>
       </div>
       <div class="pc-body">

@@ -1,8 +1,8 @@
 {
-  "name": "personal-codex",
-  "displayName": "Personal Codex",
+  "name": "personal-codeme",
+  "displayName": "Personal Codeme",
   "publisher": "personal-codex-local",
-  "description": "A thin VS Code client for the Personal Codex local FastAPI backend.",
+  "description": "A thin VS Code client for the Personal Codeme local FastAPI backend.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
   "version": "0.1.0",
@@ -11,7 +11,7 @@
   },
   "categories": ["Other"],
   "activationEvents": [
-    "onCommand:personalCodex.openChat",
+    "onCommand:personalCodeMe.openChat",
     "onCommand:personalCodex.newChat",
     "onCommand:personalCodex.explainSelection",
     "onCommand:personalCodex.fixSelection",
@@ -94,7 +94,7 @@
       "activitybar": [
         {
           "id": "personalCodex",
-          "title": "Personal Codex",
+          "title": "Personal Codeme",
           "icon": "media/personal-codex.svg"
         }
       ]
@@ -103,59 +103,59 @@
       "personalCodex": [
         {
           "id": "personalCodexSidebar",
-          "name": "Personal Codex"
+          "name": "Personal Codeme"
         }
       ]
     },
     "commands": [
       {
-        "command": "personalCodex.openChat",
-        "title": "Personal Codex: Open Chat"
+        "command": "personalCodeMe.openChat",
+        "title": "Personal Codeme: Open Chat"
       },
       {
         "command": "personalCodex.newChat",
-        "title": "Personal Codex: New Chat"
+        "title": "Personal Codeme: New Chat"
       },
       {
         "command": "personalCodex.explainSelection",
-        "title": "Personal Codex: Explain Selected Code"
+        "title": "Personal Codeme: Explain Selected Code"
       },
       {
         "command": "personalCodex.fixSelection",
-        "title": "Personal Codex: Fix Selected Code"
+        "title": "Personal Codeme: Fix Selected Code"
       },
       {
         "command": "personalCodex.refactorSelection",
-        "title": "Personal Codex: Refactor Selected Code"
+        "title": "Personal Codeme: Refactor Selected Code"
       },
       {
         "command": "personalCodex.generateTests",
-        "title": "Personal Codex: Generate Tests"
+        "title": "Personal Codeme: Generate Tests"
       },
       {
         "command": "personalCodex.askCurrentFile",
-        "title": "Personal Codex: Ask About Current File"
+        "title": "Personal Codeme: Ask About Current File"
       },
       {
         "command": "personalCodex.reviewChanges",
-        "title": "Personal Codex: Review Current Changes"
+        "title": "Personal Codeme: Review Current Changes"
       },
       {
         "command": "personalCodex.registerWorkspace",
-        "title": "Personal Codex: Register Workspace"
+        "title": "Personal Codeme: Register Workspace"
       },
       {
         "command": "personalCodex.checkBackend",
-        "title": "Personal Codex: Check Backend Connection"
+        "title": "Personal Codeme: Check Backend Connection"
       },
       {
         "command": "personalCodex.startBackend",
-        "title": "Personal Codex: Start Local Backend"
+        "title": "Personal Codeme: Start Local Backend"
       }
     ],
     "menus": {
       "commandPalette": [
-        { "command": "personalCodex.openChat" },
+        { "command": "personalCodeMe.openChat" },
         { "command": "personalCodex.newChat" },
         { "command": "personalCodex.explainSelection" },
         { "command": "personalCodex.fixSelection" },
