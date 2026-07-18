@@ -28,7 +28,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
 
   public async reveal(): Promise<void> {
     if (!this.view) {
-      await vscode.commands.executeCommand('workbench.view.extension.personalCodex');
+      await vscode.commands.executeCommand('workbench.view.extension.personalCodeme');
     }
     this.view?.show?.(true);
   }

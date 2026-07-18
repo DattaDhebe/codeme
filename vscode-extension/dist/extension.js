@@ -55,7 +55,7 @@ var PersonalCodexSidebarProvider = class {
   }
   async reveal() {
     if (!this.view) {
-      await vscode.commands.executeCommand("workbench.view.extension.personalCodex");
+      await vscode.commands.executeCommand("workbench.view.extension.personalCodeme");
     }
     this.view?.show?.(true);
   }
@@ -373,14 +373,14 @@ function activate(context) {
   const resolver = new ContextReferenceResolver();
   const sidebarProvider = new PersonalCodexSidebarProvider(context, backendClient, resolver);
   context.subscriptions.push(
-    vscode4.window.registerWebviewViewProvider("personalCodexSidebar", sidebarProvider, {
+    vscode4.window.registerWebviewViewProvider("personalCodemeSidebar", sidebarProvider, {
       webviewOptions: { enableScripts: true, localResourceRoots: [vscode4.Uri.joinPath(context.extensionUri, "media")] }
     })
   );
   const registerCommand = (command, callback) => {
     context.subscriptions.push(vscode4.commands.registerCommand(command, callback));
   };
-  registerCommand("personalCodeMe.openChat", async () => sidebarProvider.reveal());
+  registerCommand("personalCodeme.openChat", async () => sidebarProvider.reveal());
   registerCommand("personalCodex.newChat", async () => sidebarProvider.createNewChat());
   registerCommand("personalCodex.explainSelection", async () => sidebarProvider.handleSelectionCommand("explain"));
   registerCommand("personalCodex.fixSelection", async () => sidebarProvider.handleSelectionCommand("fix"));

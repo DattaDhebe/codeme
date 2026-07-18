@@ -11,7 +11,7 @@ export function activate(context: vscode.ExtensionContext): void {
 
   const sidebarProvider = new PersonalCodexSidebarProvider(context, backendClient, resolver);
   context.subscriptions.push(
-    vscode.window.registerWebviewViewProvider('personalCodexSidebar', sidebarProvider, {
+    vscode.window.registerWebviewViewProvider('personalCodemeSidebar', sidebarProvider, {
       webviewOptions: { enableScripts: true, localResourceRoots: [vscode.Uri.joinPath(context.extensionUri, 'media')] }
     })
   );
@@ -20,7 +20,7 @@ export function activate(context: vscode.ExtensionContext): void {
     context.subscriptions.push(vscode.commands.registerCommand(command, callback));
   };
 
-  registerCommand('personalCodeMe.openChat', async () => sidebarProvider.reveal());
+  registerCommand('personalCodeme.openChat', async () => sidebarProvider.reveal());
   registerCommand('personalCodex.newChat', async () => sidebarProvider.createNewChat());
   registerCommand('personalCodex.explainSelection', async () => sidebarProvider.handleSelectionCommand('explain'));
   registerCommand('personalCodex.fixSelection', async () => sidebarProvider.handleSelectionCommand('fix'));

@@ -11,7 +11,7 @@
   },
   "categories": ["Other"],
   "activationEvents": [
-    "onCommand:personalCodeMe.openChat",
+    "onCommand:personalCodeme.openChat",
     "onCommand:personalCodex.newChat",
     "onCommand:personalCodex.explainSelection",
     "onCommand:personalCodex.fixSelection",
@@ -22,7 +22,7 @@
     "onCommand:personalCodex.registerWorkspace",
     "onCommand:personalCodex.checkBackend",
     "onCommand:personalCodex.startBackend",
-    "onView:personalCodexSidebar"
+    "onView:personalCodemeSidebar"
   ],
   "main": "./dist/extension.js",
   "scripts": {
@@ -93,23 +93,23 @@
     "viewsContainers": {
       "activitybar": [
         {
-          "id": "personalCodex",
+          "id": "personalCodeme",
           "title": "Personal Codeme",
           "icon": "media/personal-codex.svg"
         }
       ]
     },
     "views": {
-      "personalCodex": [
+      "personalCodeme": [
         {
-          "id": "personalCodexSidebar",
+          "id": "personalCodemeSidebar",
           "name": "Personal Codeme"
         }
       ]
     },
     "commands": [
       {
-        "command": "personalCodeMe.openChat",
+        "command": "personalCodeme.openChat",
         "title": "Personal Codeme: Open Chat"
       },
       {
@@ -155,7 +155,7 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "personalCodeMe.openChat" },
+        { "command": "personalCodeme.openChat" },
         { "command": "personalCodex.newChat" },
         { "command": "personalCodex.explainSelection" },
         { "command": "personalCodex.fixSelection" },
