@@ -14,6 +14,7 @@ import 'prismjs/components/prism-rust';
 import 'prismjs/components/prism-sql';
 import 'prismjs/components/prism-markdown';
 import 'prismjs/components/prism-diff';
+import { inferCodeBlockTargets } from '../editTarget';
 
 declare const acquireVsCodeApi: any;
 
@@ -291,7 +292,11 @@ function renderProposal(proposal: AgentProposal, messageIndex: number, proposalI
   return `<section class="proposal-card ${proposal.applied ? 'applied' : ''}">
     <div class="proposal-icon">${icon(isFile ? 'file' : 'terminal', 15)}</div>
     <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation)}</span></div>
-    <button data-action="${isFile ? 'applyProposal' : 'runProposal'}" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : isFile ? 'Apply' : 'Run'}</button>
+    <div class="proposal-actions">
+      ${isFile ? `<button class="secondary" data-action="openProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Open proposed diff">${icon('external', 12)} Open</button>` : ''}
+      <button class="secondary" data-action="copyProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Copy ${isFile ? 'proposed file' : 'command'}">${icon('copy', 12)} Copy</button>
+      <button data-action="${isFile ? 'applyProposal' : 'runProposal'}" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : isFile ? 'Apply' : 'Run'}</button>
+    </div>
   </section>`;
 }
 
@@ -358,7 +363,10 @@ function renderMarkdown(text: string): string {
       element.setAttribute('rel', 'noreferrer noopener');
     }
   });
+  const codeTargets = inferCodeBlockTargets(text);
+  let codeBlockIndex = 0;
   template.content.querySelectorAll('pre code').forEach((code) => {
+    const targetPath = codeTargets[codeBlockIndex++];
     const languageClass = Array.from(code.classList).find((name) => name.startsWith('language-'));
     const language = languageClass?.slice('language-'.length) || 'code';
     const grammar = Prism.languages[language];
@@ -368,9 +376,10 @@ function renderMarkdown(text: string): string {
     }
     const pre = code.closest('pre');
     if (pre) {
+      if (targetPath) pre.dataset.targetPath = targetPath;
       const toolbar = document.createElement('div');
       toolbar.className = 'code-toolbar';
-      toolbar.innerHTML = `<span>${escapeHtml(language)}</span><div><button class="code-apply" title="Apply at selection or cursor">${icon('apply', 13)} Apply</button><button class="code-open" title="Open in editor">${icon('external', 13)} Open</button><button class="code-copy" title="Copy code">${icon('copy', 13)} Copy</button></div>`;
+      toolbar.innerHTML = `<span title="${escapeHtml(targetPath || language)}">${escapeHtml(targetPath || language)}</span><div><button class="code-apply" title="${targetPath ? `Replace ${escapeHtml(targetPath)}` : 'Choose where to apply'}">${icon('apply', 13)} Apply</button><button class="code-open" title="${targetPath ? 'Open proposed diff' : 'Open generated code'}">${icon('external', 13)} Open</button><button class="code-copy" title="Copy code">${icon('copy', 13)} Copy</button></div>`;
       pre.prepend(toolbar);
     }
   });
@@ -529,7 +538,7 @@ if (app) {
       const pre = (codeOpen || codeApply)?.closest('pre');
       const code = pre?.querySelector('code');
       const language = Array.from(code?.classList || []).find((name) => name.startsWith('language-'))?.slice(9) || 'plaintext';
-      vscode.postMessage({ command: codeApply ? 'applyCode' : 'openCode', args: { text: code?.textContent || '', language } });
+      vscode.postMessage({ command: codeApply ? 'applyCode' : 'openCode', args: { text: code?.textContent || '', language, path: pre?.dataset.targetPath } });
       if (codeApply) showToast('Review the apply confirmation in VS Code');
       return;
     }
@@ -597,9 +606,18 @@ if (app) {
         focusComposer();
       }
     }
-    if (action === 'applyProposal' || action === 'runProposal') {
+    if (action === 'applyProposal' || action === 'runProposal' || action === 'openProposal' || action === 'copyProposal') {
       const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
       if (!item) return;
+      if (action === 'copyProposal') {
+        vscode.postMessage({ command: 'copyText', args: { text: item.kind === 'file_change' ? item.content || '' : item.command || '' } });
+        showToast(item.kind === 'file_change' ? 'Proposed file copied' : 'Command copied');
+        return;
+      }
+      if (action === 'openProposal') {
+        vscode.postMessage({ command: 'previewFileChange', args: { path: item.path, content: item.content } });
+        return;
+      }
       vscode.postMessage({
         command: action === 'applyProposal' ? 'applyFileChange' : 'runProposedCommand',
         args: { path: item.path, content: item.content, command: item.command, explanation: item.explanation },

@@ -105,3 +105,43 @@ def test_project_analysis_uses_grounded_snapshot_without_exposing_tools(tmp_path
     assert client.calls[0]["tools"] == []
     combined_context = "\n".join(message["content"] for message in client.calls[0]["messages"])
     assert "# Sample API" in combined_context
+
+
+def test_agent_converts_labelled_whole_file_fence_to_safe_proposal(tmp_path: Path):
+    original = "# Python\n.venv/\n__pycache__/\n"
+    (tmp_path / ".gitignore").write_text(original, encoding="utf-8")
+    response = "My apologies. Here is the updated `.gitignore` file with only `.zip` added:\n\n```plaintext\n# Python\n.venv/\n__pycache__/\n*.zip\n```"
+    client = FakeToolClient([{"role": "assistant", "content": response}])
+
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Add .zip to .gitignore", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+
+    assert proposal["path"] == ".gitignore"
+    assert proposal["content"].endswith("*.zip\n")
+    assert (tmp_path / ".gitignore").read_text(encoding="utf-8") == original
+
+
+def test_agent_whole_file_fallback_supports_nested_source_files(tmp_path: Path):
+    source_dir = tmp_path / "src"
+    source_dir.mkdir()
+    original = "export const value = 1;\n"
+    (source_dir / "app.ts").write_text(original, encoding="utf-8")
+    response = "Here is the complete updated `src/app.ts` file:\n```typescript\nexport const value = 2;\n```"
+    client = FakeToolClient([{"role": "assistant", "content": response}])
+
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Update src/app.ts to use value 2", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+
+    assert proposal["path"] == "src/app.ts"
+    assert proposal["content"] == "export const value = 2;\n"
+    assert (source_dir / "app.ts").read_text(encoding="utf-8") == original
+
+
+def test_agent_does_not_treat_an_unlabelled_snippet_as_a_whole_file(tmp_path: Path):
+    (tmp_path / "app.py").write_text("def first():\n    return 1\n\ndef second():\n    return 2\n", encoding="utf-8")
+    response = "Change the function like this:\n```python\ndef first():\n    return 3\n```"
+    client = FakeToolClient([{"role": "assistant", "content": response}])
+
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Change first in app.py", []))
+
+    assert not any(event["type"] == "proposal" for event in events)

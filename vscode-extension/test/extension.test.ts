@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { BackendClient } from '../src/backendClient';
 import manifest from '../package.json';
+import { inferCodeBlockTargets, workspacePathScore } from '../src/editTarget';
 
 class FakeConfig {
   get<T>(section: string, defaultValue: T): T {
@@ -82,5 +83,16 @@ describe('Copilot-style webview', () => {
     ]) {
       expect(source).toContain(capability);
     }
+  });
+
+  it('targets named whole-file code blocks without mistaking an extension for a file', () => {
+    const markdown = 'Here is the updated `.gitignore` file with only the addition of `.zip`:\n\n```plaintext\nnode_modules/\n*.zip\n```';
+    expect(inferCodeBlockTargets(markdown)).toEqual(['.gitignore']);
+    expect(workspacePathScore('.zip')).toBe(0);
+  });
+
+  it('uses explicit code-fence filenames before nearby text', () => {
+    const markdown = 'Update `old.ts`:\n```typescript path=src/new.ts\nexport const value = 1;\n```';
+    expect(inferCodeBlockTargets(markdown)).toEqual(['src/new.ts']);
   });
 });

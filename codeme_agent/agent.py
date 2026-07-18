@@ -1,4 +1,5 @@
 import json
+import re
 from pathlib import Path
 from typing import Iterator
 
@@ -187,6 +188,73 @@ def _tools_for_prompt(prompt: str) -> list[dict]:
     return TOOLS[:6]
 
 
+def _path_score(raw_value: str) -> int:
+    value = raw_value.strip().strip("\"':;,").replace("\\", "/").removeprefix("./")
+    if not value or len(value) > 260 or re.search(r"\s|[*?<>|]", value):
+        return 0
+    if value.startswith(("/", "\\")) or re.match(r"^[a-zA-Z]:", value) or ".." in value.split("/"):
+        return 0
+    basename = value.rsplit("/", 1)[-1].lower()
+    known = {".gitignore", ".gitattributes", ".editorconfig", ".npmrc", ".dockerignore", "package.json", "requirements.txt", "pyproject.toml", "dockerfile", "makefile"}
+    if basename in known:
+        return 100
+    if re.fullmatch(r"\.[a-z0-9]+", basename):
+        return 0
+    if re.fullmatch(r"[^./][^/]*\.[a-z0-9][a-z0-9._-]*", basename, re.IGNORECASE):
+        return 90 if "/" in value else 70
+    return 0
+
+
+def _best_path_candidate(text: str) -> str | None:
+    candidates = []
+    for match in re.finditer(r"`([^`\n]+)`", text):
+        value = match.group(1).strip().strip("\"':;,").replace("\\", "/").removeprefix("./")
+        score = _path_score(value)
+        if score:
+            candidates.append((score, match.start(), value))
+    candidates.sort(reverse=True)
+    return candidates[0][2] if candidates else None
+
+
+def _fallback_file_proposals(root: Path, prompt: str, response: str) -> list[dict]:
+    """Turn a small model's clearly labelled whole-file fence into an approval-gated proposal."""
+    proposals = []
+    previous_end = 0
+    fence_pattern = re.compile(r"```([^\n`]*)\r?\n([\s\S]*?)```", re.MULTILINE)
+    for match in fence_pattern.finditer(response):
+        info, content = match.group(1).strip(), match.group(2)
+        explicit_match = re.search(r"(?:path|filename|file)\s*=\s*[\"']?([^\s\"']+)", info, re.IGNORECASE)
+        explicit_path = explicit_match.group(1) if explicit_match else None
+        nearby = response[max(previous_end, match.start() - 1_200) : match.start()]
+        raw_path = explicit_path if explicit_path and _path_score(explicit_path) else _best_path_candidate(f"{prompt}\n{nearby}")
+        previous_end = match.end()
+        if not raw_path or not content:
+            continue
+        confidence_text = f"{prompt}\n{nearby}".lower()
+        labelled_whole_file = bool(re.search(r"\b(updated|complete|full|entire|replace|create|new)\b[\s\S]{0,80}\bfile\b|\bfile\b[\s\S]{0,80}\b(updated|complete|full|entire|replace|create|new)\b", confidence_text))
+        try:
+            relative_path = _safe_proposal_path(root, raw_path)
+            existing = workspace.read_file(root, relative_path)["content"]
+        except workspace.WorkspaceError:
+            existing = ""
+            try:
+                relative_path = _safe_proposal_path(root, raw_path)
+            except workspace.WorkspaceError:
+                continue
+        existing_lines = {line.strip() for line in existing.splitlines() if line.strip()}
+        proposed_lines = {line.strip() for line in content.splitlines() if line.strip()}
+        overlap = len(existing_lines & proposed_lines) / max(1, len(existing_lines))
+        if not explicit_path and not labelled_whole_file and overlap < 0.6:
+            continue
+        proposals.append({
+            "kind": "file_change",
+            "path": relative_path,
+            "content": content,
+            "explanation": f"Replace {relative_path} with the complete generated file (approval required).",
+        })
+    return proposals
+
+
 def _project_snapshot(root: Path) -> str:
     """Give smaller models enough grounded context to plan a whole-project answer."""
     root_entries, root_more = workspace.list_directory(root, None, 1, 100)
@@ -314,11 +382,16 @@ class WorkspaceAgent:
             return
         available_tools = _tools_for_prompt(prompt)
         available_tool_names = {item["function"]["name"] for item in available_tools}
+        proposal_count = 0
         for _turn in range(MAX_AGENT_TURNS):
             assistant = self.client.chat_with_tools(messages, available_tools, model=model)
             tool_calls = assistant.get("tool_calls") or _content_tool_calls(assistant, available_tools)
             if not tool_calls:
                 content = str(assistant.get("content") or "I finished inspecting the workspace.")
+                if "propose_file_change" in available_tool_names and proposal_count == 0:
+                    for proposal in _fallback_file_proposals(self.root, prompt, content):
+                        proposal_count += 1
+                        yield {"type": "proposal", **proposal}
                 yield {"type": "message", "content": content}
                 return
 
@@ -343,6 +416,7 @@ class WorkspaceAgent:
                 except workspace.WorkspaceError as exc:
                     result, proposal = {"error": str(exc)}, None
                 if proposal:
+                    proposal_count += 1
                     yield {"type": "proposal", **proposal}
                 messages.append({"role": "tool", "content": json.dumps(result, default=str), "tool_name": name})
                 yield {"type": "tool", "name": name, "summary": str(summary)[:200], "status": "complete"}

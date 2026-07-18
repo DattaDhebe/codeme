@@ -78,6 +78,10 @@ var PersonalCodexSidebarProvider = class {
     this.resolver = resolver;
     this.webviewReady = false;
     this.pendingMessages = [];
+    this.proposedDocuments = /* @__PURE__ */ new Map();
+    this.context.subscriptions.push(vscode2.workspace.registerTextDocumentContentProvider("codeme-proposed", {
+      provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || ""
+    }));
   }
   resolveWebviewView(webviewView) {
     this.view = webviewView;
@@ -360,21 +364,23 @@ var PersonalCodexSidebarProvider = class {
         break;
       case "openCode":
         if (typeof message.args?.text === "string") {
-          const document = await vscode2.workspace.openTextDocument({
-            content: message.args.text,
-            language: this.normalizeLanguage(typeof message.args?.language === "string" ? message.args.language : void 0)
-          });
-          await vscode2.window.showTextDocument(document, { preview: true });
+          const targetPath = typeof message.args?.path === "string" ? message.args.path : void 0;
+          await this.openGeneratedCode(message.args.text, targetPath, typeof message.args?.language === "string" ? message.args.language : void 0);
         }
         break;
       case "applyCode":
         if (typeof message.args?.text === "string") {
-          await this.applyCodeToEditor(message.args.text);
+          await this.applyCodeToEditor(message.args.text, typeof message.args?.path === "string" ? message.args.path : void 0);
         }
         break;
       case "applyFileChange":
         if (typeof message.args?.path === "string" && typeof message.args?.content === "string") {
           await this.applyFileChange(message.args.path, message.args.content, String(message.args?.explanation || ""));
+        }
+        break;
+      case "previewFileChange":
+        if (typeof message.args?.path === "string" && typeof message.args?.content === "string") {
+          await this.previewFileChange(message.args.path, message.args.content);
         }
         break;
       case "runProposedCommand":
@@ -532,27 +538,48 @@ ${contextText}` : prompt;
     };
     return aliases[language || ""] || language || "plaintext";
   }
-  async applyCodeToEditor(code) {
+  async openGeneratedCode(code, relativePath, language) {
+    if (relativePath && this.resolveWorkspaceFile(relativePath)) {
+      await this.previewFileChange(relativePath, code);
+      return;
+    }
+    const document = await vscode2.workspace.openTextDocument({ content: code, language: this.normalizeLanguage(language) });
+    await vscode2.window.showTextDocument(document, { preview: true });
+  }
+  async applyCodeToEditor(code, relativePath) {
+    if (relativePath && this.resolveWorkspaceFile(relativePath)) {
+      await this.applyFileChange(relativePath, code, `Replace the complete contents of ${relativePath}`);
+      return;
+    }
     const editor = vscode2.window.activeTextEditor;
     if (!editor) {
       const document = await vscode2.workspace.openTextDocument({ content: code });
       await vscode2.window.showTextDocument(document, { preview: true });
       return;
     }
-    const requireApproval = vscode2.workspace.getConfiguration("personalCodex").get("requireWriteApproval", true);
-    if (requireApproval) {
-      const target = editor.selection.isEmpty ? "insert at the cursor" : "replace the selected code";
+    let replaceWholeDocument = false;
+    if (editor.selection.isEmpty) {
       const choice = await vscode2.window.showWarningMessage(
-        `Apply generated code and ${target}?`,
+        `No target filename was found. How should the generated code be applied to ${path.basename(editor.document.fileName)}?`,
         { modal: true },
-        "Apply"
+        "Replace entire file",
+        "Insert at cursor"
       );
-      if (choice !== "Apply") {
+      if (!choice)
         return;
+      replaceWholeDocument = choice === "Replace entire file";
+    } else {
+      const requireApproval = vscode2.workspace.getConfiguration("personalCodex").get("requireWriteApproval", true);
+      if (requireApproval) {
+        const choice = await vscode2.window.showWarningMessage("Replace the selected code with the generated block?", { modal: true }, "Apply");
+        if (choice !== "Apply")
+          return;
       }
     }
     const applied = await editor.edit((builder) => {
-      if (editor.selection.isEmpty) {
+      if (replaceWholeDocument) {
+        builder.replace(new vscode2.Range(editor.document.positionAt(0), editor.document.positionAt(editor.document.getText().length)), code);
+      } else if (editor.selection.isEmpty) {
         builder.insert(editor.selection.active, code);
       } else {
         builder.replace(editor.selection, code);
@@ -579,6 +606,7 @@ ${contextText}` : prompt;
       void vscode2.window.showErrorMessage("The proposed file path is outside the active workspace.");
       return;
     }
+    await this.previewFileChange(relativePath, content);
     const requireApproval = vscode2.workspace.getConfiguration("personalCodex").get("requireWriteApproval", true);
     if (requireApproval) {
       const choice = await vscode2.window.showWarningMessage(
@@ -590,11 +618,58 @@ ${explanation}` : ""}`,
       if (choice !== "Apply change")
         return;
     }
-    await vscode2.workspace.fs.createDirectory(vscode2.Uri.file(path.dirname(target.fsPath)));
-    await vscode2.workspace.fs.writeFile(target, Buffer.from(content, "utf8"));
-    const document = await vscode2.workspace.openTextDocument(target);
+    let document;
+    try {
+      document = await vscode2.workspace.openTextDocument(target);
+    } catch {
+      document = void 0;
+    }
+    const edit = new vscode2.WorkspaceEdit();
+    if (document) {
+      const current = document.getText();
+      if (current === content) {
+        void vscode2.window.showInformationMessage(`${relativePath} already matches the proposed content.`);
+        await this.send({ command: "proposalApplied", payload: { kind: "file_change", path: relativePath } });
+        return;
+      }
+      edit.replace(target, new vscode2.Range(document.positionAt(0), document.positionAt(current.length)), content);
+    } else {
+      edit.createFile(target, { ignoreIfExists: true });
+      edit.insert(target, new vscode2.Position(0, 0), content);
+    }
+    const applied = await vscode2.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode2.window.showErrorMessage(`Unable to apply the proposed change to ${relativePath}.`);
+      return;
+    }
+    document = await vscode2.workspace.openTextDocument(target);
     await vscode2.window.showTextDocument(document, { preview: false });
     await this.send({ command: "proposalApplied", payload: { kind: "file_change", path: relativePath } });
+  }
+  async previewFileChange(relativePath, content) {
+    const target = this.resolveWorkspaceFile(relativePath);
+    if (!target) {
+      void vscode2.window.showErrorMessage("The proposed file path is outside the active workspace.");
+      return;
+    }
+    let exists = true;
+    try {
+      await vscode2.workspace.fs.stat(target);
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      const document = await vscode2.workspace.openTextDocument({ content, language: this.normalizeLanguage(path.extname(relativePath).slice(1)) });
+      await vscode2.window.showTextDocument(document, { preview: true });
+      return;
+    }
+    const proposedUri = vscode2.Uri.from({
+      scheme: "codeme-proposed",
+      path: `/${relativePath.replace(/\\/g, "/")}`,
+      query: `v=${Date.now()}-${Math.random().toString(36).slice(2)}`
+    });
+    this.proposedDocuments.set(proposedUri.toString(), content);
+    await vscode2.commands.executeCommand("vscode.diff", target, proposedUri, `${relativePath} \u2194 Codeme proposal`, { preview: true });
   }
   async runProposedCommand(command, explanation) {
     const folder = this.getActiveWorkspaceFolder();

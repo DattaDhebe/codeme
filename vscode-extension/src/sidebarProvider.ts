@@ -22,12 +22,17 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private webviewReady = false;
   private pendingMessages: WebviewMessage[] = [];
   private currentWorkspaceId?: number;
+  private readonly proposedDocuments = new Map<string, string>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly backend: BackendClient,
     private readonly resolver: ContextReferenceResolver
-  ) {}
+  ) {
+    this.context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('codeme-proposed', {
+      provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || '',
+    }));
+  }
 
   public resolveWebviewView(webviewView: vscode.WebviewView): void {
     this.view = webviewView;
@@ -331,21 +336,23 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         break;
       case 'openCode':
         if (typeof message.args?.text === 'string') {
-          const document = await vscode.workspace.openTextDocument({
-            content: message.args.text,
-            language: this.normalizeLanguage(typeof message.args?.language === 'string' ? message.args.language : undefined),
-          });
-          await vscode.window.showTextDocument(document, { preview: true });
+          const targetPath = typeof message.args?.path === 'string' ? message.args.path : undefined;
+          await this.openGeneratedCode(message.args.text, targetPath, typeof message.args?.language === 'string' ? message.args.language : undefined);
         }
         break;
       case 'applyCode':
         if (typeof message.args?.text === 'string') {
-          await this.applyCodeToEditor(message.args.text);
+          await this.applyCodeToEditor(message.args.text, typeof message.args?.path === 'string' ? message.args.path : undefined);
         }
         break;
       case 'applyFileChange':
         if (typeof message.args?.path === 'string' && typeof message.args?.content === 'string') {
           await this.applyFileChange(message.args.path, message.args.content, String(message.args?.explanation || ''));
+        }
+        break;
+      case 'previewFileChange':
+        if (typeof message.args?.path === 'string' && typeof message.args?.content === 'string') {
+          await this.previewFileChange(message.args.path, message.args.content);
         }
         break;
       case 'runProposedCommand':
@@ -501,7 +508,20 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     return aliases[language || ''] || language || 'plaintext';
   }
 
-  private async applyCodeToEditor(code: string): Promise<void> {
+  private async openGeneratedCode(code: string, relativePath?: string, language?: string): Promise<void> {
+    if (relativePath && this.resolveWorkspaceFile(relativePath)) {
+      await this.previewFileChange(relativePath, code);
+      return;
+    }
+    const document = await vscode.workspace.openTextDocument({ content: code, language: this.normalizeLanguage(language) });
+    await vscode.window.showTextDocument(document, { preview: true });
+  }
+
+  private async applyCodeToEditor(code: string, relativePath?: string): Promise<void> {
+    if (relativePath && this.resolveWorkspaceFile(relativePath)) {
+      await this.applyFileChange(relativePath, code, `Replace the complete contents of ${relativePath}`);
+      return;
+    }
     const editor = vscode.window.activeTextEditor;
     if (!editor) {
       const document = await vscode.workspace.openTextDocument({ content: code });
@@ -509,21 +529,28 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       return;
     }
 
-    const requireApproval = vscode.workspace.getConfiguration('personalCodex').get('requireWriteApproval', true);
-    if (requireApproval) {
-      const target = editor.selection.isEmpty ? 'insert at the cursor' : 'replace the selected code';
+    let replaceWholeDocument = false;
+    if (editor.selection.isEmpty) {
       const choice = await vscode.window.showWarningMessage(
-        `Apply generated code and ${target}?`,
+        `No target filename was found. How should the generated code be applied to ${path.basename(editor.document.fileName)}?`,
         { modal: true },
-        'Apply'
+        'Replace entire file',
+        'Insert at cursor'
       );
-      if (choice !== 'Apply') {
-        return;
+      if (!choice) return;
+      replaceWholeDocument = choice === 'Replace entire file';
+    } else {
+      const requireApproval = vscode.workspace.getConfiguration('personalCodex').get('requireWriteApproval', true);
+      if (requireApproval) {
+        const choice = await vscode.window.showWarningMessage('Replace the selected code with the generated block?', { modal: true }, 'Apply');
+        if (choice !== 'Apply') return;
       }
     }
 
     const applied = await editor.edit((builder) => {
-      if (editor.selection.isEmpty) {
+      if (replaceWholeDocument) {
+        builder.replace(new vscode.Range(editor.document.positionAt(0), editor.document.positionAt(editor.document.getText().length)), code);
+      } else if (editor.selection.isEmpty) {
         builder.insert(editor.selection.active, code);
       } else {
         builder.replace(editor.selection, code);
@@ -550,6 +577,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       void vscode.window.showErrorMessage('The proposed file path is outside the active workspace.');
       return;
     }
+    await this.previewFileChange(relativePath, content);
     const requireApproval = vscode.workspace.getConfiguration('personalCodex').get('requireWriteApproval', true);
     if (requireApproval) {
       const choice = await vscode.window.showWarningMessage(
@@ -559,11 +587,59 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       );
       if (choice !== 'Apply change') return;
     }
-    await vscode.workspace.fs.createDirectory(vscode.Uri.file(path.dirname(target.fsPath)));
-    await vscode.workspace.fs.writeFile(target, Buffer.from(content, 'utf8'));
-    const document = await vscode.workspace.openTextDocument(target);
+    let document: vscode.TextDocument | undefined;
+    try {
+      document = await vscode.workspace.openTextDocument(target);
+    } catch {
+      document = undefined;
+    }
+    const edit = new vscode.WorkspaceEdit();
+    if (document) {
+      const current = document.getText();
+      if (current === content) {
+        void vscode.window.showInformationMessage(`${relativePath} already matches the proposed content.`);
+        await this.send({ command: 'proposalApplied', payload: { kind: 'file_change', path: relativePath } });
+        return;
+      }
+      edit.replace(target, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), content);
+    } else {
+      edit.createFile(target, { ignoreIfExists: true });
+      edit.insert(target, new vscode.Position(0, 0), content);
+    }
+    const applied = await vscode.workspace.applyEdit(edit);
+    if (!applied) {
+      void vscode.window.showErrorMessage(`Unable to apply the proposed change to ${relativePath}.`);
+      return;
+    }
+    document = await vscode.workspace.openTextDocument(target);
     await vscode.window.showTextDocument(document, { preview: false });
     await this.send({ command: 'proposalApplied', payload: { kind: 'file_change', path: relativePath } });
+  }
+
+  private async previewFileChange(relativePath: string, content: string): Promise<void> {
+    const target = this.resolveWorkspaceFile(relativePath);
+    if (!target) {
+      void vscode.window.showErrorMessage('The proposed file path is outside the active workspace.');
+      return;
+    }
+    let exists = true;
+    try {
+      await vscode.workspace.fs.stat(target);
+    } catch {
+      exists = false;
+    }
+    if (!exists) {
+      const document = await vscode.workspace.openTextDocument({ content, language: this.normalizeLanguage(path.extname(relativePath).slice(1)) });
+      await vscode.window.showTextDocument(document, { preview: true });
+      return;
+    }
+    const proposedUri = vscode.Uri.from({
+      scheme: 'codeme-proposed',
+      path: `/${relativePath.replace(/\\/g, '/')}`,
+      query: `v=${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    });
+    this.proposedDocuments.set(proposedUri.toString(), content);
+    await vscode.commands.executeCommand('vscode.diff', target, proposedUri, `${relativePath} ↔ Codeme proposal`, { preview: true });
   }
 
   private async runProposedCommand(command: string, explanation: string): Promise<void> {
