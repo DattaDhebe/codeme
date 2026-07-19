@@ -184,3 +184,34 @@ def test_agent_stops_after_repeated_malformed_tool_arguments(tmp_path: Path):
     events = list(WorkspaceAgent(tmp_path, client=client).run("Update app.py", []))
 
     assert events[-1]["content"] == "I stopped after three malformed tool calls. No changes were applied."
+
+
+def test_agent_prepares_structured_command_without_executing(tmp_path: Path):
+    client = FakeToolClient([
+        tool_call("propose_command", {
+            "profile": "pytest",
+            "arguments": ["tests", "-q"],
+            "cwd_relative": ".",
+            "purpose": "Run tests",
+            "requested_timeout_seconds": 90,
+            "model_risk_hint": "READ_ONLY",
+        }),
+        {"role": "assistant", "content": "Prepared one controlled command for approval."},
+    ])
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Run the tests", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+    assert proposal["kind"] == "command_proposal"
+    assert proposal["command_run"]["profile"] == "pytest"
+    assert proposal["command_run"]["arguments"] == ["tests", "-q"]
+
+
+def test_legacy_command_is_display_only(tmp_path: Path):
+    client = FakeToolClient([
+        tool_call("propose_legacy_command", {"command": "pytest -q", "explanation": "Old client"}),
+        {"role": "assistant", "content": "Displayed a legacy proposal."},
+    ])
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Run tests", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+    assert proposal["kind"] == "command"
+    tool_result = client.calls[-1]["messages"][-1]["content"]
+    assert '"requires_approval": false' in tool_result

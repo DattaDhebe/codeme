@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from codeme_agent import agent, changesets, crud, ollama, schemas, workspace
+from codeme_agent import agent, changesets, command_runs, crud, ollama, schemas, workspace
 from codeme_agent.db import get_db
 
 router = APIRouter(prefix="/api")
@@ -195,6 +195,47 @@ def record_change_set_restore(change_set_id: str, request: schemas.ChangeSetRest
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+@router.get("/command-runs/{command_run_id}", response_model=schemas.CommandRunRead)
+def get_command_run(command_run_id: str, db: Session = Depends(get_db)):
+    record = command_runs.get_command_run(db, command_run_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command run not found")
+    return command_runs.serialize_command_run(record)
+
+
+@router.post("/command-runs/{command_run_id}/decision", response_model=schemas.CommandRunRead)
+def decide_command_run(command_run_id: str, request: schemas.CommandDecision, db: Session = Depends(get_db)):
+    record = command_runs.get_command_run(db, command_run_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command run not found")
+    try:
+        return command_runs.serialize_command_run(command_runs.record_decision(db, record, request))
+    except command_runs.CommandRunError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/command-runs/{command_run_id}/events", response_model=schemas.CommandRunRead)
+def record_command_event(command_run_id: str, request: schemas.CommandEventCreate, db: Session = Depends(get_db)):
+    record = command_runs.get_command_run(db, command_run_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command run not found")
+    try:
+        return command_runs.serialize_command_run(command_runs.record_event(db, record, request))
+    except command_runs.CommandRunError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/command-runs/{command_run_id}/result", response_model=schemas.CommandRunRead)
+def record_command_result(command_run_id: str, request: schemas.CommandResultCreate, db: Session = Depends(get_db)):
+    record = command_runs.get_command_run(db, command_run_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Command run not found")
+    try:
+        return command_runs.serialize_command_run(command_runs.record_result(db, record, request))
+    except command_runs.CommandRunError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.post("/conversations/{conversation_id}/chat")
 def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depends(get_db)):
     conversation = crud.get_conversation(db, conversation_id)
@@ -241,7 +282,15 @@ def run_agent(conversation_id: int, request: schemas.AgentRequest, db: Session =
         try:
             for event in runtime.run(request.prompt, history, model=request.model, context=request.context):
                 if event.get("type") == "proposal":
-                    if event.get("kind") == "change_set":
+                    if event.get("kind") == "command_proposal":
+                        prepared_command = event.get("command_run")
+                        if prepared_command:
+                            command_record = command_runs.persist_command_run(
+                                db, conversation_id, request.workspace_id, prepared_command
+                            )
+                            event = {**event, "command_run": command_runs.serialize_command_run(command_record)}
+                        prepared = None
+                    elif event.get("kind") == "change_set":
                         prepared = event.get("change_set")
                     elif event.get("kind") == "file_change":
                         prepared = changesets.prepare_legacy_change_set(

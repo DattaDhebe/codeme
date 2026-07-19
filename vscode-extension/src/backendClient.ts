@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ChangeSet } from './changeSet';
+import { CommandExecutionResult, CommandRisk, CommandRun } from './commandRun';
 
 export interface BackendSettings {
   get<T>(section: string, defaultValue: T): T;
@@ -37,6 +38,7 @@ export type AgentEvent =
   | { type: 'tool'; name: string; summary: string; status: 'running' | 'complete' }
   | { type: 'proposal'; kind: 'file_change'; path: string; content: string; explanation: string; change_set?: ChangeSet }
   | { type: 'proposal'; kind: 'change_set'; change_set: ChangeSet }
+  | { type: 'proposal'; kind: 'command_proposal'; command_run: CommandRun }
   | { type: 'proposal'; kind: 'command'; command: string; explanation: string }
   | { type: 'message'; content: string };
 
@@ -143,6 +145,48 @@ export class BackendClient {
     return this.post<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}/restore`, {
       status,
       failure_reason: failureReason,
+    });
+  }
+
+  public async getCommandRun(commandRunId: string): Promise<CommandRun> {
+    return this.request<CommandRun>(`/command-runs/${encodeURIComponent(commandRunId)}`);
+  }
+
+  public async decideCommandRun(
+    commandRunId: string,
+    decision: 'approve' | 'reject' | 'block',
+    risk: CommandRisk,
+    riskExplanation: string,
+    executableName?: string,
+    environmentKeys: string[] = [],
+  ): Promise<CommandRun> {
+    return this.post<CommandRun>(`/command-runs/${encodeURIComponent(commandRunId)}/decision`, {
+      decision,
+      calculated_risk: risk,
+      risk_explanation: riskExplanation,
+      resolved_executable_name: executableName,
+      environment_keys: environmentKeys,
+    });
+  }
+
+  public async reportCommandEvent(commandRunId: string, status: 'starting' | 'running', detail?: string): Promise<CommandRun> {
+    return this.post<CommandRun>(`/command-runs/${encodeURIComponent(commandRunId)}/events`, { status, detail });
+  }
+
+  public async reportCommandResult(commandRunId: string, result: CommandExecutionResult): Promise<CommandRun> {
+    return this.post<CommandRun>(`/command-runs/${encodeURIComponent(commandRunId)}/result`, {
+      status: result.status,
+      exit_code: result.exitCode,
+      termination_reason: result.terminationReason,
+      started_at: result.startedAt,
+      completed_at: result.completedAt,
+      duration_ms: result.durationMs,
+      stdout_tail: result.stdoutTail,
+      stderr_tail: result.stderrTail,
+      output_truncated: result.outputTruncated,
+      timed_out: result.timedOut,
+      cancelled: result.cancelled,
+      failure_reason: result.failureReason,
     });
   }
 

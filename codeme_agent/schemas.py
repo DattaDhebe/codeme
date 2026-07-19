@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class GenerateRequest(BaseModel):
@@ -252,3 +252,144 @@ class ChangeSetRestoreResult(BaseModel):
 
     status: Literal["restored", "restore_failed"]
     failure_reason: str | None = Field(None, max_length=1000)
+
+
+CommandProfile = Literal[
+    "pytest", "python_module", "npm_test", "npm_build", "npm_lint",
+    "dotnet_test", "dotnet_build", "maven_test", "maven_package",
+    "gradle_test", "gradle_build", "git_status", "git_diff", "custom_executable",
+]
+CommandRisk = Literal[
+    "READ_ONLY", "BUILD_OR_TEST", "WRITES_WORKSPACE", "NETWORK",
+    "PACKAGE_INSTALL", "LONG_RUNNING", "SENSITIVE", "BLOCKED",
+]
+
+
+class CommandProposalInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    profile: CommandProfile
+    arguments: list[str] = Field(default_factory=list, max_length=50)
+    cwd_relative: str = Field(".", min_length=1, max_length=1024)
+    purpose: str = Field(..., min_length=1, max_length=500)
+    requested_timeout_seconds: int = Field(120, ge=1, le=900)
+    model_risk_hint: CommandRisk | None = None
+
+    @model_validator(mode="after")
+    def validate_literal_arguments(self):
+        forbidden = ("\x00", "\r", "\n")
+        shell_syntax = ("|", "&", ";", "`", "$(", ">", "<", "^")
+        for argument in self.arguments:
+            if len(argument) > 500 or any(value in argument for value in forbidden):
+                raise ValueError("Command arguments must be bounded literal strings")
+            if any(value in argument for value in shell_syntax):
+                raise ValueError("Shell syntax is not allowed in command arguments")
+        lowered = [argument.casefold() for argument in self.arguments]
+        if self.profile == "python_module":
+            if not self.arguments or not self.arguments[0].replace("_", "a").replace(".", "a").isalnum():
+                raise ValueError("python_module requires a dotted module name as its first argument")
+            if any(argument in {"-c", "-"} for argument in lowered):
+                raise ValueError("Inline Python execution is not allowed")
+        if self.profile in {"git_status", "git_diff"} and any(
+            argument in {"reset", "clean", "checkout", "restore", "push", "branch"} for argument in lowered
+        ):
+            raise ValueError("Destructive Git actions are not valid profile arguments")
+        if self.profile == "custom_executable" and not self.arguments:
+            raise ValueError("custom_executable requires an allowlist alias as its first argument")
+        return self
+
+
+class CommandDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject", "block"]
+    calculated_risk: CommandRisk
+    risk_explanation: str = Field(..., min_length=1, max_length=1000)
+    resolved_executable_name: str | None = Field(None, max_length=255)
+    environment_keys: list[str] = Field(default_factory=list, max_length=50)
+
+    @field_validator("environment_keys")
+    @classmethod
+    def validate_environment_keys(cls, value: list[str]):
+        sensitive = ("TOKEN", "SECRET", "PASSWORD", "API_KEY", "PRIVATE_KEY", "CONNECTION_STRING", "CREDENTIAL", "AUTH", "COOKIE")
+        for key in value:
+            if not key or len(key) > 100 or not key.replace("_", "A").isalnum():
+                raise ValueError("Environment keys must be bounded names")
+            if any(pattern in key.upper() for pattern in sensitive):
+                raise ValueError("Sensitive environment keys cannot be persisted")
+        return value
+
+
+class CommandEventCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["starting", "running"]
+    detail: str | None = Field(None, max_length=8000)
+
+
+class CommandResultCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["completed", "failed", "timed_out", "cancelled"]
+    exit_code: int | None = None
+    termination_reason: str | None = Field(None, max_length=64)
+    started_at: datetime
+    completed_at: datetime
+    duration_ms: int = Field(..., ge=0, le=86_400_000)
+    stdout_tail: str = Field("", max_length=1_000_000)
+    stderr_tail: str = Field("", max_length=1_000_000)
+    output_truncated: bool = False
+    timed_out: bool = False
+    cancelled: bool = False
+    failure_reason: str | None = Field(None, max_length=8000)
+
+    @model_validator(mode="after")
+    def validate_result_consistency(self):
+        if self.completed_at < self.started_at:
+            raise ValueError("Command completion cannot precede its start")
+        if self.timed_out != (self.status == "timed_out"):
+            raise ValueError("timed_out must match the terminal status")
+        if self.cancelled != (self.status == "cancelled"):
+            raise ValueError("cancelled must match the terminal status")
+        return self
+
+
+class CommandRunEventRead(BaseModel):
+    from_status: str | None
+    to_status: str
+    detail: str | None
+    created_at: datetime
+
+
+class CommandRunRead(BaseModel):
+    id: str
+    schema_version: Literal[1] = 1
+    conversation_id: int
+    workspace_id: int
+    profile: CommandProfile
+    arguments: list[str]
+    cwd_relative: str
+    purpose: str
+    requested_timeout_seconds: int
+    model_risk_hint: CommandRisk | None = None
+    calculated_risk: CommandRisk | None = None
+    risk_explanation: str | None = None
+    resolved_executable_name: str | None = None
+    environment_keys: list[str] = Field(default_factory=list)
+    decision: str | None = None
+    status: str
+    exit_code: int | None = None
+    termination_reason: str | None = None
+    duration_ms: int | None = None
+    stdout_tail: str = ""
+    stderr_tail: str = ""
+    output_truncated: bool = False
+    timed_out: bool = False
+    cancelled: bool = False
+    failure_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    events: list[CommandRunEventRead] = Field(default_factory=list)

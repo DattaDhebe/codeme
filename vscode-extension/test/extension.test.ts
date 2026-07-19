@@ -91,6 +91,35 @@ describe('BackendClient', () => {
       expect.objectContaining({ method: 'POST', body: expect.stringContaining('checkpoint.json') }),
     );
   });
+
+  it('persists command decisions, lifecycle events, and bounded results through dedicated APIs', async () => {
+    const response = {
+      id: 'run-1', schema_version: 1, conversation_id: 1, workspace_id: 1,
+      profile: 'pytest', arguments: ['-q'], cwd_relative: '.', purpose: 'Run tests',
+      requested_timeout_seconds: 120, status: 'approved', created_at: '2026-01-01', updated_at: '2026-01-01',
+    };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => response, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BackendClient(new FakeConfig());
+
+    await client.decideCommandRun('run-1', 'approve', 'BUILD_OR_TEST', 'Runs repository tests', 'python', ['PATH']);
+    await client.reportCommandEvent('run-1', 'starting', 'Starting');
+    await client.reportCommandResult('run-1', {
+      status: 'completed', exitCode: 0, terminationReason: 'exit',
+      startedAt: '2026-01-01T00:00:00Z', completedAt: '2026-01-01T00:00:01Z', durationMs: 1000,
+      stdoutTail: 'ok', stderrTail: '', outputTruncated: false, timedOut: false, cancelled: false,
+    });
+
+    expect(fetchMock).toHaveBeenNthCalledWith(1, expect.stringMatching(/command-runs\/run-1\/decision$/), expect.objectContaining({
+      method: 'POST', body: expect.stringContaining('BUILD_OR_TEST'),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(2, expect.stringMatching(/command-runs\/run-1\/events$/), expect.objectContaining({
+      method: 'POST', body: expect.stringContaining('starting'),
+    }));
+    expect(fetchMock).toHaveBeenNthCalledWith(3, expect.stringMatching(/command-runs\/run-1\/result$/), expect.objectContaining({
+      method: 'POST', body: expect.stringContaining('stdout_tail'),
+    }));
+  });
 });
 
 afterEach(() => {
@@ -109,6 +138,7 @@ describe('extension manifest', () => {
 
   it('disables legacy raw command execution by default', () => {
     expect(manifest.contributes.configuration.properties['personalCodex.enableUnsafeCommandExecution'].default).toBe(false);
+    expect(manifest.contributes.configuration.properties['personalCodex.enableUnsafeCommandExecution'].deprecationMessage).toMatch(/display-only/i);
   });
 });
 
@@ -148,9 +178,21 @@ describe('Copilot-style webview', () => {
       'previewChangeSet',
       'applyChangeSet',
       'restoreChangeSet',
+      'runCommandProposal',
+      'rejectCommandProposal',
+      'cancelCommandRun',
+      'copyCommandDetails',
+      'copyCommandOutput',
+      'Output was truncated',
+      "escapeHtml(proposal.stdout)",
     ]) {
       expect(source).toContain(capability);
     }
+    for (const status of ['proposed', 'starting', 'running', 'completed', 'failed', 'timed_out', 'cancelled', 'blocked']) {
+      expect(source).toContain(status);
+    }
+    expect(source).toContain('Legacy raw commands cannot execute');
+    expect(source).not.toContain("isFile ? 'Apply' : 'Run'");
   });
 
   it('targets named whole-file code blocks without mistaking an extension for a file', () => {

@@ -198,13 +198,61 @@ Out of scope: deletion, rename, terminal execution, tests by the agent, commits,
 
 ### Phase 5: Controlled command execution
 
-Scope: structured requests, risk classification, allow/confirm/block policy, argument-array execution where possible, controlled shell fallback, workspace `cwd`, timeout, cancellation, bounded output, process-tree termination, environment filtering, and audit records.
+Status: complete. Phase 4 remains the immutable editing and restore boundary.
 
-Dependencies: durable Phase 4 decisions, checkpoint capability, and platform-specific process control.
+#### Security boundary and ownership
 
-Acceptance criteria: commands cannot run without policy evaluation; results and termination state return to the agent; destructive defaults are blocked.
+- Ollama may request only a versioned profile, literal argument array, workspace-relative working directory, purpose, timeout, and advisory risk hint.
+- The backend validates and persists proposals and durable decisions/results. It never starts a subprocess and exposes no arbitrary execution endpoint.
+- The VS Code extension independently validates the proposal, matches the registered workspace to the active folder, resolves a trusted executable/profile adapter, classifies risk, asks for one-time approval, owns the child process, and streams bounded output.
+- The Angular application cannot execute commands in Phase 5.
+- Results are displayed and audited but are not sent back to the model. Automated verification and repair begin in Phase 6.
 
-Out of scope: automatic repair loops and remote execution.
+#### Command lifecycle and persistence
+
+`proposed -> approved -> starting -> running -> completed|failed|timed_out|cancelled`
+
+Alternative terminal states are `rejected` and `blocked`. Every transition is validated. A repeated identical terminal result is idempotent; a conflicting terminal result is rejected. `command_runs` stores the normalized proposal, independent risk decision, bounded result, and timestamps. `command_run_events` stores redacted lifecycle events. Complete environments and unlimited output are never persisted.
+
+#### Profiles and policy evaluation
+
+Initial profiles are `pytest`, `python_module`, `npm_test`, `npm_build`, `npm_lint`, `dotnet_test`, `dotnet_build`, `maven_test`, `maven_package`, `gradle_test`, `gradle_build`, `git_status`, `git_diff`, and `custom_executable`. Each resolves to a configured executable plus literal arguments. Custom aliases are disabled unless explicitly added to the user's allowlist; repository instructions cannot add them.
+
+The model risk hint is advisory. The extension calculates `READ_ONLY`, `BUILD_OR_TEST`, `WRITES_WORKSPACE`, `NETWORK`, `PACKAGE_INSTALL`, `LONG_RUNNING`, `SENSITIVE`, or `BLOCKED` from the validated profile, arguments, adapter, working directory, timeout, and repository boundary. Every non-blocked run requires visible one-time approval. Network, package-install, and long-running risks receive stronger warnings. There is no always-allow policy.
+
+Profiles, typed arguments, and explicit deny rules block destructive Git, recursive deletion, system/service/registry/task modification, credential/private-key/history access, environment dumping, interpreters with inline evaluation, arbitrary shells, pipelines, redirects, chaining, substitution, background operators, and execution outside the workspace.
+
+#### Workspace, process, output, and environment flow
+
+1. Resolve the proposal's registered backend workspace and require an exact match with the single active VS Code workspace.
+2. Canonicalize `cwdRelative`, reject absolute/UNC/traversal paths and symlink or junction escapes, require an existing directory, and revalidate immediately before spawn.
+3. Resolve a trusted profile executable. Spawn with an argument array and closed stdin. Windows `.cmd`/`.bat` wrappers use a dedicated literal-argument adapter with metacharacter rejection; arbitrary `cmd.exe`, PowerShell, bash, or sh is never accepted.
+4. Inherit only a minimal non-secret environment-key allowlist. The model cannot provide environment variables, and secret-pattern keys are excluded.
+5. Capture stdout and stderr separately, strip terminal controls for display, stream bounded chunks, retain fixed tails, and continue draining after the display cap.
+6. Enforce a default 120-second timeout and a hard 15-minute maximum. Cancellation, timeout, deactivation, and failure terminate the process tree (`taskkill /T /F` on Windows; process groups on Unix) and prevent orphan processes.
+7. Persist the bounded terminal result. Do not invoke another command or return output to Ollama.
+
+#### Approval, output, audit, and legacy compatibility
+
+The sidebar card displays purpose, profile, resolved executable name, exact argument list, relative working directory, calculated risk and explanation, timeout, network/write indicators, and inherited environment keys. Actions are Run once, Reject, Copy details, and Cancel while active. Blocked requests show only the reason. Output states cover pending, approved, starting, running, completed, failed, timed out, cancelled, and blocked, with separate escaped stdout/stderr, exit code, duration, truncation, and copy output.
+
+Legacy raw `command` SSE events remain display-only and are never parsed or executed. `personalCodex.enableUnsafeCommandExecution` remains default-false only for configuration compatibility; enabling it produces a deprecation warning and grants no controlled-runner bypass.
+
+Windows behaviour: drive letters are compared case-insensitively, UNC paths are rejected, junctions are resolved, wrapper arguments reject expansion/metacharacter syntax, and process-tree cancellation uses a trusted `taskkill.exe` argument array.
+
+Dependencies: the Phase 4 checkpoint, registered workspaces, existing Agent SSE transport, SQLAlchemy/Alembic, VS Code process APIs, and platform process-tree controls.
+
+Acceptance criteria:
+
+- New proposals are structured, versioned, Pydantic-validated, persisted before SSE emission, and independently revalidated by the extension.
+- Raw strings, executable paths, environment values, and policy overrides cannot come from the model.
+- Every run has one-time approval; blocked operations cannot run.
+- Execution stays inside the exact registered workspace and uses literal argument arrays or the constrained Windows wrapper adapter.
+- Output is separate, escaped, streamed, bounded, drained, redacted for persistence, and never sent back to Ollama.
+- Timeout, cancellation, process-tree termination, spawn errors, non-zero exits, and deactivation cleanup are observable and durable.
+- Phase 4 change sets and Restore continue to pass regression tests, and no command-runner mutation test targets this repository.
+
+Out of scope: automatic approval, always-allow rules, web execution, automatic verification/repair, sequential autonomous commands, file deletion/rename, commits/pushes, Docker, multi-agent work, multi-root execution, cloud models, and remote execution.
 
 ### Phase 6: Verification and repair loop
 

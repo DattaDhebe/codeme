@@ -696,6 +696,11 @@ pre code {
 .proposal-files { display: grid; gap: 3px; margin-top: 6px; font-family: var(--vscode-editor-font-family, monospace); font-size: 9px; }
 .proposal-files span { white-space: normal; }
 .proposal-files b { color: var(--accent); font-weight: 600; text-transform: uppercase; }
+.command-run-card.blocked { border-color: var(--vscode-inputValidation-errorBorder); }
+.command-details { display: grid; gap: 4px; margin-top: 8px; font-size: 10px; color: var(--muted); }
+.command-details span { overflow-wrap: anywhere; }
+.command-output { max-height: 220px; overflow: auto; margin: 8px 0 0; padding: 8px; white-space: pre-wrap; word-break: break-word; background: var(--vscode-textCodeBlock-background); border-radius: 5px; font-family: var(--vscode-editor-font-family, monospace); font-size: 10px; }
+.command-output.stderr, .command-failure, .truncation-warning { color: var(--vscode-errorForeground); }
 .proposal-actions { display: flex; align-items: center; gap: 2px; }
 .proposal-card button { display: inline-flex; height: 25px; padding: 0 7px; align-items: center; gap: 3px; border: 0; border-radius: 5px; color: var(--vscode-button-foreground); background: var(--vscode-button-background); cursor: pointer; font-size: 9px; }
 .proposal-card button.secondary { color: var(--muted); background: transparent; }

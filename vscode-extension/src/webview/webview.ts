@@ -16,6 +16,7 @@ import 'prismjs/components/prism-markdown';
 import 'prismjs/components/prism-diff';
 import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
+import type { CommandRun } from '../commandRun';
 
 declare const acquireVsCodeApi: any;
 
@@ -46,13 +47,16 @@ interface AgentActivity {
 }
 
 interface AgentProposal {
-  kind: 'file_change' | 'command' | 'change_set';
+  kind: 'file_change' | 'command' | 'change_set' | 'command_proposal';
   path?: string;
   content?: string;
   command?: string;
-  explanation: string;
+  explanation?: string;
   applied?: boolean;
   changeSet?: ChangeSet;
+  commandRun?: CommandRun;
+  stdout?: string;
+  stderr?: string;
 }
 
 interface Conversation {
@@ -289,6 +293,45 @@ function renderMessage(message: ChatMessage, index: number): string {
 }
 
 function renderProposal(proposal: AgentProposal, messageIndex: number, proposalIndex: number): string {
+  if (proposal.kind === 'command_proposal' && proposal.commandRun) {
+    const run = proposal.commandRun;
+    const blocked = run.status === 'blocked' || run.policy_blocked || run.calculated_risk === 'BLOCKED';
+    const active = run.status === 'starting' || run.status === 'running';
+    const terminal = ['completed', 'failed', 'timed_out', 'cancelled', 'rejected', 'blocked'].includes(run.status);
+    const arguments_ = run.resolved_arguments || run.arguments;
+    const details = JSON.stringify({
+      purpose: run.purpose, profile: run.profile, executable: run.resolved_executable_name,
+      arguments: arguments_, cwd: run.cwd_relative, risk: run.calculated_risk,
+      timeoutSeconds: run.requested_timeout_seconds, environmentKeys: run.environment_keys || [],
+    }, null, 2);
+    return `<section class="proposal-card command-run-card ${blocked ? 'blocked' : ''}">
+      <div class="proposal-icon">${icon('terminal', 15)}</div>
+      <div class="proposal-copy">
+        <strong>${escapeHtml(run.purpose)}</strong>
+        <span>${escapeHtml(run.profile)} / ${escapeHtml(run.status)} / ${escapeHtml(run.calculated_risk || 'evaluating')}</span>
+        <div class="command-details">
+          <span><b>Executable</b> ${escapeHtml(run.resolved_executable_name || 'policy evaluation pending')}</span>
+          <span><b>Arguments</b> <code>${escapeHtml(JSON.stringify(arguments_))}</code></span>
+          <span><b>Working directory</b> ${escapeHtml(run.cwd_relative)}</span>
+          <span><b>Timeout</b> ${run.requested_timeout_seconds}s</span>
+          <span><b>Network</b> ${run.network_access ? 'may occur' : 'not indicated'} / <b>Workspace writes</b> ${run.writes_workspace ? 'may occur' : 'not indicated'}</span>
+          <span><b>Environment keys</b> ${escapeHtml((run.environment_keys || []).join(', ') || '(none)')}</span>
+          <span><b>Policy</b> ${escapeHtml(run.risk_explanation || 'Pending independent evaluation')}</span>
+        </div>
+        ${proposal.stdout ? `<pre class="command-output stdout">${escapeHtml(proposal.stdout)}</pre>` : ''}
+        ${proposal.stderr ? `<pre class="command-output stderr">${escapeHtml(proposal.stderr)}</pre>` : ''}
+        ${run.output_truncated ? '<span class="truncation-warning">Output was truncated; the process pipes were still drained.</span>' : ''}
+        ${run.exit_code !== undefined && run.exit_code !== null ? `<span>Exit code ${run.exit_code} / ${run.duration_ms || 0}ms</span>` : ''}
+        ${run.failure_reason ? `<span class="command-failure">${escapeHtml(run.failure_reason)}</span>` : ''}
+      </div>
+      <div class="proposal-actions">
+        <button class="secondary" data-action="copyCommandDetails" data-details="${escapeHtml(details)}">${icon('copy', 12)} Copy details</button>
+        ${run.status === 'proposed' && !blocked ? `<button class="secondary" data-action="rejectCommandProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Reject</button><button data-action="runCommandProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Run once</button>` : ''}
+        ${active ? `<button data-action="cancelCommandRun" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Cancel run</button>` : ''}
+        ${terminal ? `<button class="secondary" data-action="copyCommandOutput" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Copy output</button>` : ''}
+      </div>
+    </section>`;
+  }
   if (proposal.kind === 'change_set' && proposal.changeSet) {
     const changeSet = proposal.changeSet;
     const files = changeSet.operations.map((operation) => `<span><b>${escapeHtml(operation.type)}</b> ${escapeHtml(operation.relative_path)}</span>`).join('');
@@ -309,11 +352,13 @@ function renderProposal(proposal: AgentProposal, messageIndex: number, proposalI
   const title = isFile ? proposal.path || 'File change' : proposal.command || 'Terminal command';
   return `<section class="proposal-card ${proposal.applied ? 'applied' : ''}">
     <div class="proposal-icon">${icon(isFile ? 'file' : 'terminal', 15)}</div>
-    <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation)}</span></div>
+    <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation || '')}</span></div>
     <div class="proposal-actions">
       ${isFile ? `<button class="secondary" data-action="openProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Open proposed diff">${icon('external', 12)} Open</button>` : ''}
       <button class="secondary" data-action="copyProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Copy ${isFile ? 'proposed file' : 'command'}">${icon('copy', 12)} Copy</button>
-      <button data-action="${isFile ? 'applyProposal' : 'runProposal'}" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : isFile ? 'Apply' : 'Run'}</button>
+      ${isFile
+        ? `<button data-action="applyProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : 'Apply'}</button>`
+        : '<button disabled title="Legacy raw commands cannot execute">Display only</button>'}
     </div>
   </section>`;
 }
@@ -646,6 +691,23 @@ if (app) {
       if (!item?.changeSet) return;
       vscode.postMessage({ command: action, args: { changeSet: item.changeSet } });
     }
+    if (action === 'runCommandProposal' || action === 'rejectCommandProposal' || action === 'cancelCommandRun' || action === 'copyCommandOutput') {
+      const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
+      if (!item?.commandRun) return;
+      if (action === 'copyCommandOutput') {
+        vscode.postMessage({ command: 'copyText', args: { text: [item.stdout || '', item.stderr || ''].filter(Boolean).join('\n') } });
+        showToast('Command output copied');
+        return;
+      }
+      vscode.postMessage({
+        command: action,
+        args: action === 'cancelCommandRun' ? { commandRunId: item.commandRun.id } : { commandRun: item.commandRun },
+      });
+    }
+    if (action === 'copyCommandDetails') {
+      vscode.postMessage({ command: 'copyText', args: { text: button.dataset.details || '' } });
+      showToast('Command details copied');
+    }
   });
 
   app.addEventListener('input', (event) => {
@@ -767,7 +829,10 @@ window.addEventListener('message', (event) => {
         else assistant.activities.push({ name: agentEvent.name, summary: agentEvent.summary, status: agentEvent.status });
       } else if (agentEvent?.type === 'proposal') {
         assistant.proposals ||= [];
-        if (agentEvent.change_set) {
+        if (agentEvent.command_run) {
+          const duplicate = assistant.proposals.some((proposal) => proposal.commandRun?.id === agentEvent.command_run.id);
+          if (!duplicate) assistant.proposals.push({ kind: 'command_proposal', commandRun: agentEvent.command_run });
+        } else if (agentEvent.change_set) {
           const duplicate = assistant.proposals.some((proposal) => proposal.changeSet?.id === agentEvent.change_set.id);
           if (!duplicate) assistant.proposals.push({ kind: 'change_set', explanation: agentEvent.change_set.summary, changeSet: agentEvent.change_set });
         } else {
@@ -823,6 +888,27 @@ window.addEventListener('message', (event) => {
       }
       render();
       showToast(`Change set ${updated.status}`);
+      break;
+    }
+    case 'commandRunUpdated': {
+      const updated = message.payload as CommandRun;
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.commandRun?.id === updated.id);
+        if (proposal) proposal.commandRun = { ...proposal.commandRun, ...updated };
+      }
+      render();
+      showToast(`Command ${updated.status}`);
+      break;
+    }
+    case 'commandRunOutput': {
+      const output = message.payload as { commandRunId: string; stream: 'stdout' | 'stderr' | 'status'; text: string };
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.commandRun?.id === output.commandRunId);
+        if (!proposal) continue;
+        if (output.stream === 'stdout') proposal.stdout = (proposal.stdout || '') + output.text;
+        else if (output.stream === 'stderr') proposal.stderr = (proposal.stderr || '') + output.text;
+      }
+      render();
       break;
     }
   }

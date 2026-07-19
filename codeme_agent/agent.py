@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from codeme_agent import changesets, workspace
+from codeme_agent import changesets, command_runs, workspace
 from codeme_agent.ollama import OllamaClient
 
 MAX_AGENT_TURNS = 12
@@ -18,7 +18,8 @@ For project analysis or architecture questions, listing the root is not sufficie
 Ground every project claim in files you actually inspected. Do not invent directories, technologies, or behavior from file names alone.
 For requested changes, first read the exact base files, then call propose_change_set once with create operations or minimal exact search/replace edits. Do not request delete or rename operations. Do not pretend a change was applied.
 The legacy propose_file_change tool exists only for compatibility. Prefer propose_change_set because it computes verified base hashes and one reviewable multi-file proposal.
-For commands the user should run, call propose_command. Never claim a command ran merely because it was proposed.
+For a command the user should run, call propose_command with one controlled profile and literal arguments. Never provide shell text, executable paths, environment variables, or policy overrides. Never claim a command ran merely because it was proposed.
+Command output is not returned to you in this phase. Stop after one command proposal and a concise summary.
 Read-only tools execute automatically. File changes and commands require explicit approval in VS Code.
 Keep the final response concise: report what you found, proposals created, and verification still needed.
 """
@@ -150,12 +151,34 @@ TOOLS = [
         "type": "function",
         "function": {
             "name": "propose_command",
-            "description": "Propose a terminal command for explicit user approval. This does not execute it.",
+            "description": "Propose one controlled command profile for explicit one-time approval. This never executes on the backend.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "command": {"type": "string", "description": "Single command line to run from the workspace root."},
-                    "explanation": {"type": "string", "description": "Why this command is needed."},
+                    "profile": {
+                        "type": "string",
+                        "enum": ["pytest", "python_module", "npm_test", "npm_build", "npm_lint", "dotnet_test", "dotnet_build", "maven_test", "maven_package", "gradle_test", "gradle_build", "git_status", "git_diff", "custom_executable"],
+                    },
+                    "arguments": {"type": "array", "items": {"type": "string"}, "description": "Literal arguments only; never shell text."},
+                    "cwd_relative": {"type": "string", "description": "Workspace-relative directory, usually '.'."},
+                    "purpose": {"type": "string"},
+                    "requested_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 900},
+                    "model_risk_hint": {"type": "string", "enum": ["READ_ONLY", "BUILD_OR_TEST", "WRITES_WORKSPACE", "NETWORK", "PACKAGE_INSTALL", "LONG_RUNNING", "SENSITIVE", "BLOCKED"]},
+                },
+                "required": ["profile", "arguments", "purpose"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "propose_legacy_command",
+            "description": "Deprecated display-only compatibility proposal. Never use for new requests.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string"},
+                    "explanation": {"type": "string"},
                 },
                 "required": ["command", "explanation"],
             },
@@ -223,7 +246,7 @@ def _needs_project_bootstrap(prompt: str) -> bool:
 
 def _tools_for_prompt(prompt: str) -> list[dict]:
     normalized = prompt.lower()
-    mutation_signals = ("add ", "create ", "edit ", "fix ", "implement ", "refactor ", "remove ", "rename ", "update ", "write ", "change ")
+    mutation_signals = ("add ", "create ", "edit ", "fix ", "implement ", "refactor ", "remove ", "rename ", "update ", "write ", "change ", "run ", "test ", "build ", "lint ")
     if any(signal in normalized for signal in mutation_signals):
         return TOOLS
     return TOOLS[:6]
@@ -419,15 +442,24 @@ class WorkspaceAgent:
             }
             return {"status": "proposed", "path": relative_path, "requires_approval": True}, proposal
         if name == "propose_command":
+            prepared = command_runs.prepare_command_run(self.root, arguments)
+            proposal = {"kind": "command_proposal", "command_run": prepared}
+            return {
+                "status": "proposed",
+                "command_run_id": prepared["id"],
+                "profile": prepared["profile"],
+                "requires_approval": True,
+            }, proposal
+        if name == "propose_legacy_command":
             command = str(arguments.get("command", "")).strip()
             if not command or "\n" in command or "\r" in command or len(command) > 2_000:
-                raise workspace.WorkspaceSecurityError("A single command line is required")
+                raise workspace.WorkspaceSecurityError("A bounded display-only command is required")
             proposal = {
                 "kind": "command",
                 "command": command,
-                "explanation": str(arguments.get("explanation", "Proposed by the coding agent")),
+                "explanation": str(arguments.get("explanation", "Legacy display-only command proposal")),
             }
-            return {"status": "proposed", "requires_approval": True}, proposal
+            return {"status": "display_only", "requires_approval": False, "deprecated": True}, proposal
         raise workspace.WorkspaceError(f"Unknown tool: {name}")
 
     def run(self, prompt: str, history: list[dict], model: str | None = None, context: str | None = None) -> Iterator[dict]:
@@ -484,11 +516,13 @@ class WorkspaceAgent:
                         return
                     continue
                 malformed_tool_calls = 0
-                summary = arguments.get("path") or arguments.get("query") or arguments.get("command") or "workspace"
+                summary = arguments.get("path") or arguments.get("query") or arguments.get("profile") or arguments.get("command") or "workspace"
                 yield {"type": "tool", "name": name, "summary": str(summary)[:200], "status": "running"}
                 try:
                     if name not in available_tool_names:
                         raise workspace.WorkspaceSecurityError(f"Tool {name} is not permitted for this read-only request")
+                    if name.startswith("propose_") and proposal_count:
+                        raise workspace.WorkspaceSecurityError("Only one proposal is allowed per agent request")
                     result, proposal = self._execute_tool(name, arguments)
                 except workspace.WorkspaceError as exc:
                     result, proposal = {"error": str(exc)}, None

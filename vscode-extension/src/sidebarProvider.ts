@@ -5,6 +5,9 @@ import { ContextReferenceResolver } from './contextResolver';
 import { webviewHtml } from './webviewHtml';
 import { ChangeSet } from './changeSet';
 import { ChangeSetManager } from './changeSetManager';
+import { CommandPolicyDecision, CommandRun } from './commandRun';
+import { CommandPolicyError, evaluateCommandPolicy } from './commandPolicy';
+import { ControlledProcessRunner } from './processRunner';
 
 interface WebviewMessage {
   command: string;
@@ -26,7 +29,9 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private currentWorkspaceId?: number;
   private readonly proposedDocuments = new Map<string, string>();
   private readonly legacyChangeSets = new Map<string, ChangeSet>();
+  private readonly commandPolicies = new Map<string, CommandPolicyDecision>();
   private readonly changeSetManager: ChangeSetManager;
+  private readonly processRunner: ControlledProcessRunner;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -34,6 +39,12 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     private readonly resolver: ContextReferenceResolver
   ) {
     this.changeSetManager = new ChangeSetManager(context);
+    const configuration = vscode.workspace.getConfiguration('personalCodex');
+    this.processRunner = new ControlledProcessRunner({
+      displayLimitBytes: configuration.get('commandOutputLimitBytes', 1_048_576),
+      tailLimitBytes: configuration.get('commandTailLimitBytes', 65_536),
+    });
+    this.context.subscriptions.push({ dispose: () => this.processRunner.dispose() });
     this.context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('codeme-proposed', {
       provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || '',
     }));
@@ -422,6 +433,21 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
           await this.runProposedCommand(message.args.command, String(message.args?.explanation || ''));
         }
         break;
+      case 'runCommandProposal':
+        if (message.args?.commandRun) {
+          await this.runControlledCommand(message.args.commandRun as unknown as CommandRun);
+        }
+        break;
+      case 'rejectCommandProposal':
+        if (message.args?.commandRun) {
+          await this.rejectControlledCommand(message.args.commandRun as unknown as CommandRun);
+        }
+        break;
+      case 'cancelCommandRun':
+        if (typeof message.args?.commandRunId === 'string') {
+          await this.processRunner.cancel(message.args.commandRunId);
+        }
+        break;
       case 'openSettings':
         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:personal-codex-local.personal-codeme');
         break;
@@ -535,6 +561,10 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         (event: AgentEvent) => {
           if (event.type === 'proposal' && event.kind === 'file_change' && event.change_set) {
             this.legacyChangeSets.set(event.path, event.change_set);
+          }
+          if (event.type === 'proposal' && event.kind === 'command_proposal') {
+            void this.prepareCommandProposalEvent(conversationId!, event.command_run);
+            return;
           }
           void this.send({ command: 'agentEvent', payload: { conversationId, event } });
         },
@@ -783,6 +813,164 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     await vscode.commands.executeCommand('vscode.diff', target, proposedUri, `${relativePath} ↔ Codeme proposal`, { preview: true });
   }
 
+  private async evaluateCommand(commandRun: CommandRun): Promise<CommandPolicyDecision> {
+    const folders = vscode.workspace.workspaceFolders || [];
+    if (folders.length !== 1) {
+      throw new CommandPolicyError('Controlled execution requires exactly one active VS Code workspace folder.');
+    }
+    if (!this.currentWorkspaceId || commandRun.workspace_id !== this.currentWorkspaceId) {
+      throw new CommandPolicyError('The command proposal does not belong to the active registered workspace.');
+    }
+    const registered = (await this.backend.listWorkspaces()).find((item) => item.id === commandRun.workspace_id);
+    if (!registered?.root_path) throw new CommandPolicyError('The backend workspace registration is unavailable.');
+    return evaluateCommandPolicy(
+      commandRun,
+      registered.root_path,
+      folders[0].uri.fsPath,
+      vscode.workspace.getConfiguration('personalCodex'),
+    );
+  }
+
+  private withPolicy(commandRun: CommandRun, policy: CommandPolicyDecision): CommandRun {
+    return {
+      ...commandRun,
+      calculated_risk: policy.risk,
+      risk_explanation: policy.explanation,
+      resolved_executable_name: policy.executableName,
+      resolved_arguments: policy.args,
+      environment_keys: policy.environmentKeys,
+      network_access: policy.network,
+      writes_workspace: policy.writesWorkspace,
+      policy_blocked: policy.blocked,
+    };
+  }
+
+  private async prepareCommandProposalEvent(conversationId: number, commandRun: CommandRun): Promise<void> {
+    try {
+      const policy = await this.evaluateCommand(commandRun);
+      this.commandPolicies.set(commandRun.id, policy);
+      if (policy.blocked) {
+        const blocked = await this.backend.decideCommandRun(
+          commandRun.id, 'block', 'BLOCKED', policy.explanation, policy.executableName, policy.environmentKeys,
+        );
+        await this.send({
+          command: 'agentEvent',
+          payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: this.withPolicy(blocked, policy) } },
+        });
+        return;
+      }
+      await this.send({
+        command: 'agentEvent',
+        payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: this.withPolicy(commandRun, policy) } },
+      });
+    } catch (error) {
+      const explanation = `Blocked by extension policy: ${(error as Error).message}`;
+      let blocked: CommandRun = { ...commandRun, status: 'blocked', calculated_risk: 'BLOCKED', risk_explanation: explanation, policy_blocked: true };
+      try {
+        blocked = {
+          ...await this.backend.decideCommandRun(commandRun.id, 'block', 'BLOCKED', explanation),
+          policy_blocked: true,
+        };
+      } catch {
+        // Still render the local policy block if persistence is temporarily unavailable.
+      }
+      await this.send({
+        command: 'agentEvent',
+        payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: blocked } },
+      });
+    }
+  }
+
+  private approvalText(commandRun: CommandRun, policy: CommandPolicyDecision): string {
+    const warning = policy.risks.some((risk) => ['NETWORK', 'PACKAGE_INSTALL', 'LONG_RUNNING'].includes(risk))
+      ? '\n\nStrong warning: this request may access the network, install packages, or run longer than the safe default.'
+      : '';
+    return [
+      commandRun.purpose,
+      `Profile: ${commandRun.profile}`,
+      `Executable: ${policy.executableName}`,
+      `Arguments: ${JSON.stringify(policy.args)}`,
+      `Working directory: ${policy.cwdRelative}`,
+      `Risk: ${policy.risk}`,
+      policy.explanation,
+      `Timeout: ${policy.timeoutSeconds}s`,
+      `Environment keys: ${policy.environmentKeys.join(', ') || '(none)'}`,
+    ].join('\n') + warning;
+  }
+
+  private async runControlledCommand(commandRun: CommandRun): Promise<void> {
+    let fresh = await this.backend.getCommandRun(commandRun.id);
+    let processStarted = false;
+    if (fresh.status !== 'proposed') {
+      void vscode.window.showWarningMessage(`This command is already ${fresh.status}.`);
+      return;
+    }
+    let policy: CommandPolicyDecision;
+    try {
+      policy = await this.evaluateCommand(fresh);
+    } catch (error) {
+      const explanation = `Blocked by extension policy: ${(error as Error).message}`;
+      const blocked = await this.backend.decideCommandRun(fresh.id, 'block', 'BLOCKED', explanation);
+      await this.send({ command: 'commandRunUpdated', payload: blocked });
+      return;
+    }
+    if (policy.blocked) {
+      const blocked = await this.backend.decideCommandRun(fresh.id, 'block', 'BLOCKED', policy.explanation, policy.executableName, policy.environmentKeys);
+      await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(blocked, policy) });
+      return;
+    }
+    const choice = await vscode.window.showWarningMessage(
+      this.approvalText(fresh, policy),
+      { modal: true },
+      'Run once',
+    );
+    if (choice !== 'Run once') return;
+
+    fresh = await this.backend.decideCommandRun(
+      fresh.id, 'approve', policy.risk, policy.explanation, policy.executableName, policy.environmentKeys,
+    );
+    await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(fresh, policy) });
+    fresh = await this.backend.reportCommandEvent(fresh.id, 'starting', 'Approved process is starting');
+    await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(fresh, policy) });
+
+    try {
+      policy = await this.evaluateCommand(fresh);
+      const resultPromise = this.processRunner.run(fresh, policy, (event) => {
+        void this.send({ command: 'commandRunOutput', payload: event });
+      });
+      processStarted = true;
+      fresh = await this.backend.reportCommandEvent(fresh.id, 'running', 'Controlled process started');
+      await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(fresh, policy) });
+      const result = await resultPromise;
+      const completed = await this.backend.reportCommandResult(fresh.id, result);
+      await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(completed, policy) });
+    } catch (error) {
+      if (processStarted) {
+        await this.processRunner.cancel(fresh.id);
+      }
+      const now = new Date().toISOString();
+      const failed = await this.backend.reportCommandResult(fresh.id, {
+        status: 'failed', exitCode: null, terminationReason: 'runner_error',
+        startedAt: fresh.started_at || now, completedAt: now, durationMs: 0,
+        stdoutTail: '', stderrTail: '', outputTruncated: false, timedOut: false, cancelled: false,
+        failureReason: (error as Error).message,
+      });
+      await this.send({ command: 'commandRunUpdated', payload: failed });
+    }
+  }
+
+  private async rejectControlledCommand(commandRun: CommandRun): Promise<void> {
+    try {
+      const policy = this.commandPolicies.get(commandRun.id) || await this.evaluateCommand(commandRun);
+      const rejected = await this.backend.decideCommandRun(
+        commandRun.id, 'reject', policy.risk, policy.explanation, policy.executableName, policy.environmentKeys,
+      );
+      await this.send({ command: 'commandRunUpdated', payload: this.withPolicy(rejected, policy) });
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Unable to reject command: ${(error as Error).message}`);
+    }
+  }
+
   private async runProposedCommand(command: string, explanation: string): Promise<void> {
     const folder = this.getActiveWorkspaceFolder();
     if (!folder || !command.trim() || /[\r\n]/.test(command) || command.length > 2_000) {
@@ -792,7 +980,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     const unsafeEnabled = vscode.workspace.getConfiguration('personalCodex').get('enableUnsafeCommandExecution', false);
     if (!unsafeEnabled) {
       const action = await vscode.window.showWarningMessage(
-        'Command execution is disabled. Personal Codeme currently has only a legacy raw terminal path; controlled execution arrives in Phase 5.',
+        'This is a deprecated raw command proposal. Raw command text is display-only; ask the agent for a structured Phase 5 command profile.',
         'Open setting'
       );
       if (action === 'Open setting') {
@@ -800,15 +988,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       }
       return;
     }
-    const choice = await vscode.window.showWarningMessage(
-      `Unsafe compatibility mode is enabled. Run this raw command in ${folder.name}?\n\n${command}${explanation ? `\n\n${explanation}` : ''}`,
-      { modal: true },
-      'Run command'
+    void vscode.window.showWarningMessage(
+      `Deprecated raw command proposals are display-only and cannot execute, even when personalCodex.enableUnsafeCommandExecution is enabled. Ask the agent for a structured command profile instead.\n\n${command}${explanation ? `\n\n${explanation}` : ''}`
     );
-    if (choice !== 'Run command') return;
-    const terminal = vscode.window.createTerminal({ name: 'Codeme Agent', cwd: folder.uri });
-    terminal.show(true);
-    terminal.sendText(command, true);
-    await this.send({ command: 'proposalApplied', payload: { kind: 'command', command } });
   }
 }

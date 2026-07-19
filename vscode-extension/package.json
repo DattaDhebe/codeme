@@ -5,7 +5,7 @@
   "description": "A local-first Copilot-style coding assistant powered by Ollama.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
-  "version": "0.3.1",
+  "version": "0.4.0",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -36,7 +36,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.3.1.vsix"
+    "package": "vsce package --out personal-codeme-0.4.0.vsix"
   },
   "files": [
     "dist/**",
@@ -87,7 +87,58 @@
         "personalCodex.enableUnsafeCommandExecution": {
           "type": "boolean",
           "default": false,
-          "description": "Enable the legacy raw terminal command path. Unsafe: Phase 5 controlled execution is not implemented. Every command still requires confirmation."
+          "description": "Deprecated compatibility setting. Raw command proposals are display-only and cannot bypass the controlled runner.",
+          "deprecationMessage": "Deprecated: raw command proposals are display-only. Use structured controlled command profiles."
+        },
+        "personalCodex.pythonExecutable": {
+          "type": "string",
+          "default": "python",
+          "description": "User-controlled trusted Python executable name for pytest and python_module profiles."
+        },
+        "personalCodex.npmExecutable": {
+          "type": "string",
+          "default": "npm",
+          "description": "User-controlled trusted npm wrapper for controlled npm profiles."
+        },
+        "personalCodex.dotnetExecutable": {
+          "type": "string",
+          "default": "dotnet",
+          "description": "User-controlled trusted dotnet executable for controlled .NET profiles."
+        },
+        "personalCodex.mavenExecutable": {
+          "type": "string",
+          "default": "mvn",
+          "description": "User-controlled trusted Maven wrapper for controlled Maven profiles."
+        },
+        "personalCodex.gradleExecutable": {
+          "type": "string",
+          "default": "gradle",
+          "description": "User-controlled trusted Gradle wrapper for controlled Gradle profiles."
+        },
+        "personalCodex.gitExecutable": {
+          "type": "string",
+          "default": "git",
+          "description": "User-controlled trusted Git executable for read-only status and diff profiles."
+        },
+        "personalCodex.customExecutableAllowlist": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": { "type": "string" },
+          "description": "Explicit user-owned alias-to-executable allowlist. Repository content cannot modify it."
+        },
+        "personalCodex.commandOutputLimitBytes": {
+          "type": "number",
+          "default": 1048576,
+          "minimum": 16384,
+          "maximum": 4194304,
+          "description": "Maximum command output streamed into the sidebar; pipes continue to be drained after this cap."
+        },
+        "personalCodex.commandTailLimitBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 8192,
+          "maximum": 65536,
+          "description": "Maximum bounded stdout and stderr tail retained for durable results."
         },
         "personalCodex.showNotifications": {
           "type": "boolean",

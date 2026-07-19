@@ -118,3 +118,58 @@ class ChangeSetEvent(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     change_set = relationship("ChangeSet", back_populates="events")
+
+
+class CommandRun(Base):
+    __tablename__ = "command_runs"
+
+    id = Column(String(36), primary_key=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    profile = Column(String(32), nullable=False)
+    arguments_json = Column(Text, nullable=False, default="[]")
+    cwd_relative = Column(String(1024), nullable=False, default=".")
+    purpose = Column(String(500), nullable=False)
+    requested_timeout_seconds = Column(Integer, nullable=False, default=120)
+    model_risk_hint = Column(String(32), nullable=True)
+    calculated_risk = Column(String(32), nullable=True)
+    risk_explanation = Column(String(1000), nullable=True)
+    resolved_executable_name = Column(String(255), nullable=True)
+    environment_keys_json = Column(Text, nullable=False, default="[]")
+    decision = Column(String(16), nullable=True)
+    status = Column(String(32), nullable=False, default="proposed", index=True)
+    exit_code = Column(Integer, nullable=True)
+    termination_reason = Column(String(64), nullable=True)
+    duration_ms = Column(Integer, nullable=True)
+    stdout_tail = Column(Text, nullable=False, default="")
+    stderr_tail = Column(Text, nullable=False, default="")
+    output_truncated = Column(Integer, nullable=False, default=0)
+    timed_out = Column(Integer, nullable=False, default=0)
+    cancelled = Column(Integer, nullable=False, default=0)
+    failure_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    events = relationship(
+        "CommandRunEvent",
+        back_populates="command_run",
+        cascade="all, delete-orphan",
+        order_by="CommandRunEvent.created_at",
+    )
+
+
+class CommandRunEvent(Base):
+    __tablename__ = "command_run_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    command_run_id = Column(String(36), ForeignKey("command_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    from_status = Column(String(32), nullable=True)
+    to_status = Column(String(32), nullable=False)
+    detail = Column(String(2000), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    command_run = relationship("CommandRun", back_populates="events")
