@@ -120,6 +120,30 @@ describe('BackendClient', () => {
       method: 'POST', body: expect.stringContaining('stdout_tail'),
     }));
   });
+
+  it('uses dedicated versioned verification lifecycle APIs', async () => {
+    const response = { id: 'verify-1', schema_version: 1, plan_fingerprint: 'a'.repeat(64), steps: [] };
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => response, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BackendClient(new FakeConfig());
+
+    await client.createVerificationSession({
+      conversationId: 1, workspaceId: 2, originalRequest: 'Fix value', mode: 'quick', sourceChangeSetId: 'change-1',
+      maximumRepairAttempts: 2, maximumReruns: 2, totalTimeBudgetSeconds: 600,
+    });
+    await client.decideVerificationPlan('verify-1', 'approve', 'a'.repeat(64));
+    await client.startVerificationStep('verify-1', 'step-1', 'a'.repeat(64));
+    await client.reportVerificationStep('verify-1', 'step-1', 'a'.repeat(64), 'run-1');
+    await client.reportVerificationRepair('verify-1', 'applied', 'change-2');
+
+    expect(fetchMock.mock.calls.map((call) => String(call[0]))).toEqual(expect.arrayContaining([
+      expect.stringMatching(/verification-sessions$/),
+      expect.stringMatching(/verification-sessions\/verify-1\/decision$/),
+      expect.stringMatching(/verification-sessions\/verify-1\/steps\/step-1\/start$/),
+      expect.stringMatching(/verification-sessions\/verify-1\/steps\/step-1\/result$/),
+      expect.stringMatching(/verification-sessions\/verify-1\/repair-result$/),
+    ]));
+  });
 });
 
 afterEach(() => {
@@ -185,6 +209,11 @@ describe('Copilot-style webview', () => {
       'copyCommandOutput',
       'Output was truncated',
       "escapeHtml(proposal.stdout)",
+      'Approve complete plan',
+      'previewVerificationRepair',
+      'applyVerificationRepair',
+      'rejectVerificationRepair',
+      'verificationStepOutput',
     ]) {
       expect(source).toContain(capability);
     }
@@ -193,6 +222,15 @@ describe('Copilot-style webview', () => {
     }
     expect(source).toContain('Legacy raw commands cannot execute');
     expect(source).not.toContain("isFile ? 'Apply' : 'Run'");
+  });
+
+  it('reuses the Phase 4 manager and Phase 5 runner for repair and verification', () => {
+    const provider = readFileSync(resolve(__dirname, '../src/sidebarProvider.ts'), 'utf8');
+    expect(provider).toContain('this.processRunner.run(command, policy');
+    expect(provider).toContain('const applied = await this.applyChangeSet(changeSet)');
+    expect(provider).toContain("'Extension reloaded while a controlled process was active'");
+    expect(provider).not.toContain('exec(');
+    expect(provider).not.toContain('spawn(');
   });
 
   it('targets named whole-file code blocks without mistaking an extension for a file', () => {

@@ -393,3 +393,201 @@ class CommandRunRead(BaseModel):
     started_at: datetime | None = None
     completed_at: datetime | None = None
     events: list[CommandRunEventRead] = Field(default_factory=list)
+
+
+VerificationProfile = Literal[
+    "pytest", "python_module", "npm_test", "npm_build", "npm_lint",
+    "dotnet_test", "dotnet_build", "maven_test", "maven_package",
+    "gradle_test", "gradle_build",
+]
+VerificationMode = Literal["quick", "full"]
+
+
+class VerificationStepInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    step_id: str = Field(..., min_length=1, max_length=64)
+    position: int = Field(..., ge=0, le=5)
+    profile: VerificationProfile
+    arguments: list[str] = Field(default_factory=list, max_length=30)
+    cwd_relative: str = Field(".", min_length=1, max_length=1024)
+    purpose: str = Field(..., min_length=1, max_length=500)
+    required: bool = True
+    timeout_seconds: int = Field(120, ge=1, le=900)
+    expected_outcome: str = Field("Exit code zero", min_length=1, max_length=500)
+
+    @model_validator(mode="after")
+    def validate_safe_verification_step(self):
+        CommandProposalInput(
+            profile=self.profile,
+            arguments=self.arguments,
+            cwd_relative=self.cwd_relative,
+            purpose=self.purpose,
+            requested_timeout_seconds=self.timeout_seconds,
+        )
+        lowered = [argument.casefold() for argument in self.arguments]
+        if any(argument in {"install", "add", "update", "upgrade"} for argument in lowered):
+            raise ValueError("Verification plans cannot install or update packages")
+        if any("http://" in argument.casefold() or "https://" in argument.casefold() for argument in self.arguments):
+            raise ValueError("Verification plans cannot contain network URLs")
+        if self.profile.startswith("maven") and "--offline" not in lowered and "-o" not in lowered:
+            raise ValueError("Maven verification must use offline mode")
+        if self.profile.startswith("gradle") and "--offline" not in lowered:
+            raise ValueError("Gradle verification must use offline mode")
+        return self
+
+
+class VerificationPlanInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    session_id: str | None = Field(None, max_length=64)
+    workspace_id: int
+    source_change_set_id: str | None = Field(None, max_length=36)
+    mode: VerificationMode = "quick"
+    summary: str = Field(..., min_length=1, max_length=500)
+    steps: list[VerificationStepInput] = Field(..., min_length=1, max_length=6)
+    maximum_repair_attempts: int = Field(2, ge=0, le=2)
+    maximum_reruns: int = Field(2, ge=0, le=2)
+    total_time_budget_seconds: int = Field(600, ge=30, le=1200)
+
+    @model_validator(mode="after")
+    def validate_plan_shape(self):
+        positions = [step.position for step in self.steps]
+        ids = [step.step_id for step in self.steps]
+        if positions != list(range(len(self.steps))):
+            raise ValueError("Verification step positions must be contiguous and ordered")
+        if len(ids) != len(set(ids)):
+            raise ValueError("Verification step IDs must be unique")
+        if sum(step.timeout_seconds for step in self.steps) > self.total_time_budget_seconds:
+            raise ValueError("Step timeouts exceed the total session budget")
+        return self
+
+
+class VerificationSessionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    conversation_id: int
+    workspace_id: int
+    source_change_set_id: str | None = Field(None, max_length=36)
+    mode: VerificationMode = "quick"
+    original_request: str = Field(..., min_length=1, max_length=8000)
+    steps: list[VerificationStepInput] | None = Field(None, max_length=6)
+    maximum_repair_attempts: int = Field(2, ge=0, le=2)
+    maximum_reruns: int = Field(2, ge=0, le=2)
+    total_time_budget_seconds: int | None = Field(None, ge=30, le=1200)
+
+
+class VerificationPlanDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    plan_fingerprint: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    detail: str | None = Field(None, max_length=1000)
+
+
+class VerificationStepStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_fingerprint: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+
+
+class VerificationStepResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    plan_fingerprint: str = Field(..., pattern=r"^[0-9a-f]{64}$")
+    command_run_id: str = Field(..., min_length=1, max_length=64)
+
+
+class VerificationRepairRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    model: str | None = Field(None, max_length=200)
+
+
+class VerificationRepairResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["applied", "rejected", "conflict", "restored", "restore_failed"]
+    change_set_id: str = Field(..., min_length=1, max_length=36)
+    detail: str | None = Field(None, max_length=2000)
+
+
+class VerificationCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field("Cancelled by user", min_length=1, max_length=1000)
+
+
+class VerificationEventRead(BaseModel):
+    event_type: str
+    from_state: str | None
+    to_state: str
+    detail: str | None
+    created_at: datetime
+
+
+class RepairAttemptRead(BaseModel):
+    id: str
+    attempt_number: int
+    failure_fingerprint: str
+    model_analysis: str | None = None
+    repair_change_set_id: str | None = None
+    repair_content_fingerprint: str | None = None
+    decision: str | None = None
+    result: str | None = None
+    created_at: datetime
+
+
+class VerificationStepRead(BaseModel):
+    step_id: str
+    position: int
+    profile: VerificationProfile
+    arguments: list[str]
+    cwd_relative: str
+    purpose: str
+    required: bool
+    timeout_seconds: int
+    expected_outcome: str
+    status: str
+    command_run_id: str | None = None
+    exit_code: int | None = None
+    failure_fingerprint: str | None = None
+    result_summary: str | None = None
+
+
+class VerificationSessionRead(BaseModel):
+    id: str
+    schema_version: Literal[1] = 1
+    conversation_id: int
+    workspace_id: int
+    source_change_set_id: str | None = None
+    mode: VerificationMode
+    summary: str
+    original_request: str
+    state: str
+    plan_version: int
+    approved_plan_version: int | None = None
+    plan_fingerprint: str
+    approved_plan_fingerprint: str | None = None
+    maximum_repair_attempts: int
+    maximum_reruns: int
+    total_time_budget_seconds: int
+    current_attempt: int
+    current_rerun: int
+    final_summary: str | None = None
+    failure_reason: str | None = None
+    cancellation_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    approved_at: datetime | None = None
+    started_at: datetime | None = None
+    completed_at: datetime | None = None
+    steps: list[VerificationStepRead]
+    repair_attempts: list[RepairAttemptRead] = Field(default_factory=list)
+    events: list[VerificationEventRead] = Field(default_factory=list)
+
+
+class VerificationStepStartRead(BaseModel):
+    session: VerificationSessionRead
+    command_run: CommandRunRead

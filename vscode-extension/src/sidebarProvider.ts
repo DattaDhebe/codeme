@@ -8,6 +8,7 @@ import { ChangeSetManager } from './changeSetManager';
 import { CommandPolicyDecision, CommandRun } from './commandRun';
 import { CommandPolicyError, evaluateCommandPolicy } from './commandPolicy';
 import { ControlledProcessRunner } from './processRunner';
+import { VerificationMode, VerificationSession, verificationTerminalStates } from './verification';
 
 interface WebviewMessage {
   command: string;
@@ -32,6 +33,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private readonly commandPolicies = new Map<string, CommandPolicyDecision>();
   private readonly changeSetManager: ChangeSetManager;
   private readonly processRunner: ControlledProcessRunner;
+  private readonly activeVerificationCommands = new Map<string, string>();
+  private readonly executingVerifications = new Set<string>();
 
   constructor(
     private readonly context: vscode.ExtensionContext,
@@ -226,6 +229,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       await this.requestWorkspaceRegistration();
     }
     await Promise.all([this.refreshWorkspaceState(), this.refreshConversations()]);
+    await this.recoverVerificationSessions();
     if (conversationId) {
       await this.loadConversation(conversationId);
     }
@@ -447,6 +451,37 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         if (typeof message.args?.commandRunId === 'string') {
           await this.processRunner.cancel(message.args.commandRunId);
         }
+        break;
+      case 'startVerification':
+        if (typeof message.args?.conversationId === 'number') {
+          await this.startVerification(
+            message.args.conversationId,
+            String(message.args.originalRequest || 'Verify the applied changes'),
+            typeof message.args.sourceChangeSetId === 'string' ? message.args.sourceChangeSetId : undefined,
+            message.args.mode === 'full' ? 'full' : 'quick',
+          );
+        }
+        break;
+      case 'approveVerification':
+        if (typeof message.args?.sessionId === 'string') await this.approveVerification(message.args.sessionId);
+        break;
+      case 'rejectVerification':
+        if (typeof message.args?.sessionId === 'string') await this.rejectVerification(message.args.sessionId);
+        break;
+      case 'cancelVerification':
+        if (typeof message.args?.sessionId === 'string') await this.cancelVerification(message.args.sessionId);
+        break;
+      case 'previewVerificationRepair':
+        if (typeof message.args?.changeSetId === 'string') await this.previewChangeSet(await this.backend.getChangeSet(message.args.changeSetId));
+        break;
+      case 'applyVerificationRepair':
+        if (typeof message.args?.sessionId === 'string') await this.applyVerificationRepair(message.args.sessionId);
+        break;
+      case 'rejectVerificationRepair':
+        if (typeof message.args?.sessionId === 'string') await this.rejectVerificationRepair(message.args.sessionId);
+        break;
+      case 'restoreVerificationRepair':
+        if (typeof message.args?.sessionId === 'string') await this.restoreVerificationRepair(message.args.sessionId);
         break;
       case 'openSettings':
         await vscode.commands.executeCommand('workbench.action.openSettings', '@ext:personal-codex-local.personal-codeme');
@@ -699,11 +734,11 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     }
   }
 
-  private async applyChangeSet(changeSet: ChangeSet): Promise<void> {
+  private async applyChangeSet(changeSet: ChangeSet): Promise<ChangeSet | undefined> {
     const folder = this.getActiveWorkspaceFolder();
     if (!folder) {
       void vscode.window.showErrorMessage('Open the registered workspace before applying this change set.');
-      return;
+      return undefined;
     }
     const files = changeSet.operations.map((operation) => `${operation.type}: ${operation.relative_path}`).join('\n');
     const choice = await vscode.window.showWarningMessage(
@@ -711,7 +746,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       { modal: true },
       'Apply complete change set'
     );
-    if (choice !== 'Apply complete change set') return;
+    if (choice !== 'Apply complete change set') return undefined;
 
     let approved: ChangeSet | undefined;
     let localResult: { checkpointReference: string; resultHashes: Record<string, string> } | undefined;
@@ -726,6 +761,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       );
       await this.send({ command: 'changeSetUpdated', payload: applied });
       void vscode.window.showInformationMessage(`Applied ${applied.operations.length} file change(s). A restore checkpoint is available.`);
+      return applied;
     } catch (error) {
       let failure = error as Error;
       if (approved && localResult) {
@@ -750,6 +786,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         // The original error is more actionable than a secondary reporting failure.
       }
       void vscode.window.showErrorMessage(`Change set was not applied: ${failure.message}`);
+      return undefined;
     }
   }
 
@@ -762,20 +799,21 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     }
   }
 
-  private async restoreChangeSet(changeSet: ChangeSet): Promise<void> {
+  private async restoreChangeSet(changeSet: ChangeSet): Promise<ChangeSet | undefined> {
     const folder = this.getActiveWorkspaceFolder();
-    if (!folder) return;
+    if (!folder) return undefined;
     const choice = await vscode.window.showWarningMessage(
       `Restore only the files changed by '${changeSet.summary}'? Newer user changes will cause a conflict.`,
       { modal: true },
       'Restore change set'
     );
-    if (choice !== 'Restore change set') return;
+    if (choice !== 'Restore change set') return undefined;
     try {
       await this.changeSetManager.restore(changeSet, folder);
       const restored = await this.backend.reportChangeSetRestore(changeSet.id, 'restored');
       await this.send({ command: 'changeSetUpdated', payload: restored });
       void vscode.window.showInformationMessage('Change set restored from its checkpoint.');
+      return restored;
     } catch (error) {
       try {
         const failed = await this.backend.reportChangeSetRestore(changeSet.id, 'restore_failed', (error as Error).message);
@@ -784,6 +822,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         // Preserve the local restore error.
       }
       void vscode.window.showErrorMessage(`Restore stopped: ${(error as Error).message}`);
+      return undefined;
     }
   }
 
@@ -969,6 +1008,188 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     } catch (error) {
       void vscode.window.showErrorMessage(`Unable to reject command: ${(error as Error).message}`);
     }
+  }
+
+  private verificationSettings(): { maximumRepairAttempts: number; maximumReruns: number; totalTimeBudgetSeconds: number } {
+    const configuration = vscode.workspace.getConfiguration('personalCodex');
+    return {
+      maximumRepairAttempts: configuration.get('verificationMaximumRepairAttempts', 2),
+      maximumReruns: configuration.get('verificationMaximumReruns', 2),
+      totalTimeBudgetSeconds: configuration.get('verificationTimeBudgetSeconds', 600),
+    };
+  }
+
+  private async publishVerification(session: VerificationSession): Promise<void> {
+    const steps = await Promise.all(session.steps.map(async (step) => {
+      const preview: CommandRun = {
+        id: `verification-preview-${session.id}-${step.step_id}`, schema_version: 1,
+        conversation_id: session.conversation_id, workspace_id: session.workspace_id,
+        profile: step.profile, arguments: step.arguments, cwd_relative: step.cwd_relative,
+        purpose: step.purpose, requested_timeout_seconds: step.timeout_seconds,
+        status: 'proposed', created_at: session.created_at, updated_at: session.updated_at,
+      };
+      try {
+        const policy = await this.evaluateCommand(preview);
+        return { ...step, calculated_risk: policy.risk, risk_explanation: policy.explanation };
+      } catch (error) {
+        return { ...step, calculated_risk: 'BLOCKED' as const, risk_explanation: (error as Error).message };
+      }
+    }));
+    await this.send({ command: 'verificationSessionUpdated', payload: { ...session, steps } });
+  }
+
+  private async recoverVerificationSessions(): Promise<void> {
+    if (!this.currentWorkspaceId) return;
+    try {
+      const active = await this.backend.listVerificationSessions(this.currentWorkspaceId, true);
+      for (let session of active) {
+        if (session.state === 'RUNNING' && session.steps.some((step) => step.status === 'RUNNING')) {
+          session = await this.backend.cancelVerification(session.id, 'Extension reloaded while a controlled process was active', true);
+        }
+        await this.publishVerification(session);
+      }
+    } catch (error) {
+      console.warn('Unable to recover verification sessions.', error);
+    }
+  }
+
+  private async startVerification(
+    conversationId: number, originalRequest: string, sourceChangeSetId: string | undefined, mode: VerificationMode,
+  ): Promise<void> {
+    if (!this.currentWorkspaceId) {
+      void vscode.window.showWarningMessage('Register the active workspace before starting verification.');
+      return;
+    }
+    try {
+      const session = await this.backend.createVerificationSession({
+        conversationId, workspaceId: this.currentWorkspaceId, originalRequest, mode, sourceChangeSetId,
+        ...this.verificationSettings(),
+      });
+      await this.publishVerification(session);
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Unable to create verification plan: ${(error as Error).message}`);
+    }
+  }
+
+  private async approveVerification(sessionId: string): Promise<void> {
+    const session = await this.backend.getVerificationSession(sessionId);
+    if (session.state !== 'AWAITING_PLAN_APPROVAL') return;
+    await this.publishVerification(session);
+    const plan = session.steps.map((step, index) => [
+      `${index + 1}. ${step.purpose}${step.required ? ' (required)' : ' (optional)'}`,
+      `   ${step.profile} ${JSON.stringify(step.arguments)} / cwd ${step.cwd_relative} / ${step.timeout_seconds}s`,
+    ].join('\n')).join('\n');
+    const choice = await vscode.window.showWarningMessage(
+      `Run this immutable verification plan once?\n\n${plan}\n\nSession budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximum_repair_attempts}; reruns: ${session.maximum_reruns}.`,
+      { modal: true }, 'Approve complete plan',
+    );
+    if (choice !== 'Approve complete plan') return;
+    const approved = await this.backend.decideVerificationPlan(session.id, 'approve', session.plan_fingerprint);
+    await this.publishVerification(approved);
+    await this.executeVerification(approved);
+  }
+
+  private async rejectVerification(sessionId: string): Promise<void> {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const rejected = await this.backend.decideVerificationPlan(session.id, 'reject', session.plan_fingerprint);
+    await this.publishVerification(rejected);
+  }
+
+  private async cancelVerification(sessionId: string): Promise<void> {
+    const commandId = this.activeVerificationCommands.get(sessionId);
+    if (commandId) await this.processRunner.cancel(commandId);
+    const cancelled = await this.backend.cancelVerification(sessionId, 'Cancelled by user');
+    await this.publishVerification(cancelled);
+  }
+
+  private async executeVerification(initial: VerificationSession): Promise<void> {
+    if (this.executingVerifications.has(initial.id)) return;
+    this.executingVerifications.add(initial.id);
+    let session = initial;
+    try {
+      while (session.state === 'RUNNING') {
+        const step = session.steps.find((item) => item.status === 'PENDING');
+        if (!step) break;
+        const started = await this.backend.startVerificationStep(session.id, step.step_id, session.plan_fingerprint);
+        session = started.session;
+        let command = started.command_run;
+        let policy: CommandPolicyDecision;
+        try {
+          policy = await this.evaluateCommand(command);
+          if (policy.blocked || policy.network || policy.risks.some((risk) => ['PACKAGE_INSTALL', 'SENSITIVE'].includes(risk))) {
+            throw new CommandPolicyError(`Verification step is outside the offline bounded policy: ${policy.explanation}`);
+          }
+        } catch (error) {
+          await this.backend.decideCommandRun(command.id, 'block', 'BLOCKED', (error as Error).message);
+          session = await this.backend.cancelVerification(session.id, `Policy blocked: ${(error as Error).message}`, true);
+          await this.publishVerification(session);
+          return;
+        }
+        command = await this.backend.decideCommandRun(
+          command.id, 'approve', policy.risk, policy.explanation, policy.executableName, policy.environmentKeys,
+        );
+        command = await this.backend.reportCommandEvent(command.id, 'starting', 'Approved verification step is starting');
+        this.activeVerificationCommands.set(session.id, command.id);
+        const resultPromise = this.processRunner.run(command, policy, (event) => {
+          void this.send({ command: 'verificationStepOutput', payload: { sessionId: session.id, stepId: step.step_id, ...event } });
+        });
+        command = await this.backend.reportCommandEvent(command.id, 'running', 'Controlled verification process started');
+        await this.publishVerification(session);
+        const result = await resultPromise;
+        await this.backend.reportCommandResult(command.id, result);
+        session = await this.backend.reportVerificationStep(session.id, step.step_id, session.plan_fingerprint, command.id);
+        this.activeVerificationCommands.delete(session.id);
+        await this.publishVerification(session);
+      }
+      if (session.state === 'VERIFICATION_FAILED' && session.maximum_repair_attempts > session.current_attempt) {
+        await this.send({ command: 'verificationRepairStarted', payload: { sessionId: session.id } });
+        session = await this.backend.prepareVerificationRepair(session.id, this.backend.configuredModel);
+        await this.publishVerification(session);
+      }
+    } catch (error) {
+      const commandId = this.activeVerificationCommands.get(session.id);
+      if (commandId) await this.processRunner.cancel(commandId);
+      this.activeVerificationCommands.delete(session.id);
+      await this.send({ command: 'operationError', payload: { message: `Verification stopped safely: ${(error as Error).message}` } });
+      try {
+        const fresh = await this.backend.getVerificationSession(session.id);
+        await this.publishVerification(fresh);
+      } catch { /* preserve the original failure */ }
+    } finally {
+      this.executingVerifications.delete(session.id);
+    }
+  }
+
+  private async applyVerificationRepair(sessionId: string): Promise<void> {
+    let session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id || session.state !== 'AWAITING_REPAIR_APPROVAL') return;
+    const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
+    const applied = await this.applyChangeSet(changeSet);
+    if (!applied) return;
+    session = await this.backend.reportVerificationRepair(session.id, 'applied', applied.id, 'Applied through the Phase 4 transactional manager');
+    await this.publishVerification(session);
+    await this.executeVerification(session);
+  }
+
+  private async rejectVerificationRepair(sessionId: string): Promise<void> {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id) return;
+    await this.backend.decideChangeSet(attempt.repair_change_set_id, 'reject', 'Repair rejected in VS Code');
+    const stopped = await this.backend.reportVerificationRepair(session.id, 'rejected', attempt.repair_change_set_id, 'Repair rejected by user');
+    await this.publishVerification(stopped);
+  }
+
+  private async restoreVerificationRepair(sessionId: string): Promise<void> {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id || attempt.result !== 'applied') return;
+    const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
+    const restored = await this.restoreChangeSet(changeSet);
+    if (!restored) return;
+    const updated = await this.backend.reportVerificationRepair(session.id, 'restored', restored.id, 'Repair restored through the Phase 4 checkpoint');
+    await this.publishVerification(updated);
   }
 
   private async runProposedCommand(command: string, explanation: string): Promise<void> {

@@ -147,7 +147,12 @@ function classify(profile: CommandProfile, args: string[], timeout: number, exec
     risks.add('PACKAGE_INSTALL');
     reasons.push('Arguments may install or restore packages.');
   }
-  if (/https?:\/\//.test(joined) || ['maven_test', 'maven_package', 'gradle_test', 'gradle_build'].includes(profile)) {
+  const offlineBuild = profile.startsWith('maven')
+    ? lowered.includes('--offline') || lowered.includes('-o')
+    : profile.startsWith('gradle')
+      ? lowered.includes('--offline')
+      : false;
+  if (/https?:\/\//.test(joined) || (['maven_test', 'maven_package', 'gradle_test', 'gradle_build'].includes(profile) && !offlineBuild)) {
     risks.add('NETWORK');
     reasons.push('The profile or arguments may access the network.');
   }

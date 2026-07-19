@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from codeme_agent import agent, changesets, command_runs, crud, ollama, schemas, workspace
+from codeme_agent import agent, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
 from codeme_agent.db import get_db
 
 router = APIRouter(prefix="/api")
@@ -233,6 +233,166 @@ def record_command_result(command_run_id: str, request: schemas.CommandResultCre
     try:
         return command_runs.serialize_command_run(command_runs.record_result(db, record, request))
     except command_runs.CommandRunError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions", response_model=schemas.VerificationSessionRead, status_code=status.HTTP_201_CREATED)
+def create_verification_session(request: schemas.VerificationSessionCreate, db: Session = Depends(get_db)):
+    try:
+        return verification.serialize_session(verification.create_session(db, request))
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+
+
+@router.get("/verification-sessions", response_model=list[schemas.VerificationSessionRead])
+def list_verification_sessions(
+    workspace_id: int = Query(...),
+    active_only: bool = Query(False),
+    db: Session = Depends(get_db),
+):
+    return [verification.serialize_session(record) for record in verification.list_sessions(db, workspace_id, active_only)]
+
+
+@router.get("/verification-sessions/{session_id}", response_model=schemas.VerificationSessionRead)
+def get_verification_session(session_id: str, db: Session = Depends(get_db)):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    return verification.serialize_session(record)
+
+
+@router.get("/verification-sessions/{session_id}/events")
+def stream_verification_events(session_id: str, db: Session = Depends(get_db)):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    events = list(record.events)
+
+    def event_stream():
+        for event in events:
+            payload = {
+                "schema_version": 1,
+                "session_id": record.id,
+                "type": event.event_type,
+                "from_state": event.from_state,
+                "to_state": event.to_state,
+                "detail": event.detail,
+                "created_at": event.created_at.isoformat(),
+            }
+            yield f"event: {event.event_type}\ndata: {json.dumps(payload)}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
+
+    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+
+@router.post("/verification-sessions/{session_id}/decision", response_model=schemas.VerificationSessionRead)
+def decide_verification_plan(session_id: str, request: schemas.VerificationPlanDecision, db: Session = Depends(get_db)):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        return verification.serialize_session(verification.decide_plan(db, record, request))
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/steps/{step_id}/start", response_model=schemas.VerificationStepStartRead)
+def start_verification_step(
+    session_id: str,
+    step_id: str,
+    request: schemas.VerificationStepStart,
+    db: Session = Depends(get_db),
+):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        session, command = verification.start_step(db, record, step_id, request)
+        return {
+            "session": verification.serialize_session(session),
+            "command_run": command_runs.serialize_command_run(command),
+        }
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/steps/{step_id}/result", response_model=schemas.VerificationSessionRead)
+def record_verification_step_result(
+    session_id: str,
+    step_id: str,
+    request: schemas.VerificationStepResult,
+    db: Session = Depends(get_db),
+):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        return verification.serialize_session(verification.record_step_result(db, record, step_id, request))
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/repair", response_model=schemas.VerificationSessionRead)
+def prepare_verification_repair(
+    session_id: str,
+    request: schemas.VerificationRepairRequest,
+    db: Session = Depends(get_db),
+):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        attempt, feedback = verification.begin_repair(db, record)
+        workspace_record = db.get(models.Workspace, record.workspace_id)
+        analysis, prepared = repair_agent.RepairAgent(Path(workspace_record.root_path)).run(
+            record.original_request, feedback, model=request.model,
+        )
+        change_set = changesets.persist_change_set(
+            db, record.conversation_id, record.workspace_id, prepared,
+        ) if prepared else None
+        return verification.serialize_session(verification.attach_repair(db, record, attempt, change_set, analysis))
+    except (verification.VerificationError, workspace.WorkspaceError) as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except ollama.OllamaError as exc:
+        if 'attempt' in locals():
+            verification.attach_repair(db, record, attempt, None, f"Repair model unavailable: {exc}")
+        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/repair-result", response_model=schemas.VerificationSessionRead)
+def record_verification_repair_result(
+    session_id: str,
+    request: schemas.VerificationRepairResult,
+    db: Session = Depends(get_db),
+):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        return verification.serialize_session(verification.record_repair_result(db, record, request))
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/cancel", response_model=schemas.VerificationSessionRead)
+def cancel_verification_session(session_id: str, request: schemas.VerificationCancel, db: Session = Depends(get_db)):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        return verification.serialize_session(verification.cancel_session(db, record, request.reason))
+    except verification.VerificationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/verification-sessions/{session_id}/interrupt", response_model=schemas.VerificationSessionRead)
+def interrupt_verification_session(session_id: str, request: schemas.VerificationCancel, db: Session = Depends(get_db)):
+    record = verification.get_session(db, session_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Verification session not found")
+    try:
+        return verification.serialize_session(verification.cancel_session(db, record, request.reason, interrupted=True))
+    except verification.VerificationError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 

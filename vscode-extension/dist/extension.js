@@ -586,7 +586,8 @@ function classify(profile, args, timeout, executable) {
     risks.add("PACKAGE_INSTALL");
     reasons.push("Arguments may install or restore packages.");
   }
-  if (/https?:\/\//.test(joined) || ["maven_test", "maven_package", "gradle_test", "gradle_build"].includes(profile)) {
+  const offlineBuild = profile.startsWith("maven") ? lowered.includes("--offline") || lowered.includes("-o") : profile.startsWith("gradle") ? lowered.includes("--offline") : false;
+  if (/https?:\/\//.test(joined) || ["maven_test", "maven_package", "gradle_test", "gradle_build"].includes(profile) && !offlineBuild) {
     risks.add("NETWORK");
     reasons.push("The profile or arguments may access the network.");
   }
@@ -869,6 +870,8 @@ var PersonalCodexSidebarProvider = class {
     this.proposedDocuments = /* @__PURE__ */ new Map();
     this.legacyChangeSets = /* @__PURE__ */ new Map();
     this.commandPolicies = /* @__PURE__ */ new Map();
+    this.activeVerificationCommands = /* @__PURE__ */ new Map();
+    this.executingVerifications = /* @__PURE__ */ new Set();
     this.changeSetManager = new ChangeSetManager(context);
     const configuration = vscode3.workspace.getConfiguration("personalCodex");
     this.processRunner = new ControlledProcessRunner({
@@ -1043,6 +1046,7 @@ var PersonalCodexSidebarProvider = class {
       await this.requestWorkspaceRegistration();
     }
     await Promise.all([this.refreshWorkspaceState(), this.refreshConversations()]);
+    await this.recoverVerificationSessions();
     if (conversationId) {
       await this.loadConversation(conversationId);
     }
@@ -1256,6 +1260,44 @@ var PersonalCodexSidebarProvider = class {
         if (typeof message.args?.commandRunId === "string") {
           await this.processRunner.cancel(message.args.commandRunId);
         }
+        break;
+      case "startVerification":
+        if (typeof message.args?.conversationId === "number") {
+          await this.startVerification(
+            message.args.conversationId,
+            String(message.args.originalRequest || "Verify the applied changes"),
+            typeof message.args.sourceChangeSetId === "string" ? message.args.sourceChangeSetId : void 0,
+            message.args.mode === "full" ? "full" : "quick"
+          );
+        }
+        break;
+      case "approveVerification":
+        if (typeof message.args?.sessionId === "string")
+          await this.approveVerification(message.args.sessionId);
+        break;
+      case "rejectVerification":
+        if (typeof message.args?.sessionId === "string")
+          await this.rejectVerification(message.args.sessionId);
+        break;
+      case "cancelVerification":
+        if (typeof message.args?.sessionId === "string")
+          await this.cancelVerification(message.args.sessionId);
+        break;
+      case "previewVerificationRepair":
+        if (typeof message.args?.changeSetId === "string")
+          await this.previewChangeSet(await this.backend.getChangeSet(message.args.changeSetId));
+        break;
+      case "applyVerificationRepair":
+        if (typeof message.args?.sessionId === "string")
+          await this.applyVerificationRepair(message.args.sessionId);
+        break;
+      case "rejectVerificationRepair":
+        if (typeof message.args?.sessionId === "string")
+          await this.rejectVerificationRepair(message.args.sessionId);
+        break;
+      case "restoreVerificationRepair":
+        if (typeof message.args?.sessionId === "string")
+          await this.restoreVerificationRepair(message.args.sessionId);
         break;
       case "openSettings":
         await vscode3.commands.executeCommand("workbench.action.openSettings", "@ext:personal-codex-local.personal-codeme");
@@ -1511,7 +1553,7 @@ ${contextText}` : prompt;
     const folder = this.getActiveWorkspaceFolder();
     if (!folder) {
       void vscode3.window.showErrorMessage("Open the registered workspace before applying this change set.");
-      return;
+      return void 0;
     }
     const files = changeSet.operations.map((operation) => `${operation.type}: ${operation.relative_path}`).join("\n");
     const choice = await vscode3.window.showWarningMessage(
@@ -1524,7 +1566,7 @@ ${files}`,
       "Apply complete change set"
     );
     if (choice !== "Apply complete change set")
-      return;
+      return void 0;
     let approved;
     let localResult;
     try {
@@ -1538,6 +1580,7 @@ ${files}`,
       );
       await this.send({ command: "changeSetUpdated", payload: applied });
       void vscode3.window.showInformationMessage(`Applied ${applied.operations.length} file change(s). A restore checkpoint is available.`);
+      return applied;
     } catch (error) {
       let failure = error;
       if (approved && localResult) {
@@ -1561,6 +1604,7 @@ ${files}`,
       } catch {
       }
       void vscode3.window.showErrorMessage(`Change set was not applied: ${failure.message}`);
+      return void 0;
     }
   }
   async rejectChangeSet(changeSet) {
@@ -1574,19 +1618,20 @@ ${files}`,
   async restoreChangeSet(changeSet) {
     const folder = this.getActiveWorkspaceFolder();
     if (!folder)
-      return;
+      return void 0;
     const choice = await vscode3.window.showWarningMessage(
       `Restore only the files changed by '${changeSet.summary}'? Newer user changes will cause a conflict.`,
       { modal: true },
       "Restore change set"
     );
     if (choice !== "Restore change set")
-      return;
+      return void 0;
     try {
       await this.changeSetManager.restore(changeSet, folder);
       const restored = await this.backend.reportChangeSetRestore(changeSet.id, "restored");
       await this.send({ command: "changeSetUpdated", payload: restored });
       void vscode3.window.showInformationMessage("Change set restored from its checkpoint.");
+      return restored;
     } catch (error) {
       try {
         const failed = await this.backend.reportChangeSetRestore(changeSet.id, "restore_failed", error.message);
@@ -1594,6 +1639,7 @@ ${files}`,
       } catch {
       }
       void vscode3.window.showErrorMessage(`Restore stopped: ${error.message}`);
+      return void 0;
     }
   }
   async previewFileChange(relativePath, content) {
@@ -1793,6 +1839,209 @@ ${files}`,
       void vscode3.window.showErrorMessage(`Unable to reject command: ${error.message}`);
     }
   }
+  verificationSettings() {
+    const configuration = vscode3.workspace.getConfiguration("personalCodex");
+    return {
+      maximumRepairAttempts: configuration.get("verificationMaximumRepairAttempts", 2),
+      maximumReruns: configuration.get("verificationMaximumReruns", 2),
+      totalTimeBudgetSeconds: configuration.get("verificationTimeBudgetSeconds", 600)
+    };
+  }
+  async publishVerification(session) {
+    const steps = await Promise.all(session.steps.map(async (step) => {
+      const preview = {
+        id: `verification-preview-${session.id}-${step.step_id}`,
+        schema_version: 1,
+        conversation_id: session.conversation_id,
+        workspace_id: session.workspace_id,
+        profile: step.profile,
+        arguments: step.arguments,
+        cwd_relative: step.cwd_relative,
+        purpose: step.purpose,
+        requested_timeout_seconds: step.timeout_seconds,
+        status: "proposed",
+        created_at: session.created_at,
+        updated_at: session.updated_at
+      };
+      try {
+        const policy = await this.evaluateCommand(preview);
+        return { ...step, calculated_risk: policy.risk, risk_explanation: policy.explanation };
+      } catch (error) {
+        return { ...step, calculated_risk: "BLOCKED", risk_explanation: error.message };
+      }
+    }));
+    await this.send({ command: "verificationSessionUpdated", payload: { ...session, steps } });
+  }
+  async recoverVerificationSessions() {
+    if (!this.currentWorkspaceId)
+      return;
+    try {
+      const active = await this.backend.listVerificationSessions(this.currentWorkspaceId, true);
+      for (let session of active) {
+        if (session.state === "RUNNING" && session.steps.some((step) => step.status === "RUNNING")) {
+          session = await this.backend.cancelVerification(session.id, "Extension reloaded while a controlled process was active", true);
+        }
+        await this.publishVerification(session);
+      }
+    } catch (error) {
+      console.warn("Unable to recover verification sessions.", error);
+    }
+  }
+  async startVerification(conversationId, originalRequest, sourceChangeSetId, mode) {
+    if (!this.currentWorkspaceId) {
+      void vscode3.window.showWarningMessage("Register the active workspace before starting verification.");
+      return;
+    }
+    try {
+      const session = await this.backend.createVerificationSession({
+        conversationId,
+        workspaceId: this.currentWorkspaceId,
+        originalRequest,
+        mode,
+        sourceChangeSetId,
+        ...this.verificationSettings()
+      });
+      await this.publishVerification(session);
+    } catch (error) {
+      void vscode3.window.showErrorMessage(`Unable to create verification plan: ${error.message}`);
+    }
+  }
+  async approveVerification(sessionId) {
+    const session = await this.backend.getVerificationSession(sessionId);
+    if (session.state !== "AWAITING_PLAN_APPROVAL")
+      return;
+    await this.publishVerification(session);
+    const plan = session.steps.map((step, index) => [
+      `${index + 1}. ${step.purpose}${step.required ? " (required)" : " (optional)"}`,
+      `   ${step.profile} ${JSON.stringify(step.arguments)} / cwd ${step.cwd_relative} / ${step.timeout_seconds}s`
+    ].join("\n")).join("\n");
+    const choice = await vscode3.window.showWarningMessage(
+      `Run this immutable verification plan once?
+
+${plan}
+
+Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximum_repair_attempts}; reruns: ${session.maximum_reruns}.`,
+      { modal: true },
+      "Approve complete plan"
+    );
+    if (choice !== "Approve complete plan")
+      return;
+    const approved = await this.backend.decideVerificationPlan(session.id, "approve", session.plan_fingerprint);
+    await this.publishVerification(approved);
+    await this.executeVerification(approved);
+  }
+  async rejectVerification(sessionId) {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const rejected = await this.backend.decideVerificationPlan(session.id, "reject", session.plan_fingerprint);
+    await this.publishVerification(rejected);
+  }
+  async cancelVerification(sessionId) {
+    const commandId = this.activeVerificationCommands.get(sessionId);
+    if (commandId)
+      await this.processRunner.cancel(commandId);
+    const cancelled = await this.backend.cancelVerification(sessionId, "Cancelled by user");
+    await this.publishVerification(cancelled);
+  }
+  async executeVerification(initial) {
+    if (this.executingVerifications.has(initial.id))
+      return;
+    this.executingVerifications.add(initial.id);
+    let session = initial;
+    try {
+      while (session.state === "RUNNING") {
+        const step = session.steps.find((item) => item.status === "PENDING");
+        if (!step)
+          break;
+        const started = await this.backend.startVerificationStep(session.id, step.step_id, session.plan_fingerprint);
+        session = started.session;
+        let command = started.command_run;
+        let policy;
+        try {
+          policy = await this.evaluateCommand(command);
+          if (policy.blocked || policy.network || policy.risks.some((risk) => ["PACKAGE_INSTALL", "SENSITIVE"].includes(risk))) {
+            throw new CommandPolicyError(`Verification step is outside the offline bounded policy: ${policy.explanation}`);
+          }
+        } catch (error) {
+          await this.backend.decideCommandRun(command.id, "block", "BLOCKED", error.message);
+          session = await this.backend.cancelVerification(session.id, `Policy blocked: ${error.message}`, true);
+          await this.publishVerification(session);
+          return;
+        }
+        command = await this.backend.decideCommandRun(
+          command.id,
+          "approve",
+          policy.risk,
+          policy.explanation,
+          policy.executableName,
+          policy.environmentKeys
+        );
+        command = await this.backend.reportCommandEvent(command.id, "starting", "Approved verification step is starting");
+        this.activeVerificationCommands.set(session.id, command.id);
+        const resultPromise = this.processRunner.run(command, policy, (event) => {
+          void this.send({ command: "verificationStepOutput", payload: { sessionId: session.id, stepId: step.step_id, ...event } });
+        });
+        command = await this.backend.reportCommandEvent(command.id, "running", "Controlled verification process started");
+        await this.publishVerification(session);
+        const result = await resultPromise;
+        await this.backend.reportCommandResult(command.id, result);
+        session = await this.backend.reportVerificationStep(session.id, step.step_id, session.plan_fingerprint, command.id);
+        this.activeVerificationCommands.delete(session.id);
+        await this.publishVerification(session);
+      }
+      if (session.state === "VERIFICATION_FAILED" && session.maximum_repair_attempts > session.current_attempt) {
+        await this.send({ command: "verificationRepairStarted", payload: { sessionId: session.id } });
+        session = await this.backend.prepareVerificationRepair(session.id, this.backend.configuredModel);
+        await this.publishVerification(session);
+      }
+    } catch (error) {
+      const commandId = this.activeVerificationCommands.get(session.id);
+      if (commandId)
+        await this.processRunner.cancel(commandId);
+      this.activeVerificationCommands.delete(session.id);
+      await this.send({ command: "operationError", payload: { message: `Verification stopped safely: ${error.message}` } });
+      try {
+        const fresh = await this.backend.getVerificationSession(session.id);
+        await this.publishVerification(fresh);
+      } catch {
+      }
+    } finally {
+      this.executingVerifications.delete(session.id);
+    }
+  }
+  async applyVerificationRepair(sessionId) {
+    let session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id || session.state !== "AWAITING_REPAIR_APPROVAL")
+      return;
+    const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
+    const applied = await this.applyChangeSet(changeSet);
+    if (!applied)
+      return;
+    session = await this.backend.reportVerificationRepair(session.id, "applied", applied.id, "Applied through the Phase 4 transactional manager");
+    await this.publishVerification(session);
+    await this.executeVerification(session);
+  }
+  async rejectVerificationRepair(sessionId) {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id)
+      return;
+    await this.backend.decideChangeSet(attempt.repair_change_set_id, "reject", "Repair rejected in VS Code");
+    const stopped = await this.backend.reportVerificationRepair(session.id, "rejected", attempt.repair_change_set_id, "Repair rejected by user");
+    await this.publishVerification(stopped);
+  }
+  async restoreVerificationRepair(sessionId) {
+    const session = await this.backend.getVerificationSession(sessionId);
+    const attempt = session.repair_attempts.at(-1);
+    if (!attempt?.repair_change_set_id || attempt.result !== "applied")
+      return;
+    const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
+    const restored = await this.restoreChangeSet(changeSet);
+    if (!restored)
+      return;
+    const updated = await this.backend.reportVerificationRepair(session.id, "restored", restored.id, "Repair restored through the Phase 4 checkpoint");
+    await this.publishVerification(updated);
+  }
   async runProposedCommand(command, explanation) {
     const folder = this.getActiveWorkspaceFolder();
     if (!folder || !command.trim() || /[\r\n]/.test(command) || command.length > 2e3) {
@@ -1886,6 +2135,62 @@ var BackendClient = class {
   }
   async decideChangeSet(changeSetId, decision, detail) {
     return this.post(`/change-sets/${encodeURIComponent(changeSetId)}/decision`, { decision, detail });
+  }
+  async getChangeSet(changeSetId) {
+    return this.request(`/change-sets/${encodeURIComponent(changeSetId)}`);
+  }
+  async createVerificationSession(input) {
+    return this.post("/verification-sessions", {
+      conversation_id: input.conversationId,
+      workspace_id: input.workspaceId,
+      source_change_set_id: input.sourceChangeSetId,
+      original_request: input.originalRequest,
+      mode: input.mode,
+      maximum_repair_attempts: input.maximumRepairAttempts,
+      maximum_reruns: input.maximumReruns,
+      total_time_budget_seconds: input.totalTimeBudgetSeconds
+    });
+  }
+  async listVerificationSessions(workspaceId, activeOnly = false) {
+    return this.request(`/verification-sessions?workspace_id=${workspaceId}&active_only=${activeOnly}`);
+  }
+  async getVerificationSession(sessionId) {
+    return this.request(`/verification-sessions/${encodeURIComponent(sessionId)}`);
+  }
+  async decideVerificationPlan(sessionId, decision, planFingerprint) {
+    return this.post(`/verification-sessions/${encodeURIComponent(sessionId)}/decision`, {
+      decision,
+      plan_fingerprint: planFingerprint
+    });
+  }
+  async startVerificationStep(sessionId, stepId, planFingerprint) {
+    return this.post(`/verification-sessions/${encodeURIComponent(sessionId)}/steps/${encodeURIComponent(stepId)}/start`, {
+      plan_fingerprint: planFingerprint
+    });
+  }
+  async reportVerificationStep(sessionId, stepId, planFingerprint, commandRunId) {
+    return this.post(`/verification-sessions/${encodeURIComponent(sessionId)}/steps/${encodeURIComponent(stepId)}/result`, {
+      plan_fingerprint: planFingerprint,
+      command_run_id: commandRunId
+    });
+  }
+  async prepareVerificationRepair(sessionId, model) {
+    return this.request(`/verification-sessions/${encodeURIComponent(sessionId)}/repair`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ model })
+    }, 18e4);
+  }
+  async reportVerificationRepair(sessionId, status, changeSetId, detail) {
+    return this.post(`/verification-sessions/${encodeURIComponent(sessionId)}/repair-result`, {
+      status,
+      change_set_id: changeSetId,
+      detail
+    });
+  }
+  async cancelVerification(sessionId, reason, interrupted = false) {
+    const action = interrupted ? "interrupt" : "cancel";
+    return this.post(`/verification-sessions/${encodeURIComponent(sessionId)}/${action}`, { reason });
   }
   async reportChangeSetResult(changeSetId, status, resultHashes, checkpointReference, failureReason) {
     return this.post(`/change-sets/${encodeURIComponent(changeSetId)}/result`, {

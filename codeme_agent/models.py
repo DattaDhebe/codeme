@@ -173,3 +173,117 @@ class CommandRunEvent(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     command_run = relationship("CommandRun", back_populates="events")
+
+
+class VerificationSession(Base):
+    __tablename__ = "verification_sessions"
+
+    id = Column(String(36), primary_key=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    source_change_set_id = Column(String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    mode = Column(String(16), nullable=False)
+    summary = Column(String(500), nullable=False)
+    original_request = Column(Text, nullable=False)
+    state = Column(String(48), nullable=False, index=True)
+    plan_version = Column(Integer, nullable=False, default=1)
+    approved_plan_version = Column(Integer, nullable=True)
+    plan_fingerprint = Column(String(64), nullable=False)
+    approved_plan_fingerprint = Column(String(64), nullable=True)
+    maximum_repair_attempts = Column(Integer, nullable=False, default=2)
+    maximum_reruns = Column(Integer, nullable=False, default=2)
+    total_time_budget_seconds = Column(Integer, nullable=False, default=1200)
+    current_attempt = Column(Integer, nullable=False, default=0)
+    current_rerun = Column(Integer, nullable=False, default=0)
+    final_summary = Column(Text, nullable=True)
+    failure_reason = Column(Text, nullable=True)
+    cancellation_reason = Column(Text, nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    approved_at = Column(DateTime(timezone=True), nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    steps = relationship(
+        "VerificationStep",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="VerificationStep.position",
+    )
+    repair_attempts = relationship(
+        "RepairAttempt",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="RepairAttempt.attempt_number",
+    )
+    events = relationship(
+        "VerificationEvent",
+        back_populates="session",
+        cascade="all, delete-orphan",
+        order_by="VerificationEvent.created_at",
+    )
+
+
+class VerificationStep(Base):
+    __tablename__ = "verification_steps"
+    __table_args__ = (
+        UniqueConstraint("session_id", "plan_step_id", name="uq_verification_plan_step_id"),
+        UniqueConstraint("session_id", "position", name="uq_verification_step_position"),
+    )
+
+    id = Column(String(36), primary_key=True)
+    session_id = Column(String(36), ForeignKey("verification_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    plan_step_id = Column(String(64), nullable=False)
+    position = Column(Integer, nullable=False)
+    profile = Column(String(32), nullable=False)
+    arguments_json = Column(Text, nullable=False, default="[]")
+    cwd_relative = Column(String(1024), nullable=False, default=".")
+    purpose = Column(String(500), nullable=False)
+    required = Column(Integer, nullable=False, default=1)
+    timeout_seconds = Column(Integer, nullable=False, default=120)
+    expected_outcome = Column(String(500), nullable=False)
+    status = Column(String(32), nullable=False, default="PENDING", index=True)
+    command_run_id = Column(String(36), ForeignKey("command_runs.id", ondelete="SET NULL"), nullable=True, index=True)
+    exit_code = Column(Integer, nullable=True)
+    failure_fingerprint = Column(String(64), nullable=True)
+    result_summary = Column(Text, nullable=True)
+    started_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    session = relationship("VerificationSession", back_populates="steps")
+
+
+class RepairAttempt(Base):
+    __tablename__ = "repair_attempts"
+    __table_args__ = (UniqueConstraint("session_id", "attempt_number", name="uq_repair_attempt_number"),)
+
+    id = Column(String(36), primary_key=True)
+    session_id = Column(String(36), ForeignKey("verification_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    attempt_number = Column(Integer, nullable=False)
+    failure_fingerprint = Column(String(64), nullable=False)
+    model_analysis = Column(Text, nullable=True)
+    repair_change_set_id = Column(String(36), ForeignKey("change_sets.id", ondelete="SET NULL"), nullable=True, index=True)
+    repair_content_fingerprint = Column(String(64), nullable=True)
+    relevant_diff_fingerprint = Column(String(64), nullable=True)
+    decision = Column(String(16), nullable=True)
+    result = Column(String(32), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    decided_at = Column(DateTime(timezone=True), nullable=True)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    session = relationship("VerificationSession", back_populates="repair_attempts")
+
+
+class VerificationEvent(Base):
+    __tablename__ = "verification_events"
+
+    id = Column(Integer, primary_key=True, index=True)
+    session_id = Column(String(36), ForeignKey("verification_sessions.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(64), nullable=False)
+    from_state = Column(String(48), nullable=True)
+    to_state = Column(String(48), nullable=False)
+    detail = Column(String(4000), nullable=True)
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    session = relationship("VerificationSession", back_populates="events")

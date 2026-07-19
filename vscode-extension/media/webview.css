@@ -709,6 +709,24 @@ pre code {
 .proposal-card button:disabled { color: var(--success); background: transparent; cursor: default; }
 .proposal-card.applied { border-color: color-mix(in srgb, var(--success) 35%, var(--border)); background: color-mix(in srgb, var(--success) 8%, transparent); }
 
+.verification-card { margin: 10px 14px; padding: 11px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface); }
+.verification-heading { display: flex; align-items: center; gap: 8px; }
+.verification-heading > div:last-child { display: flex; flex-direction: column; min-width: 0; }
+.verification-heading strong { font-size: 11px; }
+.verification-heading span, .verification-step small { color: var(--muted); font-size: 9px; }
+.verification-limits { display: flex; flex-wrap: wrap; gap: 5px; margin: 8px 0; }
+.verification-limits span { padding: 2px 5px; border: 1px solid var(--border); border-radius: 9px; color: var(--muted); font-size: 8px; }
+.verification-steps { display: grid; gap: 5px; }
+.verification-step { display: grid; grid-template-columns: 21px minmax(0, 1fr); gap: 6px; padding: 6px; border-radius: 6px; background: var(--surface-raised); }
+.verification-step > div { display: flex; flex-direction: column; gap: 2px; min-width: 0; }
+.verification-step-state { display: grid; place-items: center; align-self: start; width: 18px; height: 18px; border-radius: 50%; background: var(--surface-hover); color: var(--muted); font-size: 9px; }
+.verification-step.step_passed .verification-step-state { color: var(--success); }
+.verification-step.step_failed .verification-step-state { color: var(--vscode-errorForeground); }
+.verification-step.running .verification-step-state i { width: 7px; height: 7px; border: 1px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: spin .8s linear infinite; }
+.verification-analysis, .verification-detail { display: flex; flex-direction: column; gap: 3px; margin-top: 8px; padding: 7px; border-left: 2px solid var(--vscode-focusBorder); color: var(--muted); font-size: 9px; white-space: pre-wrap; }
+.verification-analysis strong { color: var(--vscode-foreground); }
+.verification-card .proposal-actions { justify-content: flex-end; margin-top: 9px; }
+
 .attachment-list {
   display: flex;
   overflow-x: auto;

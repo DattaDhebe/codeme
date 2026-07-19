@@ -51,6 +51,15 @@ describe('command policy', () => {
     expect(blocked.risk).toBe('BLOCKED');
   });
 
+  it('treats explicitly offline Maven and Gradle verification as non-networked', async () => {
+    const maven = await evaluate(command({ profile: 'maven_test', arguments: ['--offline'] }));
+    const gradle = await evaluate(command({ profile: 'gradle_build', arguments: ['--offline'] }));
+    expect(maven.risks).not.toContain('NETWORK');
+    expect(gradle.risks).not.toContain('NETWORK');
+    expect(maven.risks).toContain('BUILD_OR_TEST');
+    expect(gradle.risks).toContain('WRITES_WORKSPACE');
+  });
+
   it('blocks shells, inline interpreters, destructive Git, and shell metacharacters', async () => {
     await expect(evaluate(command({ profile: 'custom_executable', arguments: ['shell'] }), {
       customExecutableAllowlist: { shell: 'powershell.exe' },

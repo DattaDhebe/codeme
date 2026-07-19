@@ -17,8 +17,9 @@ Personal Codeme is the repository-aware VS Code client for the local Personal Co
 - Independent risk classification, exact one-time approval, workspace-bound execution, filtered environments, live bounded stdout/stderr, timeout, cancellation, and process-tree cleanup.
 - Durable command decisions and bounded results through the backend. Command output is not fed back to Ollama in Phase 5.
 - Legacy raw command proposals are display-only and cannot be executed.
+- Quick/Full verification cards with exact whole-plan approval, sequential controlled execution, bounded output, repair preview/apply/reject/Restore, exact reruns, cancellation, reload interruption, and durable limits.
 
-File deletion, rename, automatic approval, autonomous test-fix loops, commits, pushes, and unattended execution are not implemented.
+File deletion, rename, automatic plan/repair approval, package installation, network verification, commits, pushes, and unattended open-ended execution are not implemented.
 
 ## Setup
 
@@ -39,7 +40,7 @@ npm run build
 npm run package
 ```
 
-The package command creates `personal-codeme-0.4.0.vsix`.
+The package command creates `personal-codeme-0.5.0.vsix`.
 
 ## Settings
 
@@ -52,6 +53,9 @@ The package command creates `personal-codeme-0.4.0.vsix`.
 - `personalCodex.customExecutableAllowlist`: explicit alias-to-executable map; empty by default and never populated from repository content.
 - `personalCodex.commandOutputLimitBytes`: bounded sidebar stream cap, default 1 MB and hard maximum 4 MB.
 - `personalCodex.commandTailLimitBytes`: per-stream persisted tail cap, default and hard maximum 64 KB.
+- `personalCodex.verificationMaximumRepairAttempts`: bounded repair attempts, default and hard maximum 2.
+- `personalCodex.verificationMaximumReruns`: exact-plan reruns, default and hard maximum 2.
+- `personalCodex.verificationTimeBudgetSeconds`: whole-session budget, default 600 seconds and hard maximum 1200 seconds.
 - `personalCodex.showNotifications`: connection and workspace notifications.
 
 Workspace registration is scoped to the current VS Code workspace. Existing backend registrations are reused; otherwise the user must consent before Agent mode can inspect the folder.
@@ -67,6 +71,12 @@ Phase 4 checkpoints are retained in VS Code global storage so Restore remains av
 Ollama supplies only a profile, literal argument array, relative working directory, purpose, timeout, and advisory hint. The extension resolves the executable from user configuration, recalculates risk, verifies the exact registered single-folder workspace and real working directory immediately before spawn, and always asks for Run once approval. Shells, inline interpreter evaluation, destructive Git, deletion/system/credential operations, metacharacters, UNC roots, traversal, and symlink or junction escapes are blocked.
 
 Processes use closed stdin and separate pipes. ANSI/control sequences are removed, display and persisted tails are bounded while pipes continue draining, and cancellation/timeout/deactivation terminate the process tree. Windows wrappers use a constrained `cmd.exe` adapter only after literal-argument validation; raw model strings never reach it.
+
+## Bounded verification and repair
+
+Use **Verify** on an applied transactional change set. Personal Codeme discovers a minimal Quick plan (or a broader Full plan), displays every exact step and limit, and binds approval to the plan fingerprint. The extension creates normal Phase 5 command records and revalidates each step immediately before using the existing controlled runner. Extension reload never silently resumes a missing process.
+
+Required failures are durably summarized, bounded to 32 KB per failed step and 128 KB per model feedback payload, stripped of controls and secret-like values, and explicitly marked untrusted. Local Qwen repair mode has read/search/Git/instruction tools plus `propose_change_set`; it has no command tool. Proposed repairs cannot modify tests or unrelated files and always pause for the existing Phase 4 preview, approval, conflict, checkpoint, apply, and Restore workflow.
 
 ## Troubleshooting
 

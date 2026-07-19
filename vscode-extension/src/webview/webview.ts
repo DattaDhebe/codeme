@@ -17,6 +17,7 @@ import 'prismjs/components/prism-diff';
 import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
 import type { CommandRun } from '../commandRun';
+import type { VerificationSession } from '../verification';
 
 declare const acquireVsCodeApi: any;
 
@@ -85,6 +86,7 @@ interface UiState {
   conversationSearch: string;
   mode: 'ask' | 'agent';
   workspaceRegistered: boolean;
+  verifications: VerificationSession[];
 }
 
 const vscode = acquireVsCodeApi();
@@ -109,6 +111,7 @@ const state: UiState = {
   conversationSearch: '',
   mode: persisted.mode || 'agent',
   workspaceRegistered: false,
+  verifications: persisted.verifications || [],
 };
 
 let toastTimer: number | undefined;
@@ -226,10 +229,43 @@ function renderChat(): string {
   if (state.loadingConversation) {
     return '<div class="loading-stack"><i></i><i></i><i></i></div>';
   }
-  if (state.messages.length === 0) {
+  const verificationCards = state.verifications
+    .filter((session) => Boolean(state.currentConversationId) && session.conversation_id === state.currentConversationId)
+    .map(renderVerification).join('');
+  if (state.messages.length === 0 && !verificationCards) {
     return renderEmptyState();
   }
-  return `<div class="message-list">${state.messages.map(renderMessage).join('')}</div>`;
+  return `<div class="message-list">${state.messages.map(renderMessage).join('')}${verificationCards}</div>`;
+}
+
+function renderVerification(session: VerificationSession): string {
+  const attempt = session.repair_attempts.at(-1);
+  const running = session.state === 'RUNNING' || session.state === 'REVERIFYING';
+  const rows = session.steps.map((step) => `<div class="verification-step ${escapeHtml(step.status.toLowerCase())}">
+    <span class="verification-step-state">${step.status === 'STEP_PASSED' ? icon('check', 12) : step.status === 'RUNNING' ? '<i></i>' : step.position + 1}</span>
+    <div><strong>${escapeHtml(step.purpose)}</strong><small>${escapeHtml(step.profile)} ${escapeHtml(JSON.stringify(step.arguments))}</small>
+      <small>cwd ${escapeHtml(step.cwd_relative)} / ${step.timeout_seconds}s / ${step.required ? 'required' : 'optional'} / ${escapeHtml(step.calculated_risk || 'evaluating')}</small>
+      ${step.risk_explanation ? `<small>${escapeHtml(step.risk_explanation)}</small>` : ''}
+      ${step.output ? `<pre class="command-output">${escapeHtml(step.output)}</pre>` : ''}
+    </div>
+  </div>`).join('');
+  let actions = '';
+  if (session.state === 'AWAITING_PLAN_APPROVAL') actions = `<button class="secondary" data-action="rejectVerification" data-session-id="${session.id}">Reject</button><button data-action="approveVerification" data-session-id="${session.id}">Approve complete plan</button>`;
+  else if (running) actions = `<button data-action="cancelVerification" data-session-id="${session.id}">Cancel verification</button>`;
+  else if (session.state === 'AWAITING_REPAIR_APPROVAL' && attempt?.repair_change_set_id) actions = `
+    <button class="secondary" data-action="previewVerificationRepair" data-session-id="${session.id}" data-change-set-id="${attempt.repair_change_set_id}">Preview repair</button>
+    <button class="secondary" data-action="rejectVerificationRepair" data-session-id="${session.id}">Reject repair</button>
+    <button data-action="applyVerificationRepair" data-session-id="${session.id}">Apply repair</button>`;
+  else if (attempt?.result === 'applied' && !running) actions = `<button class="secondary" data-action="restoreVerificationRepair" data-session-id="${session.id}">${icon('refresh', 12)} Restore repair</button>`;
+  const detail = session.failure_reason || session.final_summary || session.cancellation_reason || (session.state === 'VERIFICATION_FAILED' ? 'Preparing a bounded repair proposal…' : '');
+  return `<section class="verification-card" data-verification-id="${session.id}">
+    <div class="verification-heading"><div class="proposal-icon">${icon('check', 15)}</div><div><strong>${escapeHtml(session.summary)}</strong><span>${escapeHtml(session.state)} · plan ${session.plan_fingerprint.slice(0, 10)}</span></div></div>
+    <div class="verification-limits"><span>${session.mode}</span><span>${session.total_time_budget_seconds}s budget</span><span>repair ${session.current_attempt}/${session.maximum_repair_attempts}</span><span>rerun ${session.current_rerun}/${session.maximum_reruns}</span></div>
+    <div class="verification-steps">${rows}</div>
+    ${attempt?.model_analysis ? `<div class="verification-analysis"><strong>Repair analysis</strong><span>${escapeHtml(attempt.model_analysis)}</span></div>` : ''}
+    ${detail ? `<div class="verification-detail">${escapeHtml(detail)}</div>` : ''}
+    ${actions ? `<div class="proposal-actions">${actions}</div>` : ''}
+  </section>`;
 }
 
 function renderEmptyState(): string {
@@ -343,7 +379,7 @@ function renderProposal(proposal: AgentProposal, messageIndex: number, proposalI
       <div class="proposal-actions">
         <button class="secondary" data-action="previewChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('external', 12)} Preview files</button>
         ${changeSet.status === 'proposed' ? `<button class="secondary" data-action="rejectChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Reject</button><button data-action="applyChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Apply complete set</button>` : ''}
-        ${isApplied ? `<button data-action="restoreChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('refresh', 12)} Restore</button>` : ''}
+        ${isApplied ? `<button class="secondary" data-action="startVerification" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('check', 12)} Verify</button><button data-action="restoreChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('refresh', 12)} Restore</button>` : ''}
         ${isTerminal ? `<button disabled>${escapeHtml(changeSet.status)}</button>` : ''}
       </div>
     </section>`;
@@ -483,6 +519,7 @@ function persistState(): void {
     workspace: state.workspace,
     rootPath: state.rootPath,
     mode: state.mode,
+    verifications: state.verifications,
   });
 }
 
@@ -690,6 +727,24 @@ if (app) {
       const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
       if (!item?.changeSet) return;
       vscode.postMessage({ command: action, args: { changeSet: item.changeSet } });
+    }
+    if (action === 'startVerification') {
+      const messageIndex = Number(button.dataset.messageIndex);
+      const item = state.messages[messageIndex]?.proposals?.[Number(button.dataset.proposalIndex)];
+      const request = [...state.messages.slice(0, messageIndex)].reverse().find((message) => message.role === 'user')?.content
+        || 'Verify the applied change set';
+      if (item?.changeSet && state.currentConversationId) {
+        vscode.postMessage({
+          command: 'startVerification',
+          args: { conversationId: state.currentConversationId, sourceChangeSetId: item.changeSet.id, originalRequest: request, mode: 'quick' },
+        });
+      }
+    }
+    if (['approveVerification', 'rejectVerification', 'cancelVerification', 'applyVerificationRepair', 'rejectVerificationRepair', 'restoreVerificationRepair'].includes(action || '')) {
+      vscode.postMessage({ command: action, args: { sessionId: button.dataset.sessionId } });
+    }
+    if (action === 'previewVerificationRepair') {
+      vscode.postMessage({ command: action, args: { sessionId: button.dataset.sessionId, changeSetId: button.dataset.changeSetId } });
     }
     if (action === 'runCommandProposal' || action === 'rejectCommandProposal' || action === 'cancelCommandRun' || action === 'copyCommandOutput') {
       const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
@@ -911,6 +966,31 @@ window.addEventListener('message', (event) => {
       render();
       break;
     }
+    case 'verificationSessionUpdated': {
+      const updated = message.payload as VerificationSession;
+      const index = state.verifications.findIndex((item) => item.id === updated.id);
+      if (index >= 0) {
+        const outputs = new Map(state.verifications[index].steps.map((step) => [step.step_id, step.output]));
+        updated.steps.forEach((step) => { step.output = outputs.get(step.step_id); });
+        state.verifications[index] = updated;
+      } else {
+        state.verifications.push(updated);
+      }
+      render();
+      break;
+    }
+    case 'verificationStepOutput': {
+      const session = state.verifications.find((item) => item.id === message.payload?.sessionId);
+      const step = session?.steps.find((item) => item.step_id === message.payload?.stepId);
+      if (step && ['stdout', 'stderr'].includes(message.payload?.stream)) {
+        step.output = ((step.output || '') + String(message.payload?.text || '')).slice(-65_536);
+      }
+      render();
+      break;
+    }
+    case 'verificationRepairStarted':
+      showToast('Preparing a bounded repair proposal with Qwen');
+      break;
   }
 });
 

@@ -5,7 +5,7 @@
   "description": "A local-first Copilot-style coding assistant powered by Ollama.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "engines": {
     "vscode": "^1.90.0"
   },
@@ -36,7 +36,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.4.0.vsix"
+    "package": "vsce package --out personal-codeme-0.5.0.vsix"
   },
   "files": [
     "dist/**",
@@ -139,6 +139,27 @@
           "minimum": 8192,
           "maximum": 65536,
           "description": "Maximum bounded stdout and stderr tail retained for durable results."
+        },
+        "personalCodex.verificationMaximumRepairAttempts": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Maximum proposed repair attempts in one approved bounded verification session."
+        },
+        "personalCodex.verificationMaximumReruns": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Maximum exact-plan reruns after approved repairs."
+        },
+        "personalCodex.verificationTimeBudgetSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 30,
+          "maximum": 1200,
+          "description": "Total wall-clock budget for one verification and repair session."
         },
         "personalCodex.showNotifications": {
           "type": "boolean",

@@ -50,6 +50,7 @@ class OllamaClient:
         tools: list[dict],
         model: str | None = None,
         timeout: int = 180,
+        options: dict | None = None,
     ) -> dict:
         """Run one non-streaming native Ollama tool-calling turn."""
         model = model or self.default_model
@@ -61,6 +62,8 @@ class OllamaClient:
         }
         if tools:
             payload["tools"] = tools
+        if options:
+            payload["options"] = options
         try:
             response = httpx.post(url, json=payload, timeout=timeout)
             if response.status_code != 200:

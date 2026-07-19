@@ -52,6 +52,18 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "get_file_metadata",
+            "description": "Read bounded metadata for one workspace-relative file without reading its contents.",
+            "parameters": {
+                "type": "object",
+                "properties": {"path": {"type": "string"}},
+                "required": ["path"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "search_code",
             "description": "Search workspace text with a regular expression and return matching file locations.",
             "parameters": {
@@ -394,6 +406,8 @@ class WorkspaceAgent:
         if name == "read_file":
             result = workspace.read_file(self.root, str(arguments.get("path", "")))
             return _truncate(result), None
+        if name == "get_file_metadata":
+            return workspace.get_file_metadata(self.root, str(arguments.get("path", ""))), None
         if name == "search_code":
             return workspace.search_code(self.root, str(arguments.get("query", "")), 1, 40), None
         if name == "git_status":

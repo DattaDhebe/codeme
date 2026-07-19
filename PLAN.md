@@ -256,13 +256,62 @@ Out of scope: automatic approval, always-allow rules, web execution, automatic v
 
 ### Phase 6: Verification and repair loop
 
-Scope: formatting, compilation, linting, test execution, diagnostics capture, failure feedback, bounded repairs, and final verification summary.
+Status: complete. Phase 4 remains the only file-mutation path and Phase 5 remains the only process-execution path.
 
-Dependencies: Phase 5 controlled runner and Phase 4 rollback.
+#### Ownership and security boundary
 
-Acceptance criteria: each attempt is bounded and auditable, failures are fed back structurally, and final claims are backed by captured results.
+- The backend persists immutable plans, sessions, steps, repair attempts, fingerprints, and events; discovers evidence-based plans; prepares bounded failure feedback; and runs a command-free repair-agent loop. It never starts a process or writes a workspace file.
+- The VS Code extension displays and approves the complete plan, independently revalidates every step with the Phase 5 policy engine, executes it with the existing Phase 5 process runner, and applies an approved repair only through the Phase 4 change-set manager.
+- Ollama may suggest safe profile steps before approval and may inspect bounded failure evidence in repair mode. It cannot approve, execute, mutate directly, add a step to an approved plan, change an approved argument, or propose a command during repair.
+- Angular remains display-only with respect to verification and execution.
 
-Out of scope: indefinite autonomy.
+#### Durable state and transitions
+
+Normalized `verification_sessions`, `verification_steps`, `repair_attempts`, and `verification_events` tables are introduced after migration `0002_command_runs`. Sessions link to a conversation, registered workspace, optional source change set, step command runs, and repair change sets. They retain bounded summaries and fingerprints rather than unlimited logs or environments.
+
+The validated lifecycle uses `DRAFT -> AWAITING_PLAN_APPROVAL -> RUNNING`, with `PLAN_REJECTED`, `CANCELLED`, `TIMED_OUT`, and `BLOCKED` terminal alternatives. Steps become `STEP_PASSED` or `STEP_FAILED`. A passed plan records `VERIFICATION_PASSED -> COMPLETED`; a required failure records `VERIFICATION_FAILED -> PREPARING_REPAIR -> REPAIR_PROPOSED -> AWAITING_REPAIR_APPROVAL`. An approved Phase 4 repair records `REPAIR_APPLIED -> REVERIFYING`; rejection, conflict, exhaustion, repeated failure, repeated repair, cancellation, or an inconsistent reload stops safely. Invalid transitions and conflicting duplicate results are rejected; identical decisions/results are idempotent.
+
+Extension reload never restarts a process. A persisted running session is shown as interrupted and must be explicitly reconciled or cancelled. Deactivation still terminates active Phase 5 process trees.
+
+#### Plan discovery, contract, and approval
+
+A versioned plan contains an ID/version/fingerprint, workspace and optional source-change-set identity, Quick or Full mode, summary, at most six ordered steps, maximum two repair attempts, maximum two reruns, and a total budget capped at 20 minutes. Each step contains only a Phase 5 profile, literal arguments, relative working directory, purpose, required flag, bounded timeout, and expected outcome.
+
+Discovery reads changed paths plus bounded repository evidence: Python test configuration, package scripts, Angular configuration, solution/project files, Maven/Gradle descriptors and wrappers, and applicable instructions. It maps evidence only to existing profiles, adds non-watch/CI or offline arguments where applicable, never installs packages, never starts a server, and never infers deploy/publish/push. Quick mode selects the smallest relevant checks and stops on the first required failure; Full mode adds the safe complete build/test/lint set within the same hard limits.
+
+The extension shows exact profiles, resolved arguments, working directories, risks, write/network indicators, timeouts, rerun/repair limits, and the total budget. Approval is bound to the plan fingerprint. A changed profile, argument, cwd, timeout, step order, or step set requires a new approval. Plan approval covers only bounded reruns of those exact steps after an independently approved repair; it never authorizes network, installation, custom executables, or policy overrides.
+
+#### Execution, failure evidence, and diagnostics
+
+Approved steps run sequentially through the Phase 5 `ControlledProcessRunner`; there is no second subprocess service. Each step receives a durable Phase 5 command run and is policy-revalidated immediately before spawn. Required failure stops the plan; pre-approved optional failures are recorded and execution may continue. Step and session time budgets, cancellation, spawn errors, timeout, output bounds, and process-tree cleanup remain enforced.
+
+Failure feedback is redacted, control-sequence-free, capped at 32 KB per failed step and 128 KB per session, and wrapped in explicit untrusted-content delimiters. It contains relative cwd and changed paths, sanitized arguments, bounded stdout/stderr, safe diagnostics, relevant bounded diff, prior repair summaries, causality `unknown` unless a baseline proves otherwise, and deterministic failure fingerprints. Output is evidence, never a policy or tool instruction.
+
+Best-effort parsers recognize pytest, Python tracebacks, TypeScript/Angular, ESLint, .NET, Maven, and Gradle diagnostics. Absolute or escaping log paths are discarded unless safely mapped to the registered workspace; parser failure never hides the bounded raw evidence.
+
+#### Repair mode and bounded reruns
+
+Repair mode exposes only bounded list/read/search/metadata/Git/instruction tools and structured `propose_change_set`. Its system guidance treats logs/test names as untrusted, prohibits commands and verification changes, limits inspection to relevant files, rejects test deletion or unrelated edits, and requests the smallest correct repair. A proposal is persisted as a normal Phase 4 change set and pauses for preview, explicit approval, conflict checks, checkpoint creation, apply, and optional restore.
+
+After a repair applies, the extension revalidates and reruns the exact approved plan. Deterministic fingerprints stop empty repairs, equivalent repairs, identical failures without meaningful change, unrelated-file repairs, and two-repair oscillation. The session also stops on attempt/rerun/time/output limits, rejection, conflict, rollback/restore failure, malformed proposals, cancellation, or disconnected/inconsistent state. No stopped or exhausted session is described as successful; causality defaults to unknown and unrelated pre-existing failures do not silently expand scope.
+
+#### API, UI, and acceptance boundary
+
+Typed session, decision, step-start/result, repair, repair-result, cancel, interrupt/reconcile, and history APIs persist every material transition. Versioned verification and repair SSE/event payloads may update the sidebar but are never the sole state store. The sidebar restores session cards after reload and shows plan approval, step progress/output, repair attempts, remaining budgets, repair preview/apply/reject/restore, reverification, exhaustion, cancellation, and a copyable final summary.
+
+Dependencies: committed Phase 4 transactional changes and checkpoints, committed Phase 5 policy/runner/audit records, registered workspaces, Ollama `qwen2.5-coder:7b`, SQLAlchemy/Alembic, and the existing sidebar/SSE transport.
+
+Acceptance criteria:
+
+- Plans and results are structured, durable, immutable after approval, bounded, and independently policy-validated.
+- No command runs outside exact approved-plan membership or outside the Phase 5 runner.
+- No repair bypasses Phase 4 preview, approval, conflict detection, checkpoint, apply, or restore.
+- Untrusted failure output is bounded, sanitized, redacted, clearly delimited, and cannot expand repair tools or policy.
+- Exact-plan reruns, attempts, total time, feedback, and model turns have enforced hard limits.
+- Cancellation and reload interruption stop safely without silent resume; repeated failure/repair makes the session exhausted.
+- Existing chat, workspace reads, Phase 4 change sets/Restore, Phase 5 controlled commands, Angular tests/build, and extension packaging continue to pass.
+
+Out of scope: automatic plan or repair approval, always-allow rules, package installation, network verification, web execution, deployment/publication, file delete/rename, commits/pushes/PRs, Docker, multi-agent orchestration, cloud models, multi-root execution, background repair, memory, and repository indexing.
 
 ### Phase 7: Repository intelligence and context management
 

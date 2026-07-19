@@ -1,6 +1,7 @@
 import * as vscode from 'vscode';
 import { ChangeSet } from './changeSet';
 import { CommandExecutionResult, CommandRisk, CommandRun } from './commandRun';
+import { VerificationMode, VerificationSession, VerificationStepStart } from './verification';
 
 export interface BackendSettings {
   get<T>(section: string, defaultValue: T): T;
@@ -120,6 +121,67 @@ export class BackendClient {
 
   public async decideChangeSet(changeSetId: string, decision: 'approve' | 'reject', detail?: string): Promise<ChangeSet> {
     return this.post<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}/decision`, { decision, detail });
+  }
+
+  public async getChangeSet(changeSetId: string): Promise<ChangeSet> {
+    return this.request<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}`);
+  }
+
+  public async createVerificationSession(input: {
+    conversationId: number; workspaceId: number; originalRequest: string; mode: VerificationMode;
+    sourceChangeSetId?: string; maximumRepairAttempts: number; maximumReruns: number; totalTimeBudgetSeconds: number;
+  }): Promise<VerificationSession> {
+    return this.post<VerificationSession>('/verification-sessions', {
+      conversation_id: input.conversationId, workspace_id: input.workspaceId,
+      source_change_set_id: input.sourceChangeSetId, original_request: input.originalRequest, mode: input.mode,
+      maximum_repair_attempts: input.maximumRepairAttempts, maximum_reruns: input.maximumReruns,
+      total_time_budget_seconds: input.totalTimeBudgetSeconds,
+    });
+  }
+
+  public async listVerificationSessions(workspaceId: number, activeOnly = false): Promise<VerificationSession[]> {
+    return this.request<VerificationSession[]>(`/verification-sessions?workspace_id=${workspaceId}&active_only=${activeOnly}`);
+  }
+
+  public async getVerificationSession(sessionId: string): Promise<VerificationSession> {
+    return this.request<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}`);
+  }
+
+  public async decideVerificationPlan(sessionId: string, decision: 'approve' | 'reject', planFingerprint: string): Promise<VerificationSession> {
+    return this.post<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}/decision`, {
+      decision, plan_fingerprint: planFingerprint,
+    });
+  }
+
+  public async startVerificationStep(sessionId: string, stepId: string, planFingerprint: string): Promise<VerificationStepStart> {
+    return this.post<VerificationStepStart>(`/verification-sessions/${encodeURIComponent(sessionId)}/steps/${encodeURIComponent(stepId)}/start`, {
+      plan_fingerprint: planFingerprint,
+    });
+  }
+
+  public async reportVerificationStep(sessionId: string, stepId: string, planFingerprint: string, commandRunId: string): Promise<VerificationSession> {
+    return this.post<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}/steps/${encodeURIComponent(stepId)}/result`, {
+      plan_fingerprint: planFingerprint, command_run_id: commandRunId,
+    });
+  }
+
+  public async prepareVerificationRepair(sessionId: string, model?: string): Promise<VerificationSession> {
+    return this.request<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}/repair`, {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model }),
+    }, 180_000);
+  }
+
+  public async reportVerificationRepair(
+    sessionId: string, status: 'applied' | 'rejected' | 'conflict' | 'restored' | 'restore_failed', changeSetId: string, detail?: string,
+  ): Promise<VerificationSession> {
+    return this.post<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}/repair-result`, {
+      status, change_set_id: changeSetId, detail,
+    });
+  }
+
+  public async cancelVerification(sessionId: string, reason: string, interrupted = false): Promise<VerificationSession> {
+    const action = interrupted ? 'interrupt' : 'cancel';
+    return this.post<VerificationSession>(`/verification-sessions/${encodeURIComponent(sessionId)}/${action}`, { reason });
   }
 
   public async reportChangeSetResult(

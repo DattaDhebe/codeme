@@ -14,6 +14,7 @@ Personal Codex is a local-first coding assistant powered by Ollama. It includes 
 - Versioned command proposals for controlled test, build, lint, read-only Git, Python-module, and explicitly allowlisted custom-executable profiles.
 - Independent extension-side policy checks, one-time approval, workspace-bound argument-array execution, filtered environments, bounded streaming output, timeout, cancellation, process-tree termination, and durable command audit records.
 - Legacy raw command proposals remain visible but are always display-only; the deprecated compatibility setting cannot enable them.
+- Durable Quick/Full verification sessions with immutable whole-plan approval, sequential Phase 5 execution, bounded diagnostics, local Qwen repair proposals, Phase 4 repair approval/checkpoints/Restore, exact-plan reruns, and no-progress limits.
 
 The root `/generate` endpoint is retained for compatibility and is a placeholder. Use `/api/conversations/{id}/chat` or `/api/conversations/{id}/agent` for real Ollama execution.
 
@@ -48,7 +49,7 @@ Clean databases continue to initialize through SQLAlchemy metadata. Existing dat
 .\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
-Migration `0001` preserves existing workspaces, conversations, and messages while adding change-set tables. Migration `0002` adds normalized command runs and events without recreating the database. See `alembic/README.md` for inspection and rollback commands. Do not delete or recreate `codeme.db` during an upgrade.
+Migration `0001` preserves existing workspaces, conversations, and messages while adding change-set tables. Migration `0002` adds normalized command runs and events. Migration `0003` adds bounded verification sessions, steps, repair attempts, and events without recreating the database. See `alembic/README.md` for inspection and rollback commands. Do not delete or recreate `codeme.db` during an upgrade.
 
 ## Angular application
 
@@ -78,7 +79,7 @@ npm run build
 npm run package
 ```
 
-The package command creates `personal-codeme-0.4.0.vsix`.
+The package command creates `personal-codeme-0.5.0.vsix`.
 
 Workspace registration requires consent. `personalCodex.autoRegisterWorkspace=false` prevents automatic registration; entering Agent mode prompts before the first registration. Existing backend registrations are reused.
 
@@ -86,8 +87,12 @@ Applied change-set checkpoints are kept under VS Code extension global storage, 
 
 Controlled commands are proposed by Ollama but executed only by the VS Code extension after independent policy evaluation and a visible Run once approval. The backend records proposals, decisions, lifecycle events, and bounded redacted results; it has no arbitrary subprocess endpoint. Output is not returned to the model in Phase 5.
 
+Phase 6 verification starts from an applied change set's **Verify** action. The complete discovered plan must be approved once. Only its exact profiles, arguments, working directories, order, and timeouts can run or rerun. A required failure is sanitized, redacted, marked untrusted, and sent to local `qwen2.5-coder:7b` through command-free repair mode. Repairs pause for Phase 4 preview and approval; package installation, network verification, test changes, unrelated changes, automatic approval, commits, and pushes remain blocked.
+
+Verification APIs are rooted at `/api/verification-sessions`: create/list/get, exact plan decision, step start/result, repair preparation/result, cancellation, interruption, and persisted versioned event streaming at `/{id}/events`.
+
 ## Configuration
 
 Backend environment names and safe defaults are shown in `.env.example`. The default backend and Ollama bindings are loopback-only. Do not expose this unauthenticated development backend to a network.
 
-See `PLAN.md` for Phase 4 transactional editing, Phase 5 controlled execution, acceptance criteria, and the boundaries of later work.
+See `PLAN.md` for Phase 4 transactional editing, Phase 5 controlled execution, Phase 6 bounded verification/repair, acceptance criteria, and the boundaries of later work.
