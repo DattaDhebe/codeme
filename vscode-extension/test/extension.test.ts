@@ -4,6 +4,31 @@ import { resolve } from 'node:path';
 import { BackendClient } from '../src/backendClient';
 import manifest from '../package.json';
 import { inferCodeBlockTargets, workspacePathScore } from '../src/editTarget';
+import { ChangeSet, validateChangeSet, validateRelativePath } from '../src/changeSet';
+import { sha256Text } from '../src/changeSetManager';
+
+const sampleChangeSet = (): ChangeSet => ({
+  id: '11111111-1111-1111-1111-111111111111',
+  schema_version: 1,
+  conversation_id: 1,
+  workspace_id: 1,
+  summary: 'Update two files',
+  status: 'proposed',
+  created_at: '2026-01-01',
+  updated_at: '2026-01-01',
+  operations: [
+    {
+      operation_id: 'one', type: 'modify', relative_path: 'src/app.ts', summary: 'Modify',
+      base_sha256: '1'.repeat(64), proposed_sha256: sha256Text('new'), encoding: 'utf-8',
+      line_ending: 'lf', edits: [], proposed_content: 'new', diff: 'diff',
+    },
+    {
+      operation_id: 'two', type: 'create', relative_path: '.editorconfig', summary: 'Create',
+      base_sha256: null, proposed_sha256: sha256Text('root=true'), encoding: 'utf-8',
+      line_ending: 'none', edits: [], proposed_content: 'root=true', diff: 'diff',
+    },
+  ],
+});
 
 class FakeConfig {
   get<T>(section: string, defaultValue: T): T {
@@ -52,6 +77,20 @@ describe('BackendClient', () => {
       expect.objectContaining({ method: 'DELETE' })
     );
   });
+
+  it('reports a complete applied change set with hashes and checkpoint reference', async () => {
+    const response = sampleChangeSet();
+    const fetchMock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => response, text: async () => '' });
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BackendClient(new FakeConfig());
+
+    await client.reportChangeSetResult(response.id, 'applied', { 'src/app.ts': '2'.repeat(64), '.editorconfig': '3'.repeat(64) }, 'checkpoint.json');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      `http://127.0.0.1:8000/api/change-sets/${response.id}/result`,
+      expect.objectContaining({ method: 'POST', body: expect.stringContaining('checkpoint.json') }),
+    );
+  });
 });
 
 afterEach(() => {
@@ -67,6 +106,32 @@ describe('extension manifest', () => {
       type: 'webview',
     });
   });
+
+  it('disables legacy raw command execution by default', () => {
+    expect(manifest.contributes.configuration.properties['personalCodex.enableUnsafeCommandExecution'].default).toBe(false);
+  });
+});
+
+describe('transactional change-set contract', () => {
+  it('accepts multi-file create and modify operations', () => {
+    expect(() => validateChangeSet(sampleChangeSet())).not.toThrow();
+  });
+
+  it('rejects traversal, absolute paths, missing hashes, and duplicates', () => {
+    expect(() => validateRelativePath('../outside.txt')).toThrow();
+    expect(() => validateRelativePath('C:\\outside.txt')).toThrow();
+    const missingHash = sampleChangeSet();
+    missingHash.operations[0].base_sha256 = null;
+    expect(() => validateChangeSet(missingHash)).toThrow(/base hash/);
+    const duplicate = sampleChangeSet();
+    duplicate.operations[1].relative_path = 'SRC/APP.TS';
+    expect(() => validateChangeSet(duplicate)).toThrow(/Duplicate/);
+  });
+
+  it('hashes Unicode and line endings deterministically', () => {
+    expect(sha256Text('नमस्ते\n')).toMatch(/^[0-9a-f]{64}$/);
+    expect(sha256Text('a\n')).not.toBe(sha256Text('a\r\n'));
+  });
 });
 
 describe('Copilot-style webview', () => {
@@ -80,6 +145,9 @@ describe('Copilot-style webview', () => {
       'code-apply',
       'code-open',
       'model-select',
+      'previewChangeSet',
+      'applyChangeSet',
+      'restoreChangeSet',
     ]) {
       expect(source).toContain(capability);
     }

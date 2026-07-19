@@ -1,80 +1,63 @@
 # Personal Codeme for VS Code
 
-Personal Codeme is a local-first, Copilot-style coding assistant powered by Ollama. It connects the VS Code sidebar to the Personal Codeme FastAPI backend and the locally installed `qwen2.5-coder:7b` model.
+Personal Codeme is the repository-aware VS Code client for the local Personal Codex backend and Ollama.
 
 ## Features
 
-- Streaming chat with reusable conversation history
-- Search, rename, reopen, and delete conversations
-- Attach the current selection, active file, or Git diff as context
-- Editor commands for explain, fix, refactor, tests, file questions, and change review
-- Markdown and syntax-highlighted code responses
-- Copy, open, or apply generated code from any code block
-- Explicit approval before generated code modifies the editor
-- Installed Ollama model selector and live backend/model status
-- Stop generation, retry prompts, and persistent sidebar state
-- Workspace registration and local repository context
-- Ask mode for focused chat with attached editor context
-- Agent mode with automatic repository listing, file reads, code search, Git inspection, and `AGENTS.md` support
-- Grounded whole-project analysis using README files, manifests, entry points, and component structure
-- File-change and terminal-command proposals with explicit VS Code approval before execution
-- Target-aware code-block Apply: named whole-file responses open a diff and replace that file instead of appending to the active editor
-- Apply, Open, and Copy actions for proposed files; ambiguous snippets ask whether to replace the current file or insert at the cursor
+- Ask and Agent modes with streamed local-model responses.
+- Conversation history, search, rename, delete, and model selection.
+- Current selection, active file, and Git diff context.
+- Repository file reads, ripgrep search, Git inspection, and `AGENTS.md` lookup through the backend agent.
+- Transactional create/modify change sets with complete-set preview and approval.
+- Base-hash and dirty-editor conflict detection.
+- One `WorkspaceEdit` for a complete set, post-apply verification, rollback on failure, and guarded Restore.
+- Checkpoints stored in VS Code global storage rather than the source tree.
+- Legacy whole-file proposal compatibility through the same change-set pipeline.
+- Command proposals displayed without execution by default.
+
+File deletion, rename, automatic tests, commits, pushes, and unattended execution are not implemented in Phase 4.
 
 ## Setup
 
-1. Install backend dependencies from the repository root:
+Start the backend from the repository root:
 
-   ```powershell
-   .\.venv\Scripts\python.exe -m pip install -r requirements.txt
-   ```
+```powershell
+.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```
 
-2. Ensure Ollama is running with the configured model:
+Build and package the extension:
 
-   ```powershell
-   ollama list
-   ```
+```powershell
+cd vscode-extension
+npm ci
+npm run typecheck
+npm test
+npm run build
+npm run package
+```
 
-3. Start the backend:
+The package command creates `personal-codeme-0.3.1.vsix`.
 
-   ```powershell
-   .\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
-   ```
+## Settings
 
-4. Build or package the extension:
+- `personalCodex.backendUrl`: local backend, default `http://127.0.0.1:8000`.
+- `personalCodex.defaultModel`: default Ollama model, `qwen2.5-coder:7b`.
+- `personalCodex.autoRegisterWorkspace`: whether initialization may request workspace registration. Default `false` is honored.
+- `personalCodex.requireWriteApproval`: retains approval for legacy editor actions.
+- `personalCodex.enableUnsafeCommandExecution`: legacy raw terminal compatibility switch. Default `false`. Enabling it still requires a strong per-command confirmation and is not equivalent to the Phase 5 controlled runner.
+- `personalCodex.showNotifications`: connection and workspace notifications.
 
-   ```powershell
-   cd vscode-extension
-   npm install
-   npm run build
-   npm run package
-   ```
+Workspace registration is scoped to the current VS Code workspace. Existing backend registrations are reused; otherwise the user must consent before Agent mode can inspect the folder.
 
-The package command generates `personal-codeme-0.3.1.vsix`.
+## Change-set safety
 
-## Configuration
+The backend prepares and persists relative paths, verified base hashes, proposed hashes, exact content, and diffs. Immediately before applying, the extension resolves real paths, rejects symlink/junction escapes, verifies hashes, and rejects dirty documents. Restore succeeds only while current files still match the applied hashes.
 
-- `personalCodex.backendUrl` — backend URL, default `http://127.0.0.1:8000`
-- `personalCodex.defaultModel` — default Ollama model, `qwen2.5-coder:7b`
-- `personalCodex.requireWriteApproval` — confirm before applying generated code
-- `personalCodex.showNotifications` — show connection and workspace notifications
-
-## Commands
-
-- Personal Codeme: Open Chat
-- Personal Codeme: New Chat
-- Personal Codeme: Explain Selected Code
-- Personal Codeme: Fix Selected Code
-- Personal Codeme: Refactor Selected Code
-- Personal Codeme: Generate Tests
-- Personal Codeme: Ask About Current File
-- Personal Codeme: Review Current Changes
-- Personal Codeme: Register Workspace
-- Personal Codeme: Check Backend Connection
-- Personal Codeme: Start Local Backend
+Phase 4 checkpoints are retained in VS Code global storage so Restore remains available across restarts. They are not removed automatically in this phase; users can remove stale Personal Codeme extension storage through VS Code after they no longer need its restore history. A bounded retention policy is deferred to production hardening so recoverable checkpoints are not deleted aggressively.
 
 ## Troubleshooting
 
-- Backend readiness: `http://127.0.0.1:8000/api/health`
-- Ollama inventory: `http://127.0.0.1:11434/api/tags`
-- Reload VS Code after installing a new VSIX version.
+- Backend readiness: `http://127.0.0.1:8000/api/health`.
+- Ollama inventory: `http://127.0.0.1:11434/api/tags`.
+- Database schema: run `..\.venv\Scripts\python.exe -m alembic current` from the repository root.
+- Reload VS Code after installing a new VSIX.

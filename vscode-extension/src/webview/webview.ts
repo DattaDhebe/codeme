@@ -15,6 +15,7 @@ import 'prismjs/components/prism-sql';
 import 'prismjs/components/prism-markdown';
 import 'prismjs/components/prism-diff';
 import { inferCodeBlockTargets } from '../editTarget';
+import type { ChangeSet } from '../changeSet';
 
 declare const acquireVsCodeApi: any;
 
@@ -45,12 +46,13 @@ interface AgentActivity {
 }
 
 interface AgentProposal {
-  kind: 'file_change' | 'command';
+  kind: 'file_change' | 'command' | 'change_set';
   path?: string;
   content?: string;
   command?: string;
   explanation: string;
   applied?: boolean;
+  changeSet?: ChangeSet;
 }
 
 interface Conversation {
@@ -287,6 +289,22 @@ function renderMessage(message: ChatMessage, index: number): string {
 }
 
 function renderProposal(proposal: AgentProposal, messageIndex: number, proposalIndex: number): string {
+  if (proposal.kind === 'change_set' && proposal.changeSet) {
+    const changeSet = proposal.changeSet;
+    const files = changeSet.operations.map((operation) => `<span><b>${escapeHtml(operation.type)}</b> ${escapeHtml(operation.relative_path)}</span>`).join('');
+    const isApplied = changeSet.status === 'applied';
+    const isTerminal = ['rejected', 'failed', 'restored', 'restore_failed'].includes(changeSet.status);
+    return `<section class="proposal-card change-set-card ${isApplied ? 'applied' : ''}">
+      <div class="proposal-icon">${icon('file', 15)}</div>
+      <div class="proposal-copy"><strong>${escapeHtml(changeSet.summary)}</strong><span>${changeSet.operations.length} file operation(s) · ${escapeHtml(changeSet.status)}</span><div class="proposal-files">${files}</div></div>
+      <div class="proposal-actions">
+        <button class="secondary" data-action="previewChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('external', 12)} Preview files</button>
+        ${changeSet.status === 'proposed' ? `<button class="secondary" data-action="rejectChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Reject</button><button data-action="applyChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Apply complete set</button>` : ''}
+        ${isApplied ? `<button data-action="restoreChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('refresh', 12)} Restore</button>` : ''}
+        ${isTerminal ? `<button disabled>${escapeHtml(changeSet.status)}</button>` : ''}
+      </div>
+    </section>`;
+  }
   const isFile = proposal.kind === 'file_change';
   const title = isFile ? proposal.path || 'File change' : proposal.command || 'Terminal command';
   return `<section class="proposal-card ${proposal.applied ? 'applied' : ''}">
@@ -305,7 +323,7 @@ function toolLabel(name: string): string {
     status: 'Planning', list_files: 'Listed files', read_file: 'Read file', search_code: 'Searched code',
     project_snapshot: 'Inspected project architecture',
     git_status: 'Checked Git status', git_diff: 'Read Git diff', read_instructions: 'Read instructions',
-    propose_file_change: 'Prepared file change', propose_command: 'Prepared command',
+    propose_change_set: 'Prepared change set', propose_file_change: 'Prepared legacy file change', propose_command: 'Prepared command',
   };
   return labels[name] || name.replace(/_/g, ' ');
 }
@@ -623,6 +641,11 @@ if (app) {
         args: { path: item.path, content: item.content, command: item.command, explanation: item.explanation },
       });
     }
+    if (action === 'previewChangeSet' || action === 'applyChangeSet' || action === 'rejectChangeSet' || action === 'restoreChangeSet') {
+      const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
+      if (!item?.changeSet) return;
+      vscode.postMessage({ command: action, args: { changeSet: item.changeSet } });
+    }
   });
 
   app.addEventListener('input', (event) => {
@@ -744,7 +767,12 @@ window.addEventListener('message', (event) => {
         else assistant.activities.push({ name: agentEvent.name, summary: agentEvent.summary, status: agentEvent.status });
       } else if (agentEvent?.type === 'proposal') {
         assistant.proposals ||= [];
-        assistant.proposals.push(agentEvent as AgentProposal);
+        if (agentEvent.change_set) {
+          const duplicate = assistant.proposals.some((proposal) => proposal.changeSet?.id === agentEvent.change_set.id);
+          if (!duplicate) assistant.proposals.push({ kind: 'change_set', explanation: agentEvent.change_set.summary, changeSet: agentEvent.change_set });
+        } else {
+          assistant.proposals.push(agentEvent as AgentProposal);
+        }
       } else if (agentEvent?.type === 'message') {
         assistant.content = agentEvent.content || '';
         assistant.activities?.forEach((item) => { item.status = 'complete'; });
@@ -785,6 +813,16 @@ window.addEventListener('message', (event) => {
       }
       render();
       showToast(kind === 'command' ? 'Command started in terminal' : 'File change applied');
+      break;
+    }
+    case 'changeSetUpdated': {
+      const updated = message.payload as ChangeSet;
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.changeSet?.id === updated.id);
+        if (proposal) proposal.changeSet = updated;
+      }
+      render();
+      showToast(`Change set ${updated.status}`);
       break;
     }
   }

@@ -14,6 +14,7 @@ import { MatCardModule } from '@angular/material/card';
 import { ApiService } from './api.service';
 import { ConversationSummary, MessageRead, MessageCreate, ChatRequest } from './models';
 import { MarkdownPipe } from './markdown.pipe';
+import { SseEvent, SseParser } from './sse-parser';
 
 @Component({
   selector: 'app-chat-shell',
@@ -40,15 +41,27 @@ export class ChatShellComponent implements OnInit {
   activeConversation: ConversationSummary | null = null;
   messages: MessageRead[] = [];
   inputText = '';
-  model = 'qwen2.5-coder:7b';
+  model = '';
+  models: string[] = [];
   streaming = false;
   error: string | null = null;
   private abortController: AbortController | null = null;
 
-  constructor(private readonly api: ApiService) {}
+  constructor(private readonly api: ApiService) {
+    this.model = api.defaultModel;
+    this.models = [api.defaultModel];
+  }
 
   ngOnInit(): void {
     this.loadConversations();
+    if (this.api.isBrowser) {
+      this.api.getHealth().subscribe({
+        next: (health) => {
+          this.models = health.models?.length ? health.models : this.models;
+          if (!this.models.includes(this.model)) this.model = health.model || this.models[0] || this.api.defaultModel;
+        },
+      });
+    }
   }
 
   loadConversations(): void {
@@ -115,7 +128,7 @@ export class ChatShellComponent implements OnInit {
     this.messages = [...this.messages, assistantMessage];
     this.streaming = true;
 
-    const streamUrl = `http://127.0.0.1:8000/api/conversations/${this.activeConversation.id}/chat`;
+    const streamUrl = this.api.chatStreamUrl(this.activeConversation.id);
 
     fetch(streamUrl, {
       method: 'POST',
@@ -136,38 +149,36 @@ export class ChatShellComponent implements OnInit {
         }
 
         const decoder = new TextDecoder();
-        let buffer = '';
+        const parser = new SseParser();
+        let completed = false;
 
-        while (true) {
+        const handleEvent = (event: SseEvent): void => {
+          if (event.event === 'done' || event.data === '[DONE]') {
+            completed = true;
+            return;
+          }
+          if (event.event === 'error') {
+            const decoded = JSON.parse(event.data) as { error?: string };
+            throw new Error(decoded.error || 'Backend stream error');
+          }
+          const decoded = JSON.parse(event.data) as string | { error?: string };
+          if (typeof decoded !== 'string') {
+            throw new Error(decoded.error || 'Unexpected backend stream payload');
+          }
+          assistantMessage = { ...assistantMessage, content: assistantMessage.content + decoded };
+          this.messages = [...this.messages.filter((msg) => msg.id !== assistantMessage.id), assistantMessage];
+        };
+
+        while (!completed) {
           const { done, value } = await reader.read();
           if (done) {
             break;
           }
-          buffer += decoder.decode(value, { stream: true });
-          const parts = buffer.split('\n');
-          buffer = parts.pop() ?? '';
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line) {
-              continue;
-            }
-            if (line.startsWith('data:')) {
-              const payload = line.slice(5).trim();
-              if (payload === '[DONE]') {
-                this.streaming = false;
-                return;
-              }
-              assistantMessage = {
-                ...assistantMessage,
-                content: assistantMessage.content + payload,
-              };
-              this.messages = [
-                ...this.messages.filter((msg) => msg.id !== assistantMessage.id),
-                assistantMessage,
-              ];
-            }
-          }
+          parser.feed(decoder.decode(value, { stream: true })).forEach(handleEvent);
         }
+        const finalText = decoder.decode();
+        if (finalText) parser.feed(finalText).forEach(handleEvent);
+        parser.finish().forEach(handleEvent);
       })
       .catch((error) => {
         if (controller.signal.aborted) {

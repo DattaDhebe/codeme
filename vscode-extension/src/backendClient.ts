@@ -1,4 +1,5 @@
 import * as vscode from 'vscode';
+import { ChangeSet } from './changeSet';
 
 export interface BackendSettings {
   get<T>(section: string, defaultValue: T): T;
@@ -25,14 +26,17 @@ export interface ConversationMessage {
   created_at: string;
 }
 
-interface WorkspaceResponse {
+export interface WorkspaceResponse {
   id: number;
+  display_name?: string;
+  root_path?: string;
 }
 
 export type AgentEvent =
   | { type: 'status'; label: string; detail?: string }
   | { type: 'tool'; name: string; summary: string; status: 'running' | 'complete' }
-  | { type: 'proposal'; kind: 'file_change'; path: string; content: string; explanation: string }
+  | { type: 'proposal'; kind: 'file_change'; path: string; content: string; explanation: string; change_set?: ChangeSet }
+  | { type: 'proposal'; kind: 'change_set'; change_set: ChangeSet }
   | { type: 'proposal'; kind: 'command'; command: string; explanation: string }
   | { type: 'message'; content: string };
 
@@ -83,6 +87,10 @@ export class BackendClient {
     return response.id;
   }
 
+  public async listWorkspaces(): Promise<WorkspaceResponse[]> {
+    return this.request<WorkspaceResponse[]>('/workspaces');
+  }
+
   public async listConversations(query?: string): Promise<ConversationSummary[]> {
     const suffix = query ? `?query=${encodeURIComponent(query)}` : '';
     return this.request<ConversationSummary[]>(`/conversations${suffix}`);
@@ -106,6 +114,36 @@ export class BackendClient {
 
   public async deleteConversation(conversationId: number): Promise<void> {
     await this.request<void>(`/conversations/${conversationId}`, { method: 'DELETE' });
+  }
+
+  public async decideChangeSet(changeSetId: string, decision: 'approve' | 'reject', detail?: string): Promise<ChangeSet> {
+    return this.post<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}/decision`, { decision, detail });
+  }
+
+  public async reportChangeSetResult(
+    changeSetId: string,
+    status: 'applied' | 'failed',
+    resultHashes: Record<string, string>,
+    checkpointReference?: string,
+    failureReason?: string,
+  ): Promise<ChangeSet> {
+    return this.post<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}/result`, {
+      status,
+      result_hashes: resultHashes,
+      checkpoint_reference: checkpointReference,
+      failure_reason: failureReason,
+    });
+  }
+
+  public async reportChangeSetRestore(
+    changeSetId: string,
+    status: 'restored' | 'restore_failed',
+    failureReason?: string,
+  ): Promise<ChangeSet> {
+    return this.post<ChangeSet>(`/change-sets/${encodeURIComponent(changeSetId)}/restore`, {
+      status,
+      failure_reason: failureReason,
+    });
   }
 
   public async streamChat(

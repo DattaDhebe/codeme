@@ -84,6 +84,11 @@
           "default": true,
           "description": "Require user approval for write or tool-execution actions."
         },
+        "personalCodex.enableUnsafeCommandExecution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Enable the legacy raw terminal command path. Unsafe: Phase 5 controlled execution is not implemented. Every command still requires confirmation."
+        },
         "personalCodex.showNotifications": {
           "type": "boolean",
           "default": true,

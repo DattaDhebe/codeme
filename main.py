@@ -76,7 +76,12 @@ def api_health():
     }
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@app.post(
+    "/generate",
+    response_model=GenerateResponse,
+    deprecated=True,
+    summary="Legacy placeholder code-generation endpoint",
+)
 def generate(request: GenerateRequest):
     prompt = build_prompt(request)
     code = generate_code(prompt)

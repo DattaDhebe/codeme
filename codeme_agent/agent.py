@@ -3,7 +3,7 @@ import re
 from pathlib import Path
 from typing import Iterator
 
-from codeme_agent import workspace
+from codeme_agent import changesets, workspace
 from codeme_agent.ollama import OllamaClient
 
 MAX_AGENT_TURNS = 12
@@ -16,7 +16,8 @@ Never claim that you cannot access the workspace: inspect it with list_files, se
 Read AGENTS.md instructions when present and obey them. Search narrowly, read relevant files, and inspect Git state when useful.
 For project analysis or architecture questions, listing the root is not sufficient. Read the README, dependency manifests, entry points, and representative source files for each major component before answering.
 Ground every project claim in files you actually inspected. Do not invent directories, technologies, or behavior from file names alone.
-For requested changes, first understand the existing implementation, then call propose_file_change with the COMPLETE final file content for each file. Do not pretend a change was applied.
+For requested changes, first read the exact base files, then call propose_change_set once with create operations or minimal exact search/replace edits. Do not request delete or rename operations. Do not pretend a change was applied.
+The legacy propose_file_change tool exists only for compatibility. Prefer propose_change_set because it computes verified base hashes and one reviewable multi-file proposal.
 For commands the user should run, call propose_command. Never claim a command ran merely because it was proposed.
 Read-only tools execute automatically. File changes and commands require explicit approval in VS Code.
 Keep the final response concise: report what you found, proposals created, and verification still needed.
@@ -92,8 +93,48 @@ TOOLS = [
     {
         "type": "function",
         "function": {
+            "name": "propose_change_set",
+            "description": "Propose one reviewable multi-file change set. Create operations use content. Modify operations use exact old_text/new_text edits from files you already read.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "summary": {"type": "string", "description": "Short summary of the complete change."},
+                    "operations": {
+                        "type": "array",
+                        "items": {
+                            "type": "object",
+                            "properties": {
+                                "type": {"type": "string", "enum": ["create", "modify"]},
+                                "path": {"type": "string", "description": "Workspace-relative file path."},
+                                "summary": {"type": "string"},
+                                "content": {"type": "string", "description": "Required only for create."},
+                                "edits": {
+                                    "type": "array",
+                                    "description": "Required only for modify. old_text must match the verified base exactly.",
+                                    "items": {
+                                        "type": "object",
+                                        "properties": {
+                                            "old_text": {"type": "string"},
+                                            "new_text": {"type": "string"},
+                                            "replace_all": {"type": "boolean"},
+                                        },
+                                        "required": ["old_text", "new_text"],
+                                    },
+                                },
+                            },
+                            "required": ["type", "path", "summary"],
+                        },
+                    },
+                },
+                "required": ["summary", "operations"],
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
             "name": "propose_file_change",
-            "description": "Propose creating or replacing a workspace text file. This does not write the file; VS Code asks the user to approve it.",
+            "description": "Deprecated compatibility tool for one complete-file proposal. Prefer propose_change_set.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -338,6 +379,33 @@ class WorkspaceAgent:
             return _truncate(workspace.get_git_diff(self.root, arguments.get("path") or None)), None
         if name == "read_instructions":
             return _truncate(workspace.find_agent_instructions(self.root, arguments.get("path") or None)), None
+        if name == "propose_change_set":
+            raw_operations = arguments.get("operations")
+            if not isinstance(raw_operations, list):
+                raise workspace.WorkspaceSecurityError("Change-set operations must be a list")
+            normalized_operations = []
+            for raw_operation in raw_operations:
+                if not isinstance(raw_operation, dict):
+                    raise workspace.WorkspaceSecurityError("Every change-set operation must be an object")
+                normalized_operations.append({
+                    "type": raw_operation.get("type"),
+                    "relative_path": raw_operation.get("path"),
+                    "summary": raw_operation.get("summary"),
+                    "content": raw_operation.get("content"),
+                    "edits": raw_operation.get("edits", []),
+                })
+            prepared = changesets.prepare_change_set(
+                self.root,
+                str(arguments.get("summary", "")),
+                normalized_operations,
+            )
+            proposal = {"kind": "change_set", "change_set": prepared}
+            return {
+                "status": "proposed",
+                "change_set_id": prepared["id"],
+                "files": [item["relative_path"] for item in prepared["operations"]],
+                "requires_approval": True,
+            }, proposal
         if name == "propose_file_change":
             relative_path = _safe_proposal_path(self.root, str(arguments.get("path", "")))
             content = arguments.get("content")
@@ -383,6 +451,7 @@ class WorkspaceAgent:
         available_tools = _tools_for_prompt(prompt)
         available_tool_names = {item["function"]["name"] for item in available_tools}
         proposal_count = 0
+        malformed_tool_calls = 0
         for _turn in range(MAX_AGENT_TURNS):
             assistant = self.client.chat_with_tools(messages, available_tools, model=model)
             tool_calls = assistant.get("tool_calls") or _content_tool_calls(assistant, available_tools)
@@ -404,9 +473,17 @@ class WorkspaceAgent:
                     try:
                         arguments = json.loads(raw_arguments)
                     except json.JSONDecodeError:
-                        arguments = {}
+                        arguments = None
                 else:
-                    arguments = raw_arguments if isinstance(raw_arguments, dict) else {}
+                    arguments = raw_arguments if isinstance(raw_arguments, dict) else None
+                if arguments is None or not name:
+                    malformed_tool_calls += 1
+                    messages.append({"role": "tool", "content": json.dumps({"error": "Malformed tool call arguments"}), "tool_name": name or "unknown"})
+                    if malformed_tool_calls >= 3:
+                        yield {"type": "message", "content": "I stopped after three malformed tool calls. No changes were applied."}
+                        return
+                    continue
+                malformed_tool_calls = 0
                 summary = arguments.get("path") or arguments.get("query") or arguments.get("command") or "workspace"
                 yield {"type": "tool", "name": name, "summary": str(summary)[:200], "status": "running"}
                 try:

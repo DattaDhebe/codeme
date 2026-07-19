@@ -26,6 +26,9 @@
           <mat-icon>settings</mat-icon>
         </button>
         <span>{{ activeConversation?.title || 'Select a conversation' }}</span>
+        <select [(ngModel)]="model" aria-label="Ollama model">
+          <option *ngFor="let availableModel of models" [value]="availableModel">{{ availableModel }}</option>
+        </select>
       </div>
     </mat-toolbar>
 

@@ -1,6 +1,7 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
+import { RuntimeConfigService } from './runtime-config.service';
 
 import {
   ChatRequest,
@@ -17,9 +18,30 @@ import {
   providedIn: 'root'
 })
 export class ApiService {
-  private readonly baseUrl = 'http://127.0.0.1:8000/api';
+  constructor(
+    private readonly http: HttpClient,
+    private readonly config: RuntimeConfigService,
+  ) {}
 
-  constructor(private readonly http: HttpClient) {}
+  private get baseUrl(): string {
+    return this.config.apiBaseUrl;
+  }
+
+  get defaultModel(): string {
+    return this.config.defaultModel;
+  }
+
+  get isBrowser(): boolean {
+    return this.config.isBrowser;
+  }
+
+  chatStreamUrl(conversationId: number): string {
+    return `${this.baseUrl}/conversations/${conversationId}/chat`;
+  }
+
+  getHealth(): Observable<{ status: string; model?: string; models?: string[] }> {
+    return this.http.get<{ status: string; model?: string; models?: string[] }>(`${this.baseUrl}/health`);
+  }
 
   listConversations(query?: string): Observable<ConversationSummary[]> {
     return this.http.get<ConversationSummary[]>(`${this.baseUrl}/conversations`, {

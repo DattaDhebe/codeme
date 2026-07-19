@@ -5,7 +5,7 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
 from sqlalchemy.orm import Session
 
-from codeme_agent import agent, crud, ollama, schemas, workspace
+from codeme_agent import agent, changesets, crud, ollama, schemas, workspace
 from codeme_agent.db import get_db
 
 router = APIRouter(prefix="/api")
@@ -135,6 +135,66 @@ def get_messages(conversation_id: int, db: Session = Depends(get_db)):
     return crud.get_messages(db, conversation_id)
 
 
+@router.post("/change-sets", response_model=schemas.ChangeSetRead, status_code=status.HTTP_201_CREATED)
+def create_change_set(request: schemas.ChangeSetCreate, db: Session = Depends(get_db)):
+    if crud.get_conversation(db, request.conversation_id) is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    workspace_record = crud.get_workspace(db, request.workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    try:
+        prepared = changesets.prepare_change_set(
+            Path(workspace_record.root_path),
+            request.summary,
+            [operation.model_dump() for operation in request.operations],
+        )
+    except changesets.ChangeSetError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_CONTENT, detail=str(exc)) from exc
+    record = changesets.persist_change_set(db, request.conversation_id, request.workspace_id, prepared)
+    return changesets.serialize_change_set(record)
+
+
+@router.get("/change-sets/{change_set_id}", response_model=schemas.ChangeSetRead)
+def get_change_set(change_set_id: str, db: Session = Depends(get_db)):
+    record = changesets.get_change_set(db, change_set_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change set not found")
+    return changesets.serialize_change_set(record)
+
+
+@router.post("/change-sets/{change_set_id}/decision", response_model=schemas.ChangeSetRead)
+def decide_change_set(change_set_id: str, request: schemas.ChangeSetDecision, db: Session = Depends(get_db)):
+    record = changesets.get_change_set(db, change_set_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change set not found")
+    try:
+        return changesets.serialize_change_set(changesets.record_decision(db, record, request))
+    except changesets.ChangeSetError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/change-sets/{change_set_id}/result", response_model=schemas.ChangeSetRead)
+def record_change_set_result(change_set_id: str, request: schemas.ChangeSetApplyResult, db: Session = Depends(get_db)):
+    record = changesets.get_change_set(db, change_set_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change set not found")
+    try:
+        return changesets.serialize_change_set(changesets.record_apply_result(db, record, request))
+    except changesets.ChangeSetError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
+@router.post("/change-sets/{change_set_id}/restore", response_model=schemas.ChangeSetRead)
+def record_change_set_restore(change_set_id: str, request: schemas.ChangeSetRestoreResult, db: Session = Depends(get_db)):
+    record = changesets.get_change_set(db, change_set_id)
+    if record is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Change set not found")
+    try:
+        return changesets.serialize_change_set(changesets.record_restore_result(db, record, request))
+    except changesets.ChangeSetError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+
+
 @router.post("/conversations/{conversation_id}/chat")
 def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depends(get_db)):
     conversation = crud.get_conversation(db, conversation_id)
@@ -180,6 +240,21 @@ def run_agent(conversation_id: int, request: schemas.AgentRequest, db: Session =
         final_content = ""
         try:
             for event in runtime.run(request.prompt, history, model=request.model, context=request.context):
+                if event.get("type") == "proposal":
+                    if event.get("kind") == "change_set":
+                        prepared = event.get("change_set")
+                    elif event.get("kind") == "file_change":
+                        prepared = changesets.prepare_legacy_change_set(
+                            Path(workspace_record.root_path),
+                            str(event.get("path", "")),
+                            str(event.get("content", "")),
+                            str(event.get("explanation", "")),
+                        )
+                    else:
+                        prepared = None
+                    if prepared:
+                        record = changesets.persist_change_set(db, conversation_id, request.workspace_id, prepared)
+                        event = {**event, "change_set": changesets.serialize_change_set(record)}
                 if event.get("type") == "message":
                     final_content = str(event.get("content", ""))
                 event_name = str(event.get("type", "agent"))

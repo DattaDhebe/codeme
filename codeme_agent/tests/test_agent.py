@@ -145,3 +145,42 @@ def test_agent_does_not_treat_an_unlabelled_snippet_as_a_whole_file(tmp_path: Pa
     events = list(WorkspaceAgent(tmp_path, client=client).run("Change first in app.py", []))
 
     assert not any(event["type"] == "proposal" for event in events)
+
+
+def test_agent_prepares_hashed_structured_change_set(tmp_path: Path):
+    (tmp_path / "app.py").write_bytes(b"value = 1\n")
+    client = FakeToolClient([
+        tool_call("read_file", {"path": "app.py"}),
+        tool_call("propose_change_set", {
+            "summary": "Update the value",
+            "operations": [{
+                "type": "modify",
+                "path": "app.py",
+                "summary": "Use value 2",
+                "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+            }],
+        }),
+        {"role": "assistant", "content": "Prepared one change set for approval."},
+    ])
+
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Update app.py to value 2", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+
+    assert proposal["kind"] == "change_set"
+    operation = proposal["change_set"]["operations"][0]
+    assert operation["base_sha256"]
+    assert operation["proposed_content"] == "value = 2\n"
+    assert (tmp_path / "app.py").read_bytes() == b"value = 1\n"
+
+
+def test_agent_stops_after_repeated_malformed_tool_arguments(tmp_path: Path):
+    malformed = {
+        "role": "assistant",
+        "content": "",
+        "tool_calls": [{"function": {"name": "read_file", "arguments": "{not-json"}}],
+    }
+    client = FakeToolClient([malformed, malformed, malformed])
+
+    events = list(WorkspaceAgent(tmp_path, client=client).run("Update app.py", []))
+
+    assert events[-1]["content"] == "I stopped after three malformed tool calls. No changes were applied."

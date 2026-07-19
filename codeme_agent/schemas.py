@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 
 class GenerateRequest(BaseModel):
@@ -155,3 +156,99 @@ class ChatResponseChunk(BaseModel):
 
 class ErrorResponse(BaseModel):
     detail: str
+
+
+class SearchReplaceEdit(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    old_text: str = Field(..., min_length=1, max_length=200_000)
+    new_text: str = Field(..., max_length=200_000)
+    replace_all: bool = False
+
+
+class ChangeOperationInput(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["create", "modify"]
+    relative_path: str = Field(..., min_length=1, max_length=1024)
+    summary: str = Field(..., min_length=1, max_length=500)
+    content: str | None = Field(None, max_length=1_500_000)
+    edits: list[SearchReplaceEdit] = Field(default_factory=list, max_length=100)
+
+    @model_validator(mode="after")
+    def validate_operation_shape(self):
+        if self.type == "create" and (self.content is None or self.edits):
+            raise ValueError("Create operations require content and cannot include edits")
+        if self.type == "modify" and (self.content is not None or not self.edits):
+            raise ValueError("Modify operations require structured edits and cannot include complete content")
+        return self
+
+
+class ChangeSetCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema_version: Literal[1] = 1
+    conversation_id: int
+    workspace_id: int
+    summary: str = Field(..., min_length=1, max_length=500)
+    operations: list[ChangeOperationInput] = Field(..., min_length=1, max_length=50)
+
+
+class ChangeOperationRead(BaseModel):
+    operation_id: str
+    type: Literal["create", "modify"]
+    relative_path: str
+    summary: str
+    base_sha256: str | None
+    proposed_sha256: str
+    result_sha256: str | None = None
+    encoding: Literal["utf-8"] = "utf-8"
+    line_ending: Literal["lf", "crlf", "none", "mixed"]
+    edits: list[SearchReplaceEdit]
+    proposed_content: str
+    diff: str
+
+
+class ChangeSetEventRead(BaseModel):
+    from_status: str | None
+    to_status: str
+    detail: str | None
+    created_at: datetime
+
+
+class ChangeSetRead(BaseModel):
+    id: str
+    schema_version: Literal[1] = 1
+    conversation_id: int
+    workspace_id: int
+    summary: str
+    status: str
+    checkpoint_reference: str | None = None
+    failure_reason: str | None = None
+    created_at: datetime
+    updated_at: datetime
+    operations: list[ChangeOperationRead]
+    events: list[ChangeSetEventRead] = Field(default_factory=list)
+
+
+class ChangeSetDecision(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    decision: Literal["approve", "reject"]
+    detail: str | None = Field(None, max_length=1000)
+
+
+class ChangeSetApplyResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["applied", "failed"]
+    result_hashes: dict[str, str] = Field(default_factory=dict)
+    checkpoint_reference: str | None = Field(None, max_length=255)
+    failure_reason: str | None = Field(None, max_length=1000)
+
+
+class ChangeSetRestoreResult(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    status: Literal["restored", "restore_failed"]
+    failure_reason: str | None = Field(None, max_length=1000)

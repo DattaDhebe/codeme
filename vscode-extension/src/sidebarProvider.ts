@@ -3,6 +3,8 @@ import * as vscode from 'vscode';
 import { AgentEvent, BackendClient } from './backendClient';
 import { ContextReferenceResolver } from './contextResolver';
 import { webviewHtml } from './webviewHtml';
+import { ChangeSet } from './changeSet';
+import { ChangeSetManager } from './changeSetManager';
 
 interface WebviewMessage {
   command: string;
@@ -23,12 +25,15 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private pendingMessages: WebviewMessage[] = [];
   private currentWorkspaceId?: number;
   private readonly proposedDocuments = new Map<string, string>();
+  private readonly legacyChangeSets = new Map<string, ChangeSet>();
+  private readonly changeSetManager: ChangeSetManager;
 
   constructor(
     private readonly context: vscode.ExtensionContext,
     private readonly backend: BackendClient,
     private readonly resolver: ContextReferenceResolver
   ) {
+    this.changeSetManager = new ChangeSetManager(context);
     this.context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('codeme-proposed', {
       provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || '',
     }));
@@ -151,6 +156,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     }
     const workspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
     this.currentWorkspaceId = workspaceId;
+    await this.context.workspaceState.update(this.workspaceConsentKey(folder), true);
     await this.send({ command: 'workspaceRegistered', payload: { workspaceId, rootPath: folder.uri.fsPath } });
     await this.refreshWorkspaceState();
   }
@@ -203,23 +209,59 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
 
   private async initialize(conversationId?: number | null): Promise<void> {
     await this.refreshBackendStatus(false);
-    await this.autoRegisterActiveWorkspace();
+    await this.syncActiveWorkspaceRegistration();
+    const autoRegister = vscode.workspace.getConfiguration('personalCodex').get('autoRegisterWorkspace', false);
+    if (!this.currentWorkspaceId && autoRegister) {
+      await this.requestWorkspaceRegistration();
+    }
     await Promise.all([this.refreshWorkspaceState(), this.refreshConversations()]);
     if (conversationId) {
       await this.loadConversation(conversationId);
     }
   }
 
-  private async autoRegisterActiveWorkspace(): Promise<void> {
+  private workspaceConsentKey(folder: vscode.WorkspaceFolder): string {
+    return `personalCodex.workspaceRegistrationConsent:${folder.uri.toString()}`;
+  }
+
+  private async syncActiveWorkspaceRegistration(): Promise<void> {
     const folder = this.getActiveWorkspaceFolder();
     if (!folder) {
       this.currentWorkspaceId = undefined;
       return;
     }
     try {
-      this.currentWorkspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+      const normalizedRoot = path.resolve(folder.uri.fsPath).toLowerCase();
+      const existing = (await this.backend.listWorkspaces()).find(
+        (item) => item.root_path && path.resolve(item.root_path).toLowerCase() === normalizedRoot
+      );
+      this.currentWorkspaceId = existing?.id;
     } catch {
       this.currentWorkspaceId = undefined;
+    }
+  }
+
+  private async requestWorkspaceRegistration(): Promise<boolean> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) return false;
+    const rememberedConsent = this.context.workspaceState.get<boolean>(this.workspaceConsentKey(folder), false);
+    if (!rememberedConsent) {
+      const choice = await vscode.window.showInformationMessage(
+        `Personal Codeme needs permission to register '${folder.name}' before Agent mode can inspect it.`,
+        { modal: true },
+        'Register workspace'
+      );
+      if (choice !== 'Register workspace') return false;
+      await this.context.workspaceState.update(this.workspaceConsentKey(folder), true);
+    }
+    try {
+      this.currentWorkspaceId = await this.backend.registerWorkspace(folder.uri.fsPath, folder.name);
+      await this.send({ command: 'workspaceRegistered', payload: { workspaceId: this.currentWorkspaceId, rootPath: folder.uri.fsPath } });
+      await this.refreshWorkspaceState();
+      return true;
+    } catch (error) {
+      await this.send({ command: 'operationError', payload: { message: (error as Error).message } });
+      return false;
     }
   }
 
@@ -350,6 +392,26 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
           await this.applyFileChange(message.args.path, message.args.content, String(message.args?.explanation || ''));
         }
         break;
+      case 'previewChangeSet':
+        if (message.args?.changeSet) {
+          await this.previewChangeSet(message.args.changeSet as unknown as ChangeSet);
+        }
+        break;
+      case 'applyChangeSet':
+        if (message.args?.changeSet) {
+          await this.applyChangeSet(message.args.changeSet as unknown as ChangeSet);
+        }
+        break;
+      case 'rejectChangeSet':
+        if (message.args?.changeSet) {
+          await this.rejectChangeSet(message.args.changeSet as unknown as ChangeSet);
+        }
+        break;
+      case 'restoreChangeSet':
+        if (message.args?.changeSet) {
+          await this.restoreChangeSet(message.args.changeSet as unknown as ChangeSet);
+        }
+        break;
       case 'previewFileChange':
         if (typeof message.args?.path === 'string' && typeof message.args?.content === 'string') {
           await this.previewFileChange(message.args.path, message.args.content);
@@ -455,7 +517,10 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     await this.send({ command: 'streamStarted', payload: { conversationId } });
     if (args.mode === 'agent') {
       if (!this.currentWorkspaceId) {
-        await this.autoRegisterActiveWorkspace();
+        await this.syncActiveWorkspaceRegistration();
+      }
+      if (!this.currentWorkspaceId) {
+        await this.requestWorkspaceRegistration();
       }
       if (!this.currentWorkspaceId) {
         await this.send({ command: 'streamError', payload: { conversationId, message: 'Open a workspace and start the backend to use Agent mode.' } });
@@ -467,7 +532,12 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         this.currentWorkspaceId,
         contextText || undefined,
         args.model,
-        (event: AgentEvent) => void this.send({ command: 'agentEvent', payload: { conversationId, event } }),
+        (event: AgentEvent) => {
+          if (event.type === 'proposal' && event.kind === 'file_change' && event.change_set) {
+            this.legacyChangeSets.set(event.path, event.change_set);
+          }
+          void this.send({ command: 'agentEvent', payload: { conversationId, event } });
+        },
         () => {
           void this.send({ command: 'streamComplete', payload: { conversationId } });
           void this.refreshConversations();
@@ -572,48 +642,119 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async applyFileChange(relativePath: string, content: string, explanation: string): Promise<void> {
-    const target = this.resolveWorkspaceFile(relativePath);
-    if (!target) {
-      void vscode.window.showErrorMessage('The proposed file path is outside the active workspace.');
-      return;
-    }
-    await this.previewFileChange(relativePath, content);
-    const requireApproval = vscode.workspace.getConfiguration('personalCodex').get('requireWriteApproval', true);
-    if (requireApproval) {
-      const choice = await vscode.window.showWarningMessage(
-        `Apply agent change to ${relativePath}?${explanation ? `\n${explanation}` : ''}`,
-        { modal: true },
-        'Apply change'
+    const changeSet = this.legacyChangeSets.get(relativePath);
+    const operation = changeSet?.operations.find((item) => item.relative_path === relativePath);
+    if (!changeSet || !operation || operation.proposed_content !== content) {
+      void vscode.window.showWarningMessage(
+        `The legacy proposal for ${relativePath} has no verified base hash. Ask Agent mode to regenerate it as a transactional change set before applying.`
       );
-      if (choice !== 'Apply change') return;
-    }
-    let document: vscode.TextDocument | undefined;
-    try {
-      document = await vscode.workspace.openTextDocument(target);
-    } catch {
-      document = undefined;
-    }
-    const edit = new vscode.WorkspaceEdit();
-    if (document) {
-      const current = document.getText();
-      if (current === content) {
-        void vscode.window.showInformationMessage(`${relativePath} already matches the proposed content.`);
-        await this.send({ command: 'proposalApplied', payload: { kind: 'file_change', path: relativePath } });
-        return;
-      }
-      edit.replace(target, new vscode.Range(document.positionAt(0), document.positionAt(current.length)), content);
-    } else {
-      edit.createFile(target, { ignoreIfExists: true });
-      edit.insert(target, new vscode.Position(0, 0), content);
-    }
-    const applied = await vscode.workspace.applyEdit(edit);
-    if (!applied) {
-      void vscode.window.showErrorMessage(`Unable to apply the proposed change to ${relativePath}.`);
       return;
     }
-    document = await vscode.workspace.openTextDocument(target);
-    await vscode.window.showTextDocument(document, { preview: false });
-    await this.send({ command: 'proposalApplied', payload: { kind: 'file_change', path: relativePath } });
+    await this.applyChangeSet(changeSet);
+  }
+
+  private async previewChangeSet(changeSet: ChangeSet): Promise<void> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage('Open the registered workspace before previewing this change set.');
+      return;
+    }
+    try {
+      await this.changeSetManager.assertPreviewable(changeSet, folder);
+      for (const operation of changeSet.operations) {
+        await this.previewFileChange(operation.relative_path, operation.proposed_content);
+      }
+    } catch (error) {
+      void vscode.window.showErrorMessage((error as Error).message);
+    }
+  }
+
+  private async applyChangeSet(changeSet: ChangeSet): Promise<void> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) {
+      void vscode.window.showErrorMessage('Open the registered workspace before applying this change set.');
+      return;
+    }
+    const files = changeSet.operations.map((operation) => `${operation.type}: ${operation.relative_path}`).join('\n');
+    const choice = await vscode.window.showWarningMessage(
+      `Apply the complete change set?\n\n${changeSet.summary}\n\n${files}`,
+      { modal: true },
+      'Apply complete change set'
+    );
+    if (choice !== 'Apply complete change set') return;
+
+    let approved: ChangeSet | undefined;
+    let localResult: { checkpointReference: string; resultHashes: Record<string, string> } | undefined;
+    try {
+      approved = await this.backend.decideChangeSet(changeSet.id, 'approve', 'Approved as a complete change set in VS Code');
+      localResult = await this.changeSetManager.apply(approved, folder);
+      const applied = await this.backend.reportChangeSetResult(
+        approved.id,
+        'applied',
+        localResult.resultHashes,
+        localResult.checkpointReference,
+      );
+      await this.send({ command: 'changeSetUpdated', payload: applied });
+      void vscode.window.showInformationMessage(`Applied ${applied.operations.length} file change(s). A restore checkpoint is available.`);
+    } catch (error) {
+      let failure = error as Error;
+      if (approved && localResult) {
+        try {
+          await this.changeSetManager.restore(
+            { ...approved, checkpoint_reference: localResult.checkpointReference },
+            folder,
+          );
+          failure = new Error(`Backend result reporting failed, so the local change was rolled back: ${failure.message}`);
+        } catch (rollbackError) {
+          failure = new Error(
+            `Backend result reporting failed and local rollback also failed: ${failure.message}; ${(rollbackError as Error).message}`,
+          );
+        }
+      }
+      try {
+        if (approved) {
+          const failed = await this.backend.reportChangeSetResult(approved.id, 'failed', {}, undefined, failure.message);
+          await this.send({ command: 'changeSetUpdated', payload: failed });
+        }
+      } catch {
+        // The original error is more actionable than a secondary reporting failure.
+      }
+      void vscode.window.showErrorMessage(`Change set was not applied: ${failure.message}`);
+    }
+  }
+
+  private async rejectChangeSet(changeSet: ChangeSet): Promise<void> {
+    try {
+      const rejected = await this.backend.decideChangeSet(changeSet.id, 'reject', 'Rejected in VS Code');
+      await this.send({ command: 'changeSetUpdated', payload: rejected });
+    } catch (error) {
+      void vscode.window.showErrorMessage(`Unable to reject change set: ${(error as Error).message}`);
+    }
+  }
+
+  private async restoreChangeSet(changeSet: ChangeSet): Promise<void> {
+    const folder = this.getActiveWorkspaceFolder();
+    if (!folder) return;
+    const choice = await vscode.window.showWarningMessage(
+      `Restore only the files changed by '${changeSet.summary}'? Newer user changes will cause a conflict.`,
+      { modal: true },
+      'Restore change set'
+    );
+    if (choice !== 'Restore change set') return;
+    try {
+      await this.changeSetManager.restore(changeSet, folder);
+      const restored = await this.backend.reportChangeSetRestore(changeSet.id, 'restored');
+      await this.send({ command: 'changeSetUpdated', payload: restored });
+      void vscode.window.showInformationMessage('Change set restored from its checkpoint.');
+    } catch (error) {
+      try {
+        const failed = await this.backend.reportChangeSetRestore(changeSet.id, 'restore_failed', (error as Error).message);
+        await this.send({ command: 'changeSetUpdated', payload: failed });
+      } catch {
+        // Preserve the local restore error.
+      }
+      void vscode.window.showErrorMessage(`Restore stopped: ${(error as Error).message}`);
+    }
   }
 
   private async previewFileChange(relativePath: string, content: string): Promise<void> {
@@ -648,8 +789,19 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       void vscode.window.showErrorMessage('The proposed terminal command is invalid.');
       return;
     }
+    const unsafeEnabled = vscode.workspace.getConfiguration('personalCodex').get('enableUnsafeCommandExecution', false);
+    if (!unsafeEnabled) {
+      const action = await vscode.window.showWarningMessage(
+        'Command execution is disabled. Personal Codeme currently has only a legacy raw terminal path; controlled execution arrives in Phase 5.',
+        'Open setting'
+      );
+      if (action === 'Open setting') {
+        await vscode.commands.executeCommand('workbench.action.openSettings', 'personalCodex.enableUnsafeCommandExecution');
+      }
+      return;
+    }
     const choice = await vscode.window.showWarningMessage(
-      `Run this command in ${folder.name}?\n\n${command}${explanation ? `\n\n${explanation}` : ''}`,
+      `Unsafe compatibility mode is enabled. Run this raw command in ${folder.name}?\n\n${command}${explanation ? `\n\n${explanation}` : ''}`,
       { modal: true },
       'Run command'
     );
