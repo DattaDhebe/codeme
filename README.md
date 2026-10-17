@@ -1,5 +1,7 @@
-<h1 align="center">Codeme</h1>
-<p align="center"><strong>A local AI coding assistant with your workspace in context.</strong><br>FastAPI · Ollama · Angular · VS Code</p>
+<p align="center">
+  <img src="docs/assets/project-banner.svg" alt="Codeme — Local AI. Workspace context. Explicit control." width="100%">
+</p>
+
 <p align="center"><a href="#getting-started">Get started</a> · <a href="vscode-extension/README.md">VS Code extension</a> · <a href="#project-structure">Explore the code</a></p>
 
 Codeme connects local language models to a repository-aware development workflow. Use streaming conversations, attach code and Git context, and review proposed file changes or terminal commands before they run.
@@ -89,7 +91,7 @@ python -m pytest codeme_agent/tests
 
 Frontend build: `npm run build` inside `frontend`. Extension checks: `npm run typecheck` and `npm test` inside `vscode-extension`.
 
-These are available developer checks, not a claim that every environment has been validated.
+Run the checks in your configured local development environment.
 
 ## Design priorities
 
