@@ -45,3 +45,12 @@ def test_malformed_and_absolute_outside_paths_are_ignored(tmp_path: Path):
     output = f'{outside}:9: test_bad - malicious\nnot a diagnostic\n\x1b[31mgarbage'
     assert diagnostics.parse_diagnostics(output, tmp_path) == []
     assert diagnostics.safe_log_path("../outside.py", tmp_path) is None
+def test_large_non_diagnostic_lines_do_not_stall_parsing(tmp_path):
+    from codeme_agent.diagnostics import parse_diagnostics, sanitize_output
+
+    output = "x" * 80_000 + "\nsrc/app.ts(3,4): error TS2322: Type mismatch\n"
+    diagnostics = parse_diagnostics(output, tmp_path)
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["relative_path"] == "src/app.ts"
+    assert sanitize_output("sensitive output", 0) == ""
+    assert parse_diagnostics(output, tmp_path, limit=0) == []

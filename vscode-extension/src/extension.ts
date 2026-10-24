@@ -38,9 +38,9 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   registerCommand('personalCodex.startBackend', async () => sidebarProvider.startBackend());
 
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.refreshWorkspaceState()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.workspaceChanged()));
   context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
-    sidebarProvider.updateConfiguration();
+    if (event.affectsConfiguration('personalCodex')) void sidebarProvider.updateConfiguration();
     if (
       event.affectsConfiguration('personalCodex.enableUnsafeCommandExecution')
       && vscode.workspace.getConfiguration('personalCodex').get('enableUnsafeCommandExecution', false)

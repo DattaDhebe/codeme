@@ -1,5 +1,6 @@
 import * as vscode from 'vscode';
 import { ChangeSet } from './changeSet';
+import { readEventStream } from './eventStream';
 import { CommandExecutionResult, CommandRisk, CommandRun } from './commandRun';
 import { VerificationMode, VerificationSession, VerificationStepStart } from './verification';
 
@@ -10,6 +11,8 @@ export interface BackendSettings {
 export interface HealthResponse {
   status: string;
   ollama?: string;
+  provider?: string;
+  inference?: string;
   model?: string;
   models?: string[];
 }
@@ -34,16 +37,57 @@ export interface WorkspaceResponse {
   root_path?: string;
 }
 
+export interface AgentPlanStep {
+  id: string;
+  description: string;
+  status: 'pending' | 'in_progress' | 'completed';
+}
+
+export interface AgentRun {
+  id: string;
+  conversation_id: number;
+  workspace_id: number;
+  goal: string;
+  provider: string;
+  time_budget_seconds: number;
+  elapsed_ms: number;
+  evidence: Record<string, unknown>;
+  requires_verification: boolean;
+  model?: string | null;
+  status: 'running' | 'awaiting_approval' | 'completed' | 'blocked' | 'exhausted' | 'cancelled' | 'interrupted';
+  plan: AgentPlanStep[];
+  cycle_count: number;
+  max_cycles: number;
+  summary?: string | null;
+  created_at: string;
+  updated_at: string;
+  pending_change_set_ids: string[];
+  pending_command_run_ids: string[];
+}
+
 export type AgentEvent =
+  | { type: 'task'; run: AgentRun }
+  | { type: 'plan'; steps: AgentPlanStep[]; explanation?: string }
+  | { type: 'outcome'; status: 'completed' | 'awaiting_approval' | 'blocked' | 'exhausted' | 'cancelled'; summary: string; evidence?: unknown }
+
   | { type: 'status'; label: string; detail?: string }
-  | { type: 'tool'; name: string; summary: string; status: 'running' | 'complete' }
+  | { type: 'tool'; name: string; summary: string; status: 'running' | 'complete' | 'error' }
   | { type: 'proposal'; kind: 'file_change'; path: string; content: string; explanation: string; change_set?: ChangeSet }
   | { type: 'proposal'; kind: 'change_set'; change_set: ChangeSet }
   | { type: 'proposal'; kind: 'command_proposal'; command_run: CommandRun }
+  | { type: 'proposal'; kind: 'verification_plan'; verification_session: VerificationSession }
   | { type: 'proposal'; kind: 'command'; command: string; explanation: string }
   | { type: 'message'; content: string };
 
-const LOCALHOST_URLS = ['http://127.0.0.1', 'http://localhost'];
+export function localBackendUrl(value: string): string {
+  let url: URL;
+  try { url = new URL(value); } catch { throw new Error('Use a valid local backend URL, such as http://127.0.0.1:8000.'); }
+  if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
+    || url.username || url.password || url.search || url.hash) {
+    throw new Error('Personal Codeme only connects to a local backend on localhost, 127.0.0.1, or [::1].');
+  }
+  return url.toString().replace(/\/+$/, '');
+}
 
 export class BackendClient {
   private controller?: AbortController;
@@ -51,26 +95,22 @@ export class BackendClient {
   constructor(private config: BackendSettings) {}
 
   public get configuredModel(): string {
-    return this.config.get('personalCodex.defaultModel', 'qwen2.5-coder:7b');
+    return this.config.get('defaultModel', 'qwen2.5-coder:7b');
   }
 
   private get backendUrl(): string {
-    return this.config.get('personalCodex.backendUrl', 'http://127.0.0.1:8000');
+    return localBackendUrl(this.config.get('backendUrl', 'http://127.0.0.1:8000'));
   }
 
   private get showNotifications(): boolean {
-    return this.config.get('personalCodex.showNotifications', true);
+    return this.config.get('showNotifications', true);
   }
 
   public async checkConnection(userTriggered: boolean): Promise<HealthResponse> {
-    if (!LOCALHOST_URLS.some((host) => this.backendUrl.startsWith(host))) {
-      void vscode.window.showWarningMessage('Personal Codeme is configured to use a non-local backend URL.');
-    }
-
     try {
       const response = await this.request<HealthResponse>('/health', undefined, 3000, 3);
       if (response.status === 'ok' && this.showNotifications && userTriggered) {
-        const target = response.model ? `${response.model} through Ollama` : 'the local backend';
+        const target = response.model ? `${response.model} through ${response.provider || 'Ollama'}` : 'the local backend';
         void vscode.window.showInformationMessage(`Personal Codeme is connected to ${target}.`);
       }
       return response;
@@ -260,133 +300,92 @@ export class BackendClient {
     onComplete: () => void,
     onError: (error: Error) => void
   ): Promise<void> {
-    const url = this.getUrl(`/conversations/${conversationId}/chat`);
-    this.controller = new AbortController();
-
-    try {
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ model: model || this.configuredModel, messages }),
-        signal: this.controller.signal,
-      });
-      if (!response.ok) {
-        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
-      }
-
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('The backend response stream is unavailable.');
-      }
-
-      const decoder = new TextDecoder();
-      let buffer = '';
-      let completed = false;
-      while (!completed) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
+    await this.stream('/conversations/' + conversationId + '/chat',
+      { model: model || this.configuredModel, messages }, (event) => {
+        if (event.data === '[DONE]') return false;
+        let decoded: unknown;
+        try { decoded = JSON.parse(event.data); } catch { throw new Error('The backend returned an invalid chat event.'); }
+        if (event.event === 'error' || (decoded && typeof decoded === 'object' && 'error' in decoded)) {
+          throw new Error(String((decoded as { error?: string })?.error || 'Chat request failed.'));
         }
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split('\n');
-        buffer = lines.pop() ?? '';
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith('data:')) {
-            continue;
-          }
-          const payload = line.slice(5).trim();
-          if (payload === '[DONE]') {
-            completed = true;
-            break;
-          }
-          try {
-            const decoded = JSON.parse(payload) as string | { error?: string };
-            if (typeof decoded === 'string') {
-              onChunk(decoded);
-            } else if (decoded.error) {
-              throw new Error(decoded.error);
-            }
-          } catch (error) {
-            if (error instanceof SyntaxError) {
-              onChunk(payload);
-            } else {
-              throw error;
-            }
-          }
-        }
-      }
-      onComplete();
-    } catch (error: unknown) {
-      if ((error as Error)?.name === 'AbortError') {
-        onError(new Error('Generation stopped.'));
-      } else {
-        onError(error as Error);
-      }
-    } finally {
-      this.controller = undefined;
-    }
+        if (typeof decoded === 'string') onChunk(decoded);
+      }, onComplete, onError);
+  }
+
+  public async listAgentRuns(conversationId: number): Promise<AgentRun[]> {
+    return this.request<AgentRun[]>(`/agent-runs?conversation_id=${conversationId}`);
+  }
+
+  public async getAgentRun(runId: string): Promise<AgentRun> {
+    return this.request<AgentRun>(`/agent-runs/${encodeURIComponent(runId)}`);
+  }
+
+  public async cancelAgentRun(runId: string, reason = 'Stopped by user'): Promise<AgentRun> {
+    return this.post<AgentRun>(`/agent-runs/${encodeURIComponent(runId)}/cancel`, { reason });
+  }
+
+  public async continueAgentRun(
+    runId: string, onEvent: (event: AgentEvent) => void,
+    onComplete: () => void, onError: (error: Error) => void,
+  ): Promise<void> {
+    await this.streamAgentEvents(`/agent-runs/${encodeURIComponent(runId)}/continue`, {}, onEvent, onComplete, onError);
   }
 
   public async streamAgent(
-    conversationId: number,
-    prompt: string,
-    workspaceId: number,
-    context: string | undefined,
-    model: string | undefined,
-    onEvent: (event: AgentEvent) => void,
-    onComplete: () => void,
-    onError: (error: Error) => void
+    conversationId: number, prompt: string, workspaceId: number, context: string | undefined,
+    model: string | undefined, onEvent: (event: AgentEvent) => void,
+    onComplete: () => void, onError: (error: Error) => void,
   ): Promise<void> {
-    const url = this.getUrl(`/conversations/${conversationId}/agent`);
-    this.controller = new AbortController();
+    await this.streamAgentEvents('/conversations/' + conversationId + '/agent',
+      { model: model || this.configuredModel, prompt, workspace_id: workspaceId, context }, onEvent, onComplete, onError);
+  }
+
+  private async streamAgentEvents(
+    endpoint: string, body: unknown, onEvent: (event: AgentEvent) => void,
+    onComplete: () => void, onError: (error: Error) => void,
+  ): Promise<void> {
+    await this.stream(endpoint, body, (event) => {
+      if (event.event === 'done' || event.data === '[DONE]') return false;
+      const decoded = JSON.parse(event.data) as AgentEvent | { error?: string };
+      if (event.event === 'error' || 'error' in decoded) {
+        throw new Error('error' in decoded ? decoded.error : 'Agent request failed.');
+      }
+      onEvent(decoded as AgentEvent);
+    }, onComplete, onError);
+  }
+
+  private async stream(
+    endpoint: string, body: unknown,
+    consume: (event: { event: string; data: string }) => boolean | void,
+    onComplete: () => void, onError: (error: Error) => void,
+  ): Promise<void> {
+    this.cancel();
+    const controller = new AbortController();
+    this.controller = controller;
     try {
-      const response = await fetch(url, {
-        method: 'POST',
+      const response = await fetch(this.getUrl(endpoint), {
+        method: 'POST', redirect: 'error',
         headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify({ model: model || this.configuredModel, prompt, workspace_id: workspaceId, context }),
-        signal: this.controller.signal,
+        body: JSON.stringify(body), signal: controller.signal,
       });
-      if (!response.ok) {
-        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
-      }
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error('The backend response stream is unavailable.');
-      }
-      const decoder = new TextDecoder();
-      let buffer = '';
+      if (!response.ok) throw new Error('Backend request failed: ' + response.status + ' ' + await response.text());
       let completed = false;
-      while (!completed) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split('\n\n');
-        buffer = blocks.pop() ?? '';
-        for (const block of blocks) {
-          let eventName = 'message';
-          let data = '';
-          for (const line of block.split('\n')) {
-            if (line.startsWith('event:')) eventName = line.slice(6).trim();
-            if (line.startsWith('data:')) data += line.slice(5).trim();
-          }
-          if (eventName === 'done' || data === '[DONE]') {
-            completed = true;
-            break;
-          }
-          if (!data) continue;
-          const decoded = JSON.parse(data) as AgentEvent | { error?: string };
-          if (eventName === 'error' || 'error' in decoded) {
-            throw new Error('error' in decoded ? decoded.error : 'Agent request failed.');
-          }
-          onEvent(decoded as AgentEvent);
-        }
-      }
+      await readEventStream(response, (event) => {
+        if (controller.signal.aborted) throw new DOMException('Generation stopped.', 'AbortError');
+        if (consume(event) === false) { completed = true; return false; }
+      });
+      if (!completed) throw new Error('The backend stream ended early. Retry your request.');
       onComplete();
     } catch (error: unknown) {
-      onError((error as Error)?.name === 'AbortError' ? new Error('Generation stopped.') : error as Error);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (controller.signal.aborted || failure.name === 'AbortError') {
+        const cancelled = new Error('Generation stopped.');
+        cancelled.name = 'AbortError';
+        onError(cancelled);
+      } else onError(failure);
     } finally {
-      this.controller = undefined;
+      // An older request must never clear the controller for its successor.
+      if (this.controller === controller) this.controller = undefined;
     }
   }
 
@@ -408,7 +407,7 @@ export class BackendClient {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
       try {
-        const response = await fetch(url, { signal: controller.signal, ...init });
+        const response = await fetch(url, { ...init, redirect: 'error', signal: controller.signal });
         if (!response.ok) {
           throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
         }

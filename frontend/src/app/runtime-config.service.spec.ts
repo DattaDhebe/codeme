@@ -30,10 +30,16 @@ describe('RuntimeConfigService', () => {
     expect(service.defaultModel).toBe('local-model');
   });
 
-  it('rejects remote endpoints unless explicitly allowed', async () => {
+  it('rejects remote endpoints even with a legacy remote override', async () => {
     const loading = service.load();
-    http.expectOne('/runtime-config.json').flush({ backendUrl: 'https://example.com', allowRemoteBackend: false });
+    http.expectOne('/runtime-config.json').flush({ backendUrl: 'https://example.com', allowRemoteBackend: true });
     await loading;
     expect(service.apiBaseUrl).toBe('http://127.0.0.1:8000/api');
+  });
+  it('accepts the IPv6 loopback address', async () => {
+    const loading = service.load();
+    http.expectOne('/runtime-config.json').flush({ backendUrl: 'http://[::1]:8123' });
+    await loading;
+    expect(service.apiBaseUrl).toBe('http://[::1]:8123/api');
   });
 });

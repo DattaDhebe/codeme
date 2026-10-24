@@ -1,4 +1,4 @@
-import { marked } from 'marked';
+import { escapeHtml, safeMarkdown } from './safeMarkdown';
 import Prism from 'prismjs';
 import 'prismjs/components/prism-markup';
 import 'prismjs/components/prism-css';
@@ -18,6 +18,7 @@ import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
 import type { CommandRun } from '../commandRun';
 import type { VerificationSession } from '../verification';
+import type { AgentRun } from '../backendClient';
 
 declare const acquireVsCodeApi: any;
 
@@ -35,6 +36,7 @@ interface ChatMessage {
   id?: number;
   role: Role;
   content: string;
+  model?: string;
   attachments?: Attachment[];
   error?: boolean;
   activities?: AgentActivity[];
@@ -44,7 +46,7 @@ interface ChatMessage {
 interface AgentActivity {
   name: string;
   summary: string;
-  status: 'running' | 'complete';
+  status: 'running' | 'complete' | 'error' | 'stopped';
 }
 
 interface AgentProposal {
@@ -77,6 +79,8 @@ interface UiState {
   models: string[];
   online: boolean;
   ollama: boolean;
+  provider: string;
+  agentRuns: AgentRun[];
   workspace: string | null;
   rootPath: string | null;
   streaming: boolean;
@@ -86,6 +90,9 @@ interface UiState {
   conversationSearch: string;
   mode: 'ask' | 'agent';
   workspaceRegistered: boolean;
+  workspaceFolders: number;
+  taskStatus: 'idle' | 'working' | 'complete' | 'stopped' | 'error';
+  lastError: string | null;
   verifications: VerificationSession[];
 }
 
@@ -97,11 +104,13 @@ const state: UiState = {
   conversations: persisted.conversations || [],
   currentConversationId: persisted.currentConversationId || null,
   composer: persisted.composer || '',
-  attachments: [],
+  attachments: persisted.attachments || [],
   selectedModel: persisted.selectedModel || 'qwen2.5-coder:7b',
   models: persisted.models || ['qwen2.5-coder:7b'],
   online: false,
   ollama: false,
+  provider: persisted.provider || 'Local provider',
+  agentRuns: persisted.agentRuns || [],
   workspace: persisted.workspace || null,
   rootPath: persisted.rootPath || null,
   streaming: false,
@@ -111,10 +120,22 @@ const state: UiState = {
   conversationSearch: '',
   mode: persisted.mode || 'agent',
   workspaceRegistered: false,
+  workspaceFolders: 0,
+  taskStatus: 'idle',
+  lastError: null,
   verifications: persisted.verifications || [],
 };
 
 let toastTimer: number | undefined;
+let renderFrame: number | undefined;
+let activeRequestId: string | null = null;
+let requestSequence = 0;
+let historySearchTimer: number | undefined;
+
+function scheduleRender(): void {
+  if (renderFrame !== undefined) return;
+  renderFrame = requestAnimationFrame(() => { renderFrame = undefined; render(); });
+}
 
 const icons: Record<string, string> = {
   plus: '<path d="M12 5v14M5 12h14"/>',
@@ -145,36 +166,48 @@ function icon(name: string, size = 16): string {
   return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
-  })[character] || character);
-}
-
 function render(): void {
-  if (!app) {
-    return;
-  }
+  if (!app) return;
+  const previousScroller = document.getElementById('chat-scroll');
+  const previousScrollTop = previousScroller?.scrollTop || 0;
   const shouldStickToBottom = isNearBottom();
+  const focused = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  const focusedId = focused?.id;
+  const selection = focused && ['prompt', 'history-search'].includes(focused.id)
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  const outputScroll = Array.from(app.querySelectorAll<HTMLElement>('pre')).map((element) => [element.scrollTop, element.scrollLeft]);
   app.innerHTML = `
     <div class="codeme-shell">
       ${renderHeader()}
       ${renderHistoryDrawer()}
-      <main class="chat-scroll" id="chat-scroll">
+      <main class="chat-scroll" id="chat-scroll" aria-label="Conversation" aria-busy="${state.streaming || state.loadingConversation}">
         ${renderChat()}
+        <div class="jump-wrap"><button class="jump-latest" data-action="scrollLatest" aria-label="Jump to latest response">${icon('chevron', 13)} Latest</button></div>
       </main>
       ${renderComposer()}
-      <div class="toast" id="toast" role="status"></div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
   `;
-  if (shouldStickToBottom || state.streaming) {
-    requestAnimationFrame(scrollToBottom);
+  const scroller = document.getElementById('chat-scroll');
+  if (scroller) {
+    scroller.scrollTop = state.messages.length === 0 ? 0 : shouldStickToBottom ? scroller.scrollHeight : previousScrollTop;
+    scroller.classList.toggle('is-scrolled-up', !shouldStickToBottom);
   }
+  app.querySelectorAll<HTMLElement>('pre').forEach((element, index) => {
+    const position = outputScroll[index];
+    if (position) { element.scrollTop = position[0]; element.scrollLeft = position[1]; }
+  });
+  const replacement = focusedId ? document.getElementById(focusedId) as HTMLInputElement | HTMLTextAreaElement | null : null;
+  if (replacement) {
+    replacement.focus({ preventScroll: true });
+    if (selection && selection[0] !== null && selection[1] !== null) replacement.setSelectionRange(selection[0], selection[1]);
+  }
+  resizeComposer(document.getElementById('prompt') as HTMLTextAreaElement | null);
   persistState();
 }
 
 function renderHeader(): string {
-  const statusLabel = state.online ? state.selectedModel : 'Backend offline';
+  const statusLabel = !state.online ? 'Backend offline' : !state.ollama ? 'Local model unavailable' : 'Local model ready';
   return `
     <header class="topbar">
       <div class="brand">
@@ -182,15 +215,15 @@ function renderHeader(): string {
         <div class="brand-copy"><strong>CODEME</strong><span>Local coding agent</span></div>
       </div>
       <div class="topbar-actions">
-        <button class="icon-button" data-action="newChat" title="New chat">${icon('plus')}</button>
-        <button class="icon-button ${state.historyOpen ? 'active' : ''}" data-action="toggleHistory" title="Chat history">${icon('history')}</button>
-        <button class="icon-button" data-action="settings" title="Settings">${icon('settings')}</button>
+        <button class="icon-button" data-action="newChat" title="New chat" aria-label="New chat">${icon('plus')}</button>
+        <button class="icon-button ${state.historyOpen ? 'active' : ''}" data-action="toggleHistory" title="Chat history" aria-label="Chat history" aria-expanded="${state.historyOpen}">${icon('history')}</button>
+        <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">${icon('settings')}</button>
       </div>
     </header>
-    <button class="status-strip ${state.online ? 'online' : 'offline'}" data-action="health" title="Check backend connection">
+    <button class="status-strip ${state.online && state.ollama ? 'online' : 'offline'}" data-action="health" title="Check backend connection">
       <span class="status-dot"></span>
       <span class="status-model">${escapeHtml(statusLabel)}</span>
-      <span class="status-via">${state.online && state.ollama ? 'via Ollama' : 'click to check'}</span>
+      <span class="status-via">${state.online && state.ollama ? escapeHtml(state.provider) : 'Check connection'}</span>
       <span class="status-workspace">${icon('folder', 13)} ${escapeHtml(state.workspace || 'No workspace')}</span>
     </button>
   `;
@@ -212,14 +245,14 @@ function renderHistoryDrawer(): string {
   `).join('');
   return `
     <div class="drawer-backdrop" data-action="toggleHistory"></div>
-    <aside class="history-drawer" aria-label="Chat history">
+    <aside class="history-drawer" role="dialog" aria-modal="true" aria-label="Chat history">
       <div class="drawer-header">
         <div><strong>Chats</strong><span>${state.conversations.length} conversations</span></div>
-        <button class="icon-button" data-action="toggleHistory">${icon('close')}</button>
+        <button class="icon-button" data-action="toggleHistory" aria-label="Close chat history">${icon('close')}</button>
       </div>
-      <label class="search-box">${icon('search', 15)}<input id="history-search" value="${escapeHtml(state.conversationSearch)}" placeholder="Search chats" /></label>
+      <label class="search-box">${icon('search', 15)}<input id="history-search" aria-label="Search chats" value="${escapeHtml(state.conversationSearch)}" placeholder="Search chats" /></label>
       <div class="history-list">
-        ${conversations || '<div class="history-empty">No conversations yet</div>'}
+        ${conversations || `<div class="history-empty">${state.conversationSearch ? 'No matching chats' : 'No conversations yet'}</div>`}
       </div>
     </aside>
   `;
@@ -232,10 +265,50 @@ function renderChat(): string {
   const verificationCards = state.verifications
     .filter((session) => Boolean(state.currentConversationId) && session.conversation_id === state.currentConversationId)
     .map(renderVerification).join('');
-  if (state.messages.length === 0 && !verificationCards) {
+  const taskCard = renderAgentTask();
+  if (state.messages.length === 0 && !verificationCards && !taskCard) {
     return renderEmptyState();
   }
-  return `<div class="message-list">${state.messages.map(renderMessage).join('')}${verificationCards}</div>`;
+  return `${renderSetupCard()}<div class="message-list">${state.messages.map(renderMessage).join('')}${verificationCards}${taskCard}</div>`;
+}
+
+function currentAgentRun(): AgentRun | undefined {
+  return state.agentRuns.find((run) => run.conversation_id === state.currentConversationId);
+}
+
+function updateAgentRun(run: AgentRun): void {
+  const index = state.agentRuns.findIndex((item) => item.conversation_id === run.conversation_id);
+  if (index >= 0) {
+    const previous = state.agentRuns[index];
+    if (previous.id !== run.id && previous.created_at > run.created_at) return;
+    if (previous.id === run.id && previous.updated_at > run.updated_at) return;
+    state.agentRuns[index] = run;
+  }
+  else state.agentRuns.push(run);
+}
+
+function renderAgentTask(): string {
+  const run = currentAgentRun();
+  if (!run) return '';
+  const labels: Record<AgentRun['status'], string> = {
+    running: state.streaming ? 'Working locally' : 'Interrupted · resume to continue',
+    awaiting_approval: 'Waiting for your review', completed: 'Task completed',
+    blocked: 'Task needs attention', exhausted: 'Task budget reached',
+    cancelled: 'Task cancelled', interrupted: 'Interrupted · resume to continue',
+  };
+  const active = !['completed', 'cancelled', 'exhausted'].includes(run.status);
+  const steps = (run.plan || []).map((step, index) => `<li class="agent-plan-step ${escapeHtml(step.status)}"><span>${step.status === 'completed' ? icon('check', 12) : step.status === 'in_progress' ? '<i></i>' : index + 1}</span><div>${escapeHtml(step.description)}<small>${step.status.replace('_', ' ')}</small></div></li>`).join('');
+  const detail = run.summary || (run.status === 'awaiting_approval'
+    ? 'Review proposals and approve verification after applying changes. The task will continue from recorded results.'
+    : run.status === 'interrupted' || (run.status === 'running' && !state.streaming)
+      ? 'The last session ended. Review saved actions, then resume when ready.' : 'Inspecting the workspace and checking the next step.');
+  return `<section class="agent-task-card" aria-label="Agent task" data-run-id="${escapeHtml(run.id)}">
+    <div class="agent-task-heading"><div><strong>${escapeHtml(labels[run.status])}</strong><span>Cycle ${run.cycle_count}/${run.max_cycles} · ${Math.ceil(run.elapsed_ms / 1000)}s / ${run.time_budget_seconds}s</span></div><span class="local-task-badge">Local task</span></div>
+    <p class="agent-task-goal">${escapeHtml(run.goal)}</p>
+    ${steps ? `<ol class="agent-plan">${steps}</ol>` : ''}
+    <p class="agent-task-detail">${escapeHtml(detail)}</p>
+    ${active ? `<div class="proposal-actions">${!state.streaming ? `<button class="secondary" data-action="cancelAgentRun" data-run-id="${escapeHtml(run.id)}">Cancel task</button><button data-action="resumeAgentRun" data-run-id="${escapeHtml(run.id)}" ${!state.online || !state.ollama || !state.workspaceRegistered ? 'disabled' : ''}>Resume task</button>` : '<span>Use Stop to cancel this task.</span>'}</div>` : ''}
+  </section>`;
 }
 
 function renderVerification(session: VerificationSession): string {
@@ -262,24 +335,28 @@ function renderVerification(session: VerificationSession): string {
     <div class="verification-heading"><div class="proposal-icon">${icon('check', 15)}</div><div><strong>${escapeHtml(session.summary)}</strong><span>${escapeHtml(session.state)} · plan ${session.plan_fingerprint.slice(0, 10)}</span></div></div>
     <div class="verification-limits"><span>${session.mode}</span><span>${session.total_time_budget_seconds}s budget</span><span>repair ${session.current_attempt}/${session.maximum_repair_attempts}</span><span>rerun ${session.current_rerun}/${session.maximum_reruns}</span></div>
     <div class="verification-steps">${rows}</div>
-    ${attempt?.model_analysis ? `<div class="verification-analysis"><strong>Repair analysis</strong><span>${escapeHtml(attempt.model_analysis)}</span></div>` : ''}
     ${detail ? `<div class="verification-detail">${escapeHtml(detail)}</div>` : ''}
     ${actions ? `<div class="proposal-actions">${actions}</div>` : ''}
   </section>`;
 }
 
+function renderSetupCard(): string {
+  if (!state.online) return '<section class="setup-card"><div><strong>Connect your local backend</strong><span>Start the API, then check the connection.</span></div><button data-action="startBackend">Start backend</button><button class="secondary" data-action="health">Check</button></section>';
+  if (!state.ollama) return '<section class="setup-card"><div><strong>Local model needs attention</strong><span>Start your local model provider and load a coding model, then check again.</span></div><button data-action="health">Check connection</button></section>';
+  if (state.models.length === 0) return '<section class="setup-card"><div><strong>Install a local model</strong><span>No local models were found. Load a coding model in your local provider, then check again.</span></div><button data-action="health">Check models</button></section>';
+  if (state.mode === 'agent' && state.workspaceFolders !== 1) return '<section class="setup-card"><div><strong>Open one workspace folder</strong><span>Agent mode inspects one local repository. Use Ask with attached context for other files.</span></div></section>';
+  if (state.mode === 'agent' && !state.workspaceRegistered) return '<section class="setup-card"><div><strong>Connect this workspace</strong><span>Allow local repository inspection. Changes and commands need your review.</span></div><button data-action="registerWorkspace">Register workspace</button></section>';
+  return '';
+}
+
 function renderEmptyState(): string {
-  const offlineAction = state.online ? '' : `
-    <div class="offline-card">
-      <div><strong>Backend is offline</strong><span>Start the local API to chat with Qwen.</span></div>
-      <button data-action="startBackend">Start backend</button>
-    </div>`;
   return `
     <section class="empty-state">
       <div class="hero-mark"><span></span>${icon('spark', 30)}</div>
-      <h1>Build with your code</h1>
-      <p>Ask Qwen to explain, fix, refactor, test, or review your workspace.</p>
-      ${offlineAction}
+      <div class="local-badge">On your machine · Local models</div>
+      <h1>What should we build?</h1>
+      <p>Explore your repository, make a focused change, and review every step.</p>
+      ${renderSetupCard()}
       <div class="suggestion-grid">
         <button class="suggestion" data-action="quickPrompt" data-context="selection" data-prompt="Explain the selected code. Focus on behavior, assumptions, and edge cases.">
           <span class="suggestion-icon violet">${icon('code')}</span><span><strong>Explain code</strong><small>Understand a selection</small></span>${icon('chevron', 14)}
@@ -304,7 +381,7 @@ function renderMessage(message: ChatMessage, index: number): string {
     <div class="message-attachments">${message.attachments.map((item) => `<span>${contextIcon(item.kind)}${escapeHtml(item.label)}</span>`).join('')}</div>` : '';
   if (message.role === 'user') {
     return `<article class="message-row user-row" data-message-index="${index}">
-      <div class="user-message">${attachments}<div>${renderMarkdown(message.content)}</div></div>
+      <div class="user-message">${attachments}<div>${renderMarkdown(message.content, false)}</div></div>
     </article>`;
   }
   if (message.role === 'system' || message.role === 'tool') {
@@ -313,17 +390,17 @@ function renderMessage(message: ChatMessage, index: number): string {
   const streaming = isLast && state.streaming;
   const activities = message.activities?.length ? `<div class="agent-activity">
     <div class="agent-activity-title">${icon('spark', 13)} Working in ${escapeHtml(state.workspace || 'workspace')}</div>
-    ${message.activities.map((item) => `<div class="agent-step ${item.status}"><span>${item.status === 'complete' ? icon('check', 12) : '<i></i>'}</span><strong>${escapeHtml(toolLabel(item.name))}</strong><small>${escapeHtml(item.summary)}</small></div>`).join('')}
+    ${message.activities.map((item) => `<div class="agent-step ${item.status}"><span>${item.status === 'complete' ? icon('check', 12) : item.status === 'error' ? icon('close', 12) : item.status === 'stopped' ? icon('stop', 12) : '<i></i>'}</span><strong>${escapeHtml(toolLabel(item.name))}</strong><small>${escapeHtml(item.summary)}</small></div>`).join('')}
   </div>` : '';
   const proposals = message.proposals?.map((proposal, proposalIndex) => renderProposal(proposal, index, proposalIndex)).join('') || '';
   return `<article class="message-row assistant-row ${message.error ? 'has-error' : ''}" data-message-index="${index}">
     <div class="assistant-avatar">${icon('spark', 15)}</div>
     <div class="assistant-content">
-      <div class="assistant-label">CODEME <span>${escapeHtml(state.selectedModel)}</span></div>
+      <div class="assistant-label">CODEME <span>${escapeHtml(message.model || 'Local model')}</span></div>
       ${activities}
       <div class="markdown-body">${renderMarkdown(message.content)}${streaming ? '<span class="stream-cursor"></span>' : ''}</div>
       ${proposals ? `<div class="proposal-list">${proposals}</div>` : ''}
-      ${!streaming && message.content ? `<div class="message-actions"><button data-action="copyMessage" data-index="${index}" title="Copy response">${icon('copy', 13)} Copy</button><button data-action="reusePrompt" data-index="${index}" title="Reuse previous prompt">${icon('refresh', 13)} Retry</button></div>` : ''}
+      ${!streaming && message.content ? `<div class="message-actions"><button data-action="copyMessage" data-index="${index}" title="Copy response">${icon('copy', 13)} Copy</button><button data-action="reusePrompt" data-index="${index}" title="Edit and resend the previous prompt">${icon('refresh', 13)} Edit request</button></div>` : ''}
     </div>
   </article>`;
 }
@@ -409,9 +486,18 @@ function toolLabel(name: string): string {
   return labels[name] || name.replace(/_/g, ' ');
 }
 
+function renderTaskStatus(): string {
+  const reviewCount = state.messages.reduce((count, message) => count + (message.proposals || []).filter((item) => item.changeSet?.status === 'proposed' || item.commandRun?.status === 'proposed').length, 0);
+  const run = currentAgentRun();
+  const label = !state.online ? 'Connect your local backend' : !state.ollama ? 'Connect a local model' : state.streaming ? 'Working locally' : run?.status === 'awaiting_approval' ? 'Waiting for review or verification' : run?.status === 'blocked' ? 'Task needs attention' : run?.status === 'exhausted' ? 'Task budget reached' : run?.status === 'cancelled' ? 'Task cancelled' : (run?.status === 'interrupted' || run?.status === 'running') ? 'Task interrupted · resume available' : reviewCount ? 'Ready for your review' : state.taskStatus === 'error' ? 'Request needs attention' : state.taskStatus === 'stopped' ? 'Generation stopped' : state.taskStatus === 'complete' ? 'Response complete' : 'Ready when you are';
+  const activities = state.messages.at(-1)?.activities || [];
+  const active = [...activities].reverse().find((item) => item.status === 'running');
+  return `<div class="task-status ${state.streaming ? 'working' : state.taskStatus}" role="status" aria-live="polite"><span class="task-indicator">${state.streaming ? '<i></i>' : icon(reviewCount ? 'file' : state.taskStatus === 'error' ? 'close' : 'check', 13)}</span><div><strong>${label}</strong>${state.lastError ? `<span class="task-error">${escapeHtml(state.lastError)}</span>` : active && state.streaming ? `<span>${escapeHtml(active.summary)}</span>` : ''}</div>${reviewCount ? `<button data-action="reviewPending">${reviewCount} to review</button>` : ''}</div>`;
+}
+
 function renderComposer(): string {
   const attachments = state.attachments.map((item, index) => `
-    <span class="attachment-chip" title="${escapeHtml(item.detail || item.label)}">${contextIcon(item.kind)}<span>${escapeHtml(item.label)}</span><button data-action="removeAttachment" data-index="${index}">${icon('close', 12)}</button></span>
+    <span class="attachment-chip" title="${escapeHtml(item.detail || item.label)}">${contextIcon(item.kind)}<span>${escapeHtml(item.label)}</span><button data-action="removeAttachment" data-index="${index}" aria-label="Remove ${escapeHtml(item.label)} context">${icon('close', 12)}</button></span>
   `).join('');
   const contextMenu = state.contextMenuOpen ? `
     <div class="context-menu">
@@ -421,32 +507,33 @@ function renderComposer(): string {
     </div>` : '';
   return `
     <footer class="composer-wrap">
-      <div class="mode-switch" role="tablist" aria-label="Chat mode">
-        <button data-action="setMode" data-mode="ask" class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
-        <button data-action="setMode" data-mode="agent" class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
-        <span>${state.mode === 'agent' ? (state.workspaceRegistered ? 'Can inspect and propose changes' : 'Needs an open workspace') : 'Chat with attached context'}</span>
+      ${renderTaskStatus()}
+      <div class="mode-switch" role="group" aria-label="Chat mode">
+        <button data-action="setMode" data-mode="ask" aria-pressed="${state.mode === 'ask'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
+        <button data-action="setMode" data-mode="agent" aria-pressed="${state.mode === 'agent'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
+        <span>${state.mode === 'agent' ? (state.workspaceRegistered ? 'Inspect · propose · review · verify' : state.workspace ? 'Register to inspect local files' : 'Open one workspace folder') : 'Chat with attached context'}</span>
       </div>
       ${attachments ? `<div class="attachment-list">${attachments}</div>` : ''}
       <div class="composer ${state.streaming ? 'streaming' : ''}">
-        <textarea id="prompt" rows="1" placeholder="Ask Codeme about your code…" ${state.streaming ? 'disabled' : ''}>${escapeHtml(state.composer)}</textarea>
+        <textarea id="prompt" rows="1" aria-label="Message Codeme" maxlength="100000" placeholder="${state.streaming ? 'Draft your next request…' : state.mode === 'agent' ? 'Describe a task for this workspace…' : 'Ask about your code…'}">${escapeHtml(state.composer)}</textarea>
         <div class="composer-toolbar">
           <div class="composer-left">
-            <button class="tool-button ${state.contextMenuOpen ? 'active' : ''}" data-action="toggleContext" title="Add context">${icon('paperclip', 15)}<span>Context</span></button>
-            <select id="model-select" title="Model" ${state.streaming ? 'disabled' : ''}>${state.models.map((model) => `<option value="${escapeHtml(model)}" ${model === state.selectedModel ? 'selected' : ''}>${escapeHtml(shortModelName(model))}</option>`).join('')}</select>
+            <button class="tool-button ${state.contextMenuOpen ? 'active' : ''}" data-action="toggleContext" title="Add context" aria-expanded="${state.contextMenuOpen}">${icon('paperclip', 15)}<span>Context</span></button>
+            <select id="model-select" title="Local model" aria-label="Local model" ${state.streaming || !state.models.length ? 'disabled' : ''}>${!state.models.length ? '<option value="">No local models installed</option>' : ''}${state.models.map((model) => `<option value="${escapeHtml(model)}" ${model === state.selectedModel ? 'selected' : ''}>${escapeHtml(shortModelName(model))}</option>`).join('')}</select>
           </div>
           ${state.streaming
-            ? `<button class="send-button stop" data-action="stop" title="Stop generation">${icon('stop', 16)}</button>`
-            : `<button class="send-button" data-action="send" title="Send message" ${!state.online || !state.composer.trim() ? 'disabled' : ''}>${icon('send', 16)}</button>`}
+            ? `<button class="send-button stop" data-action="stop" title="Stop generation (Esc)" aria-label="Stop generation">${icon('stop', 16)}</button>`
+            : `<button class="send-button" data-action="send" title="Send message" aria-label="Send message" ${!state.online || !state.ollama || !state.selectedModel || !state.composer.trim() ? 'disabled' : ''}>${icon('send', 16)}</button>`}
         </div>
         ${contextMenu}
       </div>
-      <div class="composer-hint"><span>Enter to send · Shift+Enter for new line</span><span>Local · private</span></div>
+      <div class="composer-hint"><span>Enter to send · Shift+Enter for new line</span><span>${state.attachments.length ? `${Math.ceil(state.attachments.reduce((size, item) => size + item.content.length, 0) / 1024)} KB context · ` : ''}Local only</span></div>
     </footer>
   `;
 }
 
-function renderMarkdown(text: string): string {
-  const html = marked.parse(text || '', { gfm: true, breaks: true });
+function renderMarkdown(text: string, codeActions = true): string {
+  const html = safeMarkdown(text);
   const template = document.createElement('template');
   template.innerHTML = html;
   template.content.querySelectorAll('script, style, iframe, object, embed, link, meta, form').forEach((node) => node.remove());
@@ -476,6 +563,7 @@ function renderMarkdown(text: string): string {
     const pre = code.closest('pre');
     if (pre) {
       if (targetPath) pre.dataset.targetPath = targetPath;
+      if (!codeActions) return;
       const toolbar = document.createElement('div');
       toolbar.className = 'code-toolbar';
       toolbar.innerHTML = `<span title="${escapeHtml(targetPath || language)}">${escapeHtml(targetPath || language)}</span><div><button class="code-apply" title="${targetPath ? `Replace ${escapeHtml(targetPath)}` : 'Choose where to apply'}">${icon('apply', 13)} Apply</button><button class="code-open" title="${targetPath ? 'Open proposed diff' : 'Open generated code'}">${icon('external', 13)} Open</button><button class="code-copy" title="Copy code">${icon('copy', 13)} Copy</button></div>`;
@@ -511,6 +599,7 @@ function formatRelativeDate(value: string): string {
 function persistState(): void {
   vscode.setState?.({
     messages: state.messages,
+    attachments: state.attachments,
     conversations: state.conversations,
     currentConversationId: state.currentConversationId,
     composer: state.composer,
@@ -520,6 +609,8 @@ function persistState(): void {
     rootPath: state.rootPath,
     mode: state.mode,
     verifications: state.verifications,
+    agentRuns: state.agentRuns,
+    provider: state.provider,
   });
 }
 
@@ -532,6 +623,7 @@ function scrollToBottom(): void {
   const scroller = document.getElementById('chat-scroll');
   if (scroller) {
     scroller.scrollTop = scroller.scrollHeight;
+    scroller.classList.remove('is-scrolled-up');
   }
 }
 
@@ -564,11 +656,16 @@ function submitPrompt(): void {
   if (!prompt || state.streaming) {
     return;
   }
-  if (!state.online) {
-    showToast('Start the backend before sending a message.');
+  if (!state.online || !state.ollama) {
+    showToast(!state.online ? 'Start the backend before sending a message.' : 'Connect Ollama before sending a message.');
     return;
   }
+  if (!state.selectedModel || !state.models.includes(state.selectedModel)) { showToast('Install and select a local Ollama model before sending.'); return; }
+  if (prompt.length > 100_000) { showToast('Keep your request below 100,000 characters.'); return; }
   const attachments = [...state.attachments];
+  activeRequestId = `${Date.now()}-${++requestSequence}`;
+  state.taskStatus = 'working';
+  state.lastError = null;
   state.messages.push({ role: 'user', content: prompt, attachments });
   state.composer = '';
   state.attachments = [];
@@ -579,6 +676,7 @@ function submitPrompt(): void {
     command: 'startChat',
     args: {
       prompt,
+      requestId: activeRequestId,
       conversationId: state.currentConversationId,
       model: state.selectedModel,
       context: attachments,
@@ -588,11 +686,16 @@ function submitPrompt(): void {
 }
 
 function newChat(): void {
+  activeRequestId = null;
+  vscode.postMessage({ command: 'abandonChat' });
+  state.taskStatus = 'idle';
+  state.lastError = null;
   state.currentConversationId = null;
   state.messages = [];
   state.composer = '';
   state.attachments = [];
   state.streaming = false;
+  state.loadingConversation = false;
   state.historyOpen = false;
   render();
   focusComposer();
@@ -601,6 +704,10 @@ function newChat(): void {
 function addAttachment(attachment: Attachment): void {
   const duplicate = state.attachments.some((item) => item.kind === attachment.kind && item.detail === attachment.detail && item.label === attachment.label);
   if (!duplicate) {
+    if (state.attachments.reduce((size, item) => size + item.content.length, attachment.content.length) > 175_000) {
+      showToast('Context is too large. Attach a smaller selection or remove a file.');
+      return;
+    }
     state.attachments.push(attachment);
   }
   state.contextMenuOpen = false;
@@ -651,7 +758,12 @@ if (app) {
     if (!button) return;
     const action = button.dataset.action;
     if (action === 'newChat') newChat();
-    if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); }
+    if (action === 'scrollLatest') scrollToBottom();
+    if (action === 'reviewPending') {
+      app.querySelector('[data-action="applyChangeSet"], [data-action="runCommandProposal"]')?.closest('section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+    if (action === 'registerWorkspace') vscode.postMessage({ command: 'registerWorkspace' });
+    if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); if (state.historyOpen) document.getElementById('history-search')?.focus(); else focusComposer(); }
     if (action === 'settings') vscode.postMessage({ command: 'openSettings' });
     if (action === 'health') vscode.postMessage({ command: 'healthCheck' });
     if (action === 'startBackend') vscode.postMessage({ command: 'startBackend' });
@@ -659,8 +771,18 @@ if (app) {
     if (action === 'requestContext') vscode.postMessage({ command: 'requestContext', args: { kind: button.dataset.kind } });
     if (action === 'removeAttachment') { state.attachments.splice(Number(button.dataset.index), 1); render(); focusComposer(); }
     if (action === 'send') submitPrompt();
-    if (action === 'setMode') { state.mode = button.dataset.mode === 'ask' ? 'ask' : 'agent'; render(); focusComposer(); }
+    if (action === 'setMode' && !state.streaming) { state.mode = button.dataset.mode === 'ask' ? 'ask' : 'agent'; render(); focusComposer(); }
     if (action === 'stop') vscode.postMessage({ command: 'cancelStream' });
+    if (action === 'resumeAgentRun' && !state.streaming) {
+      activeRequestId = 'resume-' + Date.now() + '-' + (++requestSequence);
+      state.streaming = true;
+      state.taskStatus = 'working';
+      state.lastError = null;
+      state.messages.push({ role: 'assistant', model: state.selectedModel, content: '', activities: [], proposals: [] });
+      render();
+      vscode.postMessage({ command: action, args: { runId: button.dataset.runId, requestId: activeRequestId } });
+    }
+    if (action === 'cancelAgentRun') vscode.postMessage({ command: action, args: { runId: button.dataset.runId } });
     if (action === 'quickPrompt') {
       state.composer = button.dataset.prompt || '';
       state.contextMenuOpen = false;
@@ -672,6 +794,10 @@ if (app) {
     }
     if (action === 'loadConversation') {
       const conversationId = Number(button.dataset.id);
+      activeRequestId = null;
+      state.streaming = false;
+      state.taskStatus = 'idle';
+      state.lastError = null;
       state.loadingConversation = true;
       state.historyOpen = false;
       render();
@@ -771,12 +897,14 @@ if (app) {
       state.composer = input.value;
       resizeComposer(input as HTMLTextAreaElement);
       const sendButton = app.querySelector<HTMLButtonElement>('[data-action="send"]');
-      if (sendButton) sendButton.disabled = !state.online || !state.composer.trim();
+      if (sendButton) sendButton.disabled = !state.online || !state.ollama || !state.composer.trim();
       persistState();
     }
     if (input.id === 'history-search') {
       state.conversationSearch = input.value;
-      vscode.postMessage({ command: 'searchConversations', args: { query: input.value.trim() } });
+      const query = input.value.trim();
+      window.clearTimeout(historySearchTimer);
+      historySearchTimer = window.setTimeout(() => vscode.postMessage({ command: 'searchConversations', args: { query } }), 180);
     }
   });
 
@@ -795,22 +923,42 @@ if (app) {
       keyboardEvent.preventDefault();
       submitPrompt();
     }
+    if (keyboardEvent.key === 'Tab' && state.historyOpen) {
+      const controls = Array.from(app.querySelectorAll<HTMLElement>('.history-drawer button, .history-drawer input'));
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (keyboardEvent.shiftKey && target === first) { keyboardEvent.preventDefault(); last?.focus(); }
+      else if (!keyboardEvent.shiftKey && target === last) { keyboardEvent.preventDefault(); first?.focus(); }
+    }
     if (keyboardEvent.key === 'Escape' && (state.historyOpen || state.contextMenuOpen)) {
       state.historyOpen = false;
       state.contextMenuOpen = false;
       render();
+      focusComposer();
+    } else if (keyboardEvent.key === 'Escape' && state.streaming) {
+      vscode.postMessage({ command: 'cancelStream' });
     }
   });
+  app.addEventListener('scroll', (event) => {
+    const scroller = event.target as HTMLElement;
+    if (scroller.id === 'chat-scroll') scroller.classList.toggle('is-scrolled-up', !isNearBottom());
+  }, true);
 }
 
 window.addEventListener('message', (event) => {
   const message = event.data as { command?: string; payload?: any };
+  const requestEvents = ['conversationCreated', 'streamStarted', 'streamChunk', 'agentEvent', 'streamComplete', 'streamStopped', 'streamError'];
+  if (requestEvents.includes(message.command || '') && message.payload?.requestId && message.payload.requestId !== activeRequestId) return;
+  if (requestEvents.includes(message.command || '') && !message.payload?.requestId && message.payload?.conversationId && message.payload.conversationId !== state.currentConversationId) return;
   switch (message.command) {
     case 'backendStatus':
       state.online = Boolean(message.payload?.online);
       state.ollama = Boolean(message.payload?.ollama);
-      state.models = message.payload?.models?.length ? message.payload.models : state.models;
-      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel : (message.payload?.model || state.models[0]);
+      state.provider = String(message.payload?.provider || 'Ollama');
+      if (!state.online && message.payload?.error) state.lastError = String(message.payload.error);
+      else if (state.online && state.taskStatus !== 'error') state.lastError = null;
+      state.models = Array.isArray(message.payload?.models) ? message.payload.models : state.models;
+      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel : state.models.includes(message.payload?.model) ? message.payload.model : (state.models[0] || '');
       render();
       if (!state.online && message.payload?.error) showToast('Backend unavailable');
       break;
@@ -818,6 +966,7 @@ window.addEventListener('message', (event) => {
       state.workspace = message.payload?.workspace || null;
       state.rootPath = message.payload?.rootPath || null;
       state.workspaceRegistered = Boolean(message.payload?.registered);
+      state.workspaceFolders = Number(message.payload?.folders || 0);
       render();
       break;
     case 'conversationsUpdated':
@@ -829,18 +978,21 @@ window.addEventListener('message', (event) => {
       if (message.payload) state.conversations = [message.payload, ...state.conversations.filter((item) => item.id !== message.payload.id)];
       render();
       break;
-    case 'conversationLoaded':
+    case 'conversationLoaded': {
+      const cached = state.currentConversationId === message.payload?.conversationId ? state.messages : [];
       state.currentConversationId = message.payload?.conversationId || null;
-      state.messages = (message.payload?.messages || []).map((item: ChatMessage) => ({
-        id: item.id,
-        role: item.role,
-        content: item.role === 'user' ? item.content.split('\n\nContext:')[0] : item.content,
-      }));
+      state.messages = (message.payload?.messages || []).map((item: ChatMessage) => {
+        const previous = cached.find((saved) => saved.role === item.role && saved.content === item.content);
+        return { ...previous, id: item.id, role: item.role, content: item.content };
+      });
       state.loadingConversation = false;
       state.streaming = false;
+      state.taskStatus = 'idle';
+      state.lastError = null;
       render();
       requestAnimationFrame(scrollToBottom);
       break;
+    }
     case 'conversationDeleted':
       if (state.currentConversationId === message.payload?.conversationId) newChat();
       break;
@@ -854,6 +1006,8 @@ window.addEventListener('message', (event) => {
       applyContextAction(message.payload as { action: string; context: Attachment });
       break;
     case 'streamStarted':
+      state.taskStatus = 'working';
+      state.lastError = null;
       state.currentConversationId = message.payload?.conversationId || state.currentConversationId;
       state.streaming = true;
       render();
@@ -862,16 +1016,61 @@ window.addEventListener('message', (event) => {
       const chunk = typeof message.payload?.chunk === 'string' ? message.payload.chunk : '';
       const last = state.messages[state.messages.length - 1];
       if (last?.role === 'assistant') last.content += chunk;
-      else state.messages.push({ role: 'assistant', content: chunk });
+      else state.messages.push({ role: 'assistant', model: state.selectedModel, content: chunk });
       state.streaming = true;
+      scheduleRender();
+      break;
+    }
+    case 'agentRunUpdated': {
+      updateAgentRun(message.payload as AgentRun);
+      render();
+      break;
+    }
+    case 'taskNotice':
+      if (message.payload?.conversationId === state.currentConversationId) {
+        state.streaming = false;
+        render();
+        showToast(message.payload?.message || 'Review saved actions before resuming.');
+      }
+      break;
+    case 'agentProposalRecovered': {
+      if (message.payload?.conversationId !== state.currentConversationId) break;
+      const changeSet = message.payload?.changeSet as ChangeSet | undefined;
+      const commandRun = message.payload?.commandRun as CommandRun | undefined;
+      const exists = state.messages.some((item) => item.proposals?.some((proposal) =>
+        changeSet ? proposal.changeSet?.id === changeSet.id : proposal.commandRun?.id === commandRun?.id));
+      if (!exists) {
+        let assistant = [...state.messages].reverse().find((item) => item.role === 'assistant');
+        if (!assistant) { assistant = { role: 'assistant', content: '' }; state.messages.push(assistant); }
+        assistant.proposals ||= [];
+        if (changeSet) assistant.proposals.push({ kind: 'change_set', changeSet });
+        if (commandRun) assistant.proposals.push({ kind: 'command_proposal', commandRun });
+      }
       render();
       break;
     }
     case 'agentEvent': {
       const agentEvent = message.payload?.event;
+      if (agentEvent?.type === 'task') {
+        updateAgentRun(agentEvent.run);
+        scheduleRender();
+        break;
+      }
+      if (agentEvent?.type === 'plan') {
+        const run = currentAgentRun();
+        if (run) run.plan = agentEvent.steps || [];
+        scheduleRender();
+        break;
+      }
+      if (agentEvent?.type === 'outcome') {
+        const run = currentAgentRun();
+        if (run) { run.status = agentEvent.status; run.summary = agentEvent.summary; }
+        scheduleRender();
+        break;
+      }
       let assistant = state.messages[state.messages.length - 1];
       if (assistant?.role !== 'assistant') {
-        assistant = { role: 'assistant', content: '', activities: [], proposals: [] };
+        assistant = { role: 'assistant', model: state.selectedModel, content: '', activities: [], proposals: [] };
         state.messages.push(assistant);
       }
       if (agentEvent?.type === 'status') {
@@ -880,7 +1079,7 @@ window.addEventListener('message', (event) => {
       } else if (agentEvent?.type === 'tool') {
         assistant.activities ||= [];
         const running = [...assistant.activities].reverse().find((item) => item.name === agentEvent.name && item.summary === agentEvent.summary && item.status === 'running');
-        if (agentEvent.status === 'complete' && running) running.status = 'complete';
+        if (agentEvent.status !== 'running' && running) running.status = agentEvent.status;
         else assistant.activities.push({ name: agentEvent.name, summary: agentEvent.summary, status: agentEvent.status });
       } else if (agentEvent?.type === 'proposal') {
         assistant.proposals ||= [];
@@ -895,34 +1094,45 @@ window.addEventListener('message', (event) => {
         }
       } else if (agentEvent?.type === 'message') {
         assistant.content = agentEvent.content || '';
-        assistant.activities?.forEach((item) => { item.status = 'complete'; });
+        assistant.activities?.forEach((item) => { if (item.status === 'running') item.status = 'complete'; });
       }
       state.streaming = true;
-      render();
+      scheduleRender();
       break;
     }
     case 'streamComplete':
+    case 'streamStopped':
       state.streaming = false;
+      state.taskStatus = message.command === 'streamStopped' ? 'stopped' : 'complete';
+      state.messages.at(-1)?.activities?.forEach((item) => { if (item.status === 'running') item.status = message.command === 'streamStopped' ? 'stopped' : 'complete'; });
       render();
+      focusComposer();
       break;
     case 'streamError': {
       state.streaming = false;
       const errorMessage = message.payload?.message || 'Unable to generate a response.';
+      state.taskStatus = 'error';
+      state.lastError = errorMessage;
+      state.messages.at(-1)?.activities?.forEach((item) => { if (item.status === 'running') item.status = 'error'; });
       const last = state.messages[state.messages.length - 1];
       if (!last || last.role !== 'assistant' || !last.content) {
         state.messages.push({ role: 'assistant', content: errorMessage, error: true });
       }
       render();
       showToast(errorMessage);
+      focusComposer();
       break;
     }
     case 'operationError':
       state.loadingConversation = false;
+      state.lastError = message.payload?.message || 'Operation failed';
+      state.taskStatus = 'error';
       render();
       showToast(message.payload?.message || 'Operation failed');
       break;
     case 'workspaceRegistered':
       state.workspaceRegistered = true;
+      render();
       showToast('Workspace registered');
       break;
     case 'proposalApplied': {
@@ -963,7 +1173,7 @@ window.addEventListener('message', (event) => {
         if (output.stream === 'stdout') proposal.stdout = (proposal.stdout || '') + output.text;
         else if (output.stream === 'stderr') proposal.stderr = (proposal.stderr || '') + output.text;
       }
-      render();
+      scheduleRender();
       break;
     }
     case 'verificationSessionUpdated': {
@@ -985,11 +1195,11 @@ window.addEventListener('message', (event) => {
       if (step && ['stdout', 'stderr'].includes(message.payload?.stream)) {
         step.output = ((step.output || '') + String(message.payload?.text || '')).slice(-65_536);
       }
-      render();
+      scheduleRender();
       break;
     }
     case 'verificationRepairStarted':
-      showToast('Preparing a bounded repair proposal with Qwen');
+      showToast('Preparing a bounded repair proposal with the local model');
       break;
   }
 });

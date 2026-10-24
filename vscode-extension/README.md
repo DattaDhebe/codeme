@@ -5,6 +5,10 @@ Personal Codeme is the repository-aware VS Code client for the local Personal Co
 ## Features
 
 - Ask and Agent modes with streamed local-model responses.
+- Workspace connection guidance, visible task progress, pending review navigation, and responsive native-theme cards.
+- Draft the next request while a response streams; focus, caret, scroll position, and draft context survive background updates.
+- Stop with Escape, switch chats without stale stream output, and search history without losing keyboard focus.
+- Model Markdown is inert content: raw HTML cannot inject webview actions and executable links are rejected.
 - Conversation history, search, rename, delete, and model selection.
 - Current selection, active file, and Git diff context.
 - Repository file reads, ripgrep search, Git inspection, and `AGENTS.md` lookup through the backend agent.
@@ -40,11 +44,11 @@ npm run build
 npm run package
 ```
 
-The package command creates `personal-codeme-0.5.0.vsix`.
+The package command creates `personal-codeme-0.6.0.vsix`.
 
 ## Settings
 
-- `personalCodex.backendUrl`: local backend, default `http://127.0.0.1:8000`.
+- `personalCodex.backendUrl`: loopback backend, default `http://127.0.0.1:8000`. Only HTTP(S) on `localhost`, `127.0.0.1`, or `[::1]` is accepted; redirects are refused.
 - `personalCodex.defaultModel`: default Ollama model, `qwen2.5-coder:7b`.
 - `personalCodex.autoRegisterWorkspace`: whether initialization may request workspace registration. Default `false` is honored.
 - `personalCodex.requireWriteApproval`: retains approval for legacy editor actions.
@@ -57,6 +61,8 @@ The package command creates `personal-codeme-0.5.0.vsix`.
 - `personalCodex.verificationMaximumReruns`: exact-plan reruns, default and hard maximum 2.
 - `personalCodex.verificationTimeBudgetSeconds`: whole-session budget, default 600 seconds and hard maximum 1200 seconds.
 - `personalCodex.showNotifications`: connection and workspace notifications.
+
+Agent mode supports exactly one open workspace folder. Explicit attached context is bounded to 175,000 characters in the composer and oversized context is rejected with guidance to select less code.
 
 Workspace registration is scoped to the current VS Code workspace. Existing backend registrations are reused; otherwise the user must consent before Agent mode can inspect the folder.
 

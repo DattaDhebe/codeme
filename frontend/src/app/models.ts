@@ -67,3 +67,12 @@ export interface GitStatusResponse {
   is_git: boolean;
   status: GitStatusEntry[];
 }
+
+export interface HealthRead {
+  status: string;
+  provider?: 'ollama' | 'openai_compatible';
+  ollama?: string;
+  model?: string;
+  models?: string[];
+  detail?: string;
+}

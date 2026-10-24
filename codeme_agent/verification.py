@@ -310,6 +310,7 @@ def serialize_session(record: models.VerificationSession) -> dict:
         "final_summary": record.final_summary,
         "failure_reason": record.failure_reason,
         "cancellation_reason": record.cancellation_reason,
+        "verified_files": json.loads(record.verified_files_json or "{}"),
         "created_at": timestamp(record.created_at),
         "updated_at": timestamp(record.updated_at),
         "approved_at": timestamp(record.approved_at),
@@ -377,13 +378,99 @@ def _budget_exceeded(record: models.VerificationSession) -> bool:
     return bool(record.started_at and datetime.utcnow() > record.started_at + timedelta(seconds=record.total_time_budget_seconds))
 
 
+def _bound_file_hashes(db: Session, record: models.VerificationSession) -> dict[str, str]:
+    """Read current files for this source, or its entire durable coding task.
+
+    A later task cycle can replace an earlier applied change to the same path.
+    Verifying that final state must cover all applied task paths and repairs,
+    rather than permanently tying the older change to an obsolete file hash.
+    """
+    workspace_record = db.get(models.Workspace, record.workspace_id)
+    if workspace_record is None:
+        raise VerificationError("Registered workspace no longer exists")
+    root = Path(workspace_record.root_path)
+    related_ids = [record.source_change_set_id] + [
+        attempt.repair_change_set_id for attempt in record.repair_attempts
+        if attempt.result == "applied"
+    ]
+    task_change_ids = set()
+    if record.source_change_set_id:
+        tasks = db.scalars(select(models.AgentRun).where(
+            models.AgentRun.workspace_id == record.workspace_id,
+            models.AgentRun.conversation_id == record.conversation_id,
+        ))
+        for task in tasks:
+            try:
+                ids = json.loads(task.change_set_ids_json or "[]")
+            except (ValueError, TypeError):
+                continue
+            # Exact membership is required; UUID-prefix or text matches can bind
+            # another task's files to an unrelated verification receipt.
+            if isinstance(ids, list) and record.source_change_set_id in ids:
+                task_change_ids.update(identifier for identifier in ids if isinstance(identifier, str))
+    if task_change_ids:
+        related_ids.extend(db.scalars(select(models.ChangeSet.id).where(
+            models.ChangeSet.id.in_(task_change_ids),
+            models.ChangeSet.workspace_id == record.workspace_id,
+            models.ChangeSet.conversation_id == record.conversation_id,
+            models.ChangeSet.status == "applied",
+        )))
+        task_sessions = db.scalars(select(models.VerificationSession).where(
+            models.VerificationSession.source_change_set_id.in_(task_change_ids),
+            models.VerificationSession.workspace_id == record.workspace_id,
+            models.VerificationSession.conversation_id == record.conversation_id,
+        ))
+        task_repair_ids = {
+            attempt.repair_change_set_id for task_session in task_sessions
+            for attempt in task_session.repair_attempts if attempt.result == "applied"
+        }
+        if task_repair_ids:
+            related_ids.extend(db.scalars(select(models.ChangeSet.id).where(
+                models.ChangeSet.id.in_(task_repair_ids),
+                models.ChangeSet.workspace_id == record.workspace_id,
+                models.ChangeSet.conversation_id == record.conversation_id,
+                models.ChangeSet.status == "applied",
+            )))
+    paths = set()
+    for change_id in set(related_ids):
+        if not change_id:
+            continue
+        change = db.get(models.ChangeSet, change_id)
+        if (change is None or change.status != "applied"
+                or change.workspace_id != record.workspace_id
+                or change.conversation_id != record.conversation_id):
+            raise VerificationError("The verification source or applied repair is no longer current")
+        paths.update(operation.relative_path for operation in change.operations)
+    hashes = {}
+    for relative_path in sorted(paths):
+        normalized, _target, content = changesets._read_base(root, relative_path)
+        hashes[normalized] = changesets.sha256_text(content)
+    return hashes
+
+
+def receipt_is_current(db: Session, record: models.VerificationSession) -> bool:
+    """A passing receipt is valid only for the unchanged files tested in its run.
+
+    Approval and controlled-command guards are additionally enforced by the task
+    controller. A generic verification session may have no source-bound files.
+    """
+    if record.state != "COMPLETED":
+        return False
+    try:
+        baseline = json.loads(record.verified_files_json or "{}")
+        return isinstance(baseline, dict) and baseline == _bound_file_hashes(db, record)
+    except (workspace.WorkspaceError, OSError, ValueError, TypeError):
+        return False
+
+
 def start_step(
     db: Session,
     record: models.VerificationSession,
     step_id: str,
     request: schemas.VerificationStepStart,
 ) -> tuple[models.VerificationSession, models.CommandRun]:
-    if request.plan_fingerprint != record.approved_plan_fingerprint or request.plan_fingerprint != record.plan_fingerprint:
+    if (request.plan_fingerprint != record.approved_plan_fingerprint or request.plan_fingerprint != record.plan_fingerprint
+            or record.approved_plan_version != record.plan_version):
         raise VerificationError("This step is not a member of the exact approved plan")
     if record.state not in {"RUNNING", "REVERIFYING"}:
         raise VerificationError(f"Verification is not runnable from {record.state}")
@@ -413,6 +500,19 @@ def start_step(
         "requested_timeout_seconds": step.timeout_seconds,
         "model_risk_hint": "BUILD_OR_TEST",
     })
+    if step.position == 0 and all(item.status == "PENDING" for item in record.steps):
+        # Snapshot before the first command can run, including after a repair.
+        # Capturing only after checks finish could credit concurrent user edits
+        # with an older test result they never passed.
+        try:
+            baseline = _bound_file_hashes(db, record)
+        except (workspace.WorkspaceError, OSError, ValueError) as exc:
+            _transition(record, {record.state}, "BLOCKED", "verification_source_changed", str(exc))
+            record.failure_reason = "The verification source could not be snapshotted before checks"
+            record.completed_at = datetime.utcnow()
+            db.commit()
+            raise VerificationError(record.failure_reason) from exc
+        record.verified_files_json = json.dumps(baseline, sort_keys=True)
     command = command_runs.persist_command_run(db, record.conversation_id, record.workspace_id, prepared)
     step.command_run_id = command.id
     step.status = "RUNNING"
@@ -452,11 +552,24 @@ def failure_fingerprint(step: models.VerificationStep, command: models.CommandRu
     })
 
 
-def _complete_passed(record: models.VerificationSession) -> None:
+def _complete_passed(db: Session, record: models.VerificationSession) -> None:
+    try:
+        baseline = json.loads(record.verified_files_json or "{}")
+        unchanged = isinstance(baseline, dict) and baseline == _bound_file_hashes(db, record)
+    except (workspace.WorkspaceError, OSError, ValueError, TypeError):
+        unchanged = False
+    if not unchanged:
+        _transition(record, {"RUNNING"}, "BLOCKED", "verification_source_changed", "Source files changed while approved checks were running")
+        record.failure_reason = "The source or applied repair changed during verification; these checks do not verify the current files"
+        record.final_summary = "Checks finished, but the verified files changed during the run. Create and approve fresh verification for the current files."
+        record.completed_at = datetime.utcnow()
+        return
     _transition(record, {"RUNNING"}, "VERIFICATION_PASSED", "verification_passed", "Every required approved step passed")
     _transition(record, {"VERIFICATION_PASSED"}, "COMPLETED", "verification_completed", "Verification completed successfully")
     record.final_summary = f"Verification passed after {record.current_rerun} rerun(s) and {record.current_attempt} repair attempt(s)."
     record.completed_at = datetime.utcnow()
+    # Keep the pre-command baseline as the receipt. Later edits invalidate it
+    # independently when a durable task evaluates its completion gate.
 
 
 def record_step_result(
@@ -512,7 +625,7 @@ def record_step_result(
     else:
         terminal_steps = {"STEP_PASSED", "STEP_FAILED"}
         if all(item.status in terminal_steps for item in record.steps):
-            _complete_passed(record)
+            _complete_passed(db, record)
     db.commit()
     db.refresh(record)
     return record
@@ -772,6 +885,7 @@ def record_repair_result(
             attempt.decided_at = datetime.utcnow()
             attempt.completed_at = datetime.utcnow()
             record.current_rerun += 1
+            record.verified_files_json = "{}"
             for step in record.steps:
                 step.status = "PENDING"
                 step.command_run_id = None

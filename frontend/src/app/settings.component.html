@@ -1,101 +1,19 @@
-<mat-card>
-  <mat-card-title>Workspace Explorer</mat-card-title>
-  <mat-card-content>
-    <div class="workspace-form">
-      <mat-form-field appearance="fill" class="workspace-field">
-        <mat-label>Workspace path</mat-label>
-        <input matInput placeholder="Path to local repository" [(ngModel)]="workspacePath" />
-      </mat-form-field>
-      <mat-form-field appearance="fill" class="workspace-field">
-        <mat-label>Display name</mat-label>
-        <input matInput placeholder="Friendly workspace name" [(ngModel)]="workspaceName" />
-      </mat-form-field>
-      <button mat-flat-button color="primary" (click)="registerWorkspace()">Register Workspace</button>
-    </div>
-
-    <div class="workspace-list">
-      <h3>Registered Workspaces</h3>
-      <mat-nav-list>
-        <button
-          mat-list-item
-          *ngFor="let workspace of workspaces"
-          [class.selected]="workspace.id === selectedWorkspace?.id"
-          (click)="selectWorkspace(workspace)"
-        >
-          <div class="workspace-item">
-            <div>
-              <strong>{{ workspace.display_name }}</strong>
-              <div class="workspace-path">{{ workspace.root_path }}</div>
-            </div>
-            <button mat-icon-button color="warn" (click)="removeWorkspace(workspace.id); $event.stopPropagation();" aria-label="Remove workspace">
-              <mat-icon>delete</mat-icon>
-            </button>
-          </div>
-        </button>
-      </mat-nav-list>
-    </div>
-
-    <div *ngIf="selectedWorkspace" class="workspace-details">
-      <h3>Explorer: {{ selectedWorkspace.display_name }}</h3>
-
-      <div class="explorer-actions">
-        <button mat-stroked-button color="primary" (click)="loadExplorer()">Refresh Files</button>
-        <button mat-stroked-button color="accent" (click)="loadGitStatus()">Refresh Git Status</button>
+<main class="explorer-page">
+  <header class="explorer-header"><a class="back-link" routerLink="/">← Back to chat</a><span class="local-label"><span class="status-dot ready"></span> LOCAL WORKSPACE</span></header>
+  <div class="explorer-heading"><div><span class="eyebrow">YOUR CODE, ON YOUR MACHINE</span><h1>Workspace explorer</h1><p>Browse files, search code, and inspect changes in your local repositories.</p></div><span class="read-only-tag">Read only</span></div>
+  <div class="alert" *ngIf="error" role="alert"><span>{{ error }}</span><button class="icon-button" (click)="error = null" aria-label="Dismiss error">×</button></div>
+  <div class="explorer-layout">
+    <aside class="workspace-panel" aria-label="Registered workspaces"><h2>Your workspaces <span>{{ workspaces.length }}</span></h2><p class="muted small" *ngIf="loadingWorkspaces" role="status">Loading workspaces…</p><p class="muted small" *ngIf="!loadingWorkspaces && !workspaces.length">Add a folder to start exploring your code.</p><div class="workspace-row" *ngFor="let workspace of workspaces" [class.selected]="workspace.id === selectedWorkspace?.id"><button class="workspace-select" (click)="selectWorkspace(workspace)" [attr.aria-pressed]="workspace.id === selectedWorkspace?.id"><span aria-hidden="true">▧</span><span class="truncate"><strong>{{ workspace.display_name }}</strong><small class="truncate" [title]="workspace.root_path">{{ workspace.root_path }}</small></span></button><button class="icon-button small-remove" (click)="removeId = removeId === workspace.id ? null : workspace.id" [attr.aria-label]="'Remove registration for ' + workspace.display_name">×</button><div class="remove-confirm" *ngIf="removeId === workspace.id"><p>Remove this registration? Your files stay on disk.</p><button class="button danger" (click)="removeWorkspace(workspace.id)" [disabled]="removing">Remove</button><button class="button subtle" (click)="removeId = null">Keep</button></div></div>
+      <form class="registration-form" (ngSubmit)="registerWorkspace()"><h3>Add a workspace</h3><label for="workspace-path">Folder path</label><input id="workspace-path" name="path" [(ngModel)]="workspacePath" placeholder="C:\Projects\my-app" required autocomplete="off" /><label for="workspace-name">Display name <span>(optional)</span></label><input id="workspace-name" name="name" [(ngModel)]="workspaceName" placeholder="My project" maxlength="120" /><p class="form-hint">Use an existing absolute path on the local backend machine.</p><button type="submit" class="button primary" [disabled]="!workspacePath.trim() || registering">{{ registering ? 'Adding workspace…' : '＋ Add workspace' }}</button></form>
+      <div class="extension-note"><strong>Ready to make changes?</strong><p>Use codeme in VS Code to review file changes and approve local commands.</p></div>
+    </aside>
+    <section class="repository-panel" *ngIf="selectedWorkspace; else noWorkspace" aria-label="Repository explorer"><div class="repository-heading"><div><h2>{{ selectedWorkspace.display_name }}</h2><p class="repository-path">{{ selectedWorkspace.root_path }}</p></div><button class="button" (click)="loadExplorer(); loadGitStatus()" [disabled]="loadingFiles">↻ Refresh</button></div><div class="git-summary"><span aria-hidden="true">⑂</span><ng-container *ngIf="gitStatus; else noGitStatus">{{ !gitStatus.is_git ? 'This folder is not a Git repository' : gitStatus.status.length ? gitStatus.status.length + ' changed file(s)' : 'Working tree is clean' }}</ng-container><ng-template #noGitStatus>Git status unavailable</ng-template><span class="preview-label">File preview · read only</span></div>
+      <div class="file-browser"><nav class="file-pane" aria-label="File explorer"><div class="folder-navigation"><button class="icon-button" (click)="goUp()" [disabled]="!explorerPath || loadingFiles" aria-label="Go to parent folder">↑</button><button class="root-button" (click)="goToRoot()" title="Go to repository root">Root</button><span class="folder-path" [title]="explorerPath">{{ explorerPath ? '/ ' + explorerPath : '/' }}</span></div><div class="file-entries"><p class="muted small pane-status" *ngIf="loadingFiles && !fileEntries.length" role="status">Loading files…</p><p class="muted small pane-status" *ngIf="!loadingFiles && !fileEntries.length">This folder has no visible files.</p><button class="file-entry" *ngFor="let entry of fileEntries" (click)="openEntry(entry)" [class.current-file]="selectedFile?.path === entry.path"><span class="file-type" aria-hidden="true">{{ entry.is_dir ? '▱' : '≡' }}</span><span class="truncate">{{ entry.name }}</span><span class="directory-arrow" *ngIf="entry.is_dir" aria-hidden="true">›</span></button><button class="button more-button" *ngIf="fileHasMore" (click)="loadExplorer(true)" [disabled]="loadingFiles">{{ loadingFiles ? 'Loading…' : 'Load more files' }}</button></div></nav>
+        <div class="file-preview"><div class="preview-empty" *ngIf="!selectedFile"><span aria-hidden="true">{{ loadingFile ? '◌' : '≡' }}</span><h3>{{ loadingFile ? 'Loading file…' : 'A closer look at your code' }}</h3><p>{{ loadingFile ? 'Reading from your local workspace.' : 'Select a file to view its contents and Git diff.' }}</p></div><ng-container *ngIf="selectedFile"><div class="preview-file-heading"><strong>{{ selectedFile.path }}</strong><span>{{ selectedFile.metadata.size | number }} bytes</span></div><pre class="file-content" tabindex="0" aria-label="File contents">{{ selectedFile.content }}</pre><details class="diff-details" *ngIf="gitDiff" open><summary>Git diff</summary><pre tabindex="0" aria-label="Git diff">{{ gitDiff }}</pre></details></ng-container></div>
       </div>
-
-      <div class="workspace-panels">
-        <div class="file-pane">
-          <h4>Files</h4>
-          <mat-nav-list>
-            <button mat-list-item *ngFor="let entry of fileEntries" (click)="openEntry(entry)">
-              <mat-icon>{{ entry.is_dir ? 'folder' : 'description' }}</mat-icon>
-              <span class="entry-name">{{ entry.name }}</span>
-              <span class="entry-meta">{{ entry.is_dir ? 'Directory' : (entry.size + ' bytes') }}</span>
-            </button>
-          </mat-nav-list>
-        </div>
-
-        <div class="file-preview">
-          <h4>Preview</h4>
-          <div *ngIf="selectedFile; else noFile">
-            <h5>{{ selectedFile.path }}</h5>
-            <pre>{{ selectedFile.content }}</pre>
-            <div *ngIf="gitDiff" class="git-diff">
-              <h5>Git Diff</h5>
-              <pre>{{ gitDiff }}</pre>
-            </div>
-          </div>
-          <ng-template #noFile>
-            <p>Select a file to preview its content.</p>
-          </ng-template>
-        </div>
-      </div>
-
-      <div class="workspace-search">
-        <h4>Search</h4>
-        <mat-form-field appearance="fill" class="workspace-field">
-          <mat-label>Search query</mat-label>
-          <input matInput placeholder="Search files" [(ngModel)]="searchQuery" />
-        </mat-form-field>
-        <button mat-stroked-button color="primary" (click)="searchWorkspace()">Search</button>
-        <div *ngIf="searchResults.length > 0" class="search-results">
-          <h5>Results</h5>
-          <mat-nav-list>
-            <button mat-list-item *ngFor="let result of searchResults" (click)="openEntry({ path: result.path, name: result.path, is_dir: false, size: 0, modified_at: null })">
-              <div>
-                <strong>{{ result.path }}</strong>
-                <div>{{ result.line }}:{{ result.column }} - {{ result.text }}</div>
-              </div>
-            </button>
-          </mat-nav-list>
-        </div>
-      </div>
-    </div>
-
-    <div *ngIf="error" class="error-banner">{{ error }}</div>
-
-    <div class="navigation-actions">
-      <button mat-flat-button color="primary" routerLink="/">Back to chat</button>
-    </div>
-  </mat-card-content>
-</mat-card>
+      <section class="repository-search"><h3>Search this workspace</h3><form class="search-form" (ngSubmit)="searchWorkspace()"><label class="sr-only" for="code-query">Search code</label><input id="code-query" type="search" name="query" [(ngModel)]="searchQuery" placeholder="Search code across files…" /><button class="button" type="submit" [disabled]="!searchQuery.trim() || searching">{{ searching ? 'Searching…' : 'Search' }}</button></form><p class="muted small" *ngIf="searchedQuery && !searching && !searchResults.length" role="status">No matches for “{{ searchedQuery }}”.</p><div class="search-results" *ngIf="searchResults.length"><p class="muted small">{{ searchResults.length }} match(es) for “{{ searchedQuery }}”</p><button class="search-result" *ngFor="let result of searchResults" (click)="openFile(result.path)"><strong>{{ result.path }}<span>:{{ result.line }}:{{ result.column }}</span></strong><code>{{ result.text }}</code></button><button class="button more-button" *ngIf="searchHasMore" (click)="searchWorkspace(true)" [disabled]="searching">{{ searching ? 'Loading…' : 'Load more matches' }}</button></div></section>
+      <details class="changes-details" *ngIf="gitStatus?.is_git && gitStatus?.status?.length"><summary>Changed files ({{ gitStatus?.status?.length }})</summary><button class="changed-file" *ngFor="let entry of gitStatus?.status" (click)="openFile(entry.path)"><code>{{ entry.status }}</code><span>{{ entry.path }}</span><span aria-hidden="true">↗</span></button></details>
+    </section>
+    <ng-template #noWorkspace><section class="no-workspace"><span aria-hidden="true">▧</span><h2>Bring your code into view.</h2><p>Add a local folder using its full path.<br />Then explore files, find references, and inspect your working tree.</p><a class="button subtle" routerLink="/">Continue to chat →</a></section></ng-template>
+  </div>
+</main>

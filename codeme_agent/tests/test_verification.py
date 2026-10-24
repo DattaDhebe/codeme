@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta
+import json
 from pathlib import Path
 
 import pytest
@@ -69,7 +70,7 @@ def approve(session, record):
     ))
 
 
-def finish_command(session, records, record, step_id="step-1", status="completed", exit_code=0, stdout="ok", stderr=""):
+def finish_command(session, records, record, step_id="step-1", status="completed", exit_code=0, stdout="ok", stderr="", during_run=None):
     _root, _workspace_record, _conversation = records
     record, command_record = verification.start_step(session, record, step_id, schemas.VerificationStepStart(
         plan_fingerprint=record.plan_fingerprint,
@@ -80,6 +81,8 @@ def finish_command(session, records, record, step_id="step-1", status="completed
     ))
     command_runs.record_event(session, command_record, schemas.CommandEventCreate(status="starting"))
     command_runs.record_event(session, command_record, schemas.CommandEventCreate(status="running"))
+    if during_run:
+        during_run()
     started = datetime.utcnow()
     command_runs.record_result(session, command_record, schemas.CommandResultCreate(
         status=status,
@@ -391,3 +394,229 @@ def test_verification_api_and_existing_api_compatibility(session, records):
     assert events.status_code == 200 and '"schema_version": 1' in events.text
     assert client.get("/api/conversations").status_code == 200
     assert client.get("/api/workspaces").status_code == 200
+
+
+def _apply_real_source(session, records):
+    root, workspace_record, conversation = records
+    prepared = changesets.prepare_change_set(root, "Return the expected value", [{
+        "type": "modify", "relative_path": "math_utils.py", "summary": "Return two",
+        "edits": [{"old_text": "return 1", "new_text": "return 2"}],
+    }])
+    source = changesets.persist_change_set(session, conversation.id, workspace_record.id, prepared)
+    changesets.record_decision(session, source, schemas.ChangeSetDecision(decision="approve"))
+    (root / "math_utils.py").write_bytes(source.operations[0].proposed_content.encode("utf-8"))
+    changesets.record_apply_result(session, source, schemas.ChangeSetApplyResult(
+        status="applied", result_hashes={"math_utils.py": source.operations[0].proposed_sha256},
+        checkpoint_reference="checkpoint.json",
+    ))
+    return source
+
+
+def test_receipt_hashes_exist_before_first_command_and_expire_after_edit(session, records):
+    root, _workspace, _conversation = records
+    source = _apply_real_source(session, records)
+    record = approve(session, create(session, records, source_change_set_id=source.id))
+    digest = changesets.sha256_text((root / "math_utils.py").read_bytes().decode("utf-8"))
+    captured = {}
+    def observe_baseline():
+        captured.update(json.loads(record.verified_files_json))
+    record, command = finish_command(session, records, record, during_run=observe_baseline)
+    assert captured == {"math_utils.py": digest}
+    assert record.state == "COMPLETED" and command.decision == "approve" and command.exit_code == 0
+    assert verification.receipt_is_current(session, record)
+    (root / "math_utils.py").write_text("def value():\n    return 99\n", encoding="utf-8")
+    assert not verification.receipt_is_current(session, record)
+
+
+def test_edit_while_check_runs_cannot_receive_a_passing_receipt(session, records):
+    root, _workspace, _conversation = records
+    source = _apply_real_source(session, records)
+    record = approve(session, create(session, records, source_change_set_id=source.id))
+    record, command = finish_command(
+        session, records, record,
+        during_run=lambda: (root / "math_utils.py").write_text("def value():\n    return 100\n", encoding="utf-8"),
+    )
+    assert command.status == "completed" and command.exit_code == 0
+    assert record.state == "BLOCKED" and "changed during" in record.failure_reason
+    assert not verification.receipt_is_current(session, record)
+
+
+def test_edit_between_approved_steps_invalidates_whole_receipt(session, records):
+    root, _workspace, _conversation = records
+    source = _apply_real_source(session, records)
+    record = approve(session, create(session, records, source_change_set_id=source.id, steps=[
+        step(), step(step_id="step-2", position=1, purpose="Check again"),
+    ]))
+    record, _ = finish_command(session, records, record)
+    assert record.state == "RUNNING"
+    (root / "math_utils.py").write_text("def value():\n    return 100\n", encoding="utf-8")
+    record, _ = finish_command(session, records, record, step_id="step-2")
+    assert record.state == "BLOCKED"
+    assert not verification.receipt_is_current(session, record)
+
+
+def test_deleted_file_during_check_is_a_controlled_blocked_result(session, records):
+    root, _workspace, _conversation = records
+    source = _apply_real_source(session, records)
+    record = approve(session, create(session, records, source_change_set_id=source.id))
+    record, _ = finish_command(session, records, record, during_run=lambda: (root / "math_utils.py").unlink())
+    assert record.state == "BLOCKED" and not verification.receipt_is_current(session, record)
+
+
+def test_repair_rerun_captures_fresh_real_file_baseline(session, records):
+    root, _workspace, _conversation = records
+    failed, _ = finish_command(session, records, approve(session, create(session, records)), status="failed", exit_code=1,
+                               stderr="math_utils.py:1: wrong return value")
+    rerun, repair, _feedback = _apply_repair(session, records, failed)
+    assert rerun.verified_files_json == "{}"
+    (root / "math_utils.py").write_bytes(repair.operations[0].proposed_content.encode("utf-8"))
+    observed = {}
+    rerun, _ = finish_command(session, records, rerun, during_run=lambda: observed.update(json.loads(rerun.verified_files_json)))
+    assert rerun.state == "COMPLETED" and verification.receipt_is_current(session, rerun)
+    assert observed == {"math_utils.py": changesets.sha256_text(repair.operations[0].proposed_content)}
+    changesets.record_restore_result(session, repair, schemas.ChangeSetRestoreResult(status="restored"))
+    assert not verification.receipt_is_current(session, rerun)
+
+
+def test_missing_source_before_first_check_blocks_without_command(session, records):
+    root, _workspace, _conversation = records
+    source = _apply_real_source(session, records)
+    record = approve(session, create(session, records, source_change_set_id=source.id))
+    (root / "math_utils.py").unlink()
+    with pytest.raises(verification.VerificationError, match="snapshotted"):
+        verification.start_step(session, record, "step-1", schemas.VerificationStepStart(plan_fingerprint=record.plan_fingerprint))
+    assert record.state == "BLOCKED" and record.steps[0].command_run_id is None
+
+
+def test_unversioned_legacy_database_upgrade_preserves_audit_rows(tmp_path: Path):
+    database = tmp_path / "unversioned.db"
+    config = _alembic_config(database)
+    command.upgrade(config, "0003_verification")
+    engine = create_engine(f"sqlite:///{database.as_posix()}", future=True)
+    with engine.begin() as connection:
+        connection.execute(text("INSERT INTO conversations (id,title,created_at,updated_at) VALUES (1,'preserved',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
+        connection.execute(text("INSERT INTO workspaces (id,display_name,root_path,created_at,updated_at) VALUES (1,'preserved','legacy-root',CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"))
+        connection.execute(text("""INSERT INTO verification_sessions
+            (id,schema_version,conversation_id,workspace_id,mode,summary,original_request,state,
+             plan_version,plan_fingerprint,maximum_repair_attempts,maximum_reruns,total_time_budget_seconds,
+             current_attempt,current_rerun,created_at,updated_at)
+            VALUES ('legacy',1,1,1,'quick','old audit','keep audit','COMPLETED',1,'old-fingerprint',2,2,600,0,0,CURRENT_TIMESTAMP,CURRENT_TIMESTAMP)"""))
+        connection.execute(text("DROP TABLE alembic_version"))
+    engine.dispose()
+    command.upgrade(config, "head")
+    command.upgrade(config, "head")
+    engine = create_engine(f"sqlite:///{database.as_posix()}", future=True)
+    with engine.connect() as connection:
+        assert connection.scalar(text("SELECT title FROM conversations WHERE id=1")) == "preserved"
+        assert connection.execute(text("SELECT state,verified_files_json FROM verification_sessions WHERE id='legacy'")).one() == ("COMPLETED", "{}")
+    assert "agent_runs" in inspect(engine).get_table_names()
+    engine.dispose()
+
+
+def _apply_real_operations(session, records, summary, operations):
+    root, workspace_record, conversation = records
+    prepared = changesets.prepare_change_set(root, summary, operations)
+    change = changesets.persist_change_set(session, conversation.id, workspace_record.id, prepared)
+    changesets.record_decision(session, change, schemas.ChangeSetDecision(decision="approve"))
+    for operation in change.operations:
+        (root / operation.relative_path).write_bytes(operation.proposed_content.encode("utf-8"))
+    changesets.record_apply_result(session, change, schemas.ChangeSetApplyResult(
+        status="applied", result_hashes={item.relative_path: item.proposed_sha256 for item in change.operations},
+        checkpoint_reference="checkpoint.json",
+    ))
+    return change
+
+
+def _task_for_changes(session, records, changes, *, identifier="durable-task", status="awaiting_approval"):
+    _root, workspace_record, conversation = records
+    task = models.AgentRun(
+        id=identifier, conversation_id=conversation.id, workspace_id=workspace_record.id,
+        goal="Implement and verify the complete change", model="local-coder", provider="ollama",
+        endpoint_fingerprint="f" * 64, status=status,
+        change_set_ids_json=json.dumps([item.id for item in changes]),
+    )
+    session.add(task)
+    session.commit()
+    return task
+
+
+def test_later_same_file_fix_receipt_covers_all_applied_task_paths(session, records):
+    root, _workspace, _conversation = records
+    first = _apply_real_operations(session, records, "First task change", [
+        {"type": "modify", "relative_path": "math_utils.py", "summary": "Return two",
+         "edits": [{"old_text": "return 1", "new_text": "return 2"}]},
+        {"type": "create", "relative_path": "task_note.py", "summary": "Related task file", "content": "TASK = True\n"},
+    ])
+    second = _apply_real_operations(session, records, "Correct the earlier task change", [
+        {"type": "modify", "relative_path": "math_utils.py", "summary": "Return three",
+         "edits": [{"old_text": "return 2", "new_text": "return 3"}]},
+    ])
+    unrelated = _apply_real_operations(session, records, "Unrelated applied change", [
+        {"type": "create", "relative_path": "unrelated.py", "summary": "Other work", "content": "OTHER = True\n"},
+    ])
+    # Generic Phase 6 sessions retain their original source-only behavior; a
+    # nearby UUID string in another task must not establish task membership.
+    other_task = _task_for_changes(session, records, [unrelated], identifier="other-task", status="completed")
+    other_task.change_set_ids_json = json.dumps([second.id + "-suffix", unrelated.id])
+    session.commit()
+    generic, _ = finish_command(session, records, approve(session, create(session, records, source_change_set_id=second.id)))
+    assert set(json.loads(generic.verified_files_json)) == {"math_utils.py"}
+
+    _task_for_changes(session, records, [first, second])
+    receipt, _ = finish_command(session, records, approve(session, create(session, records, source_change_set_id=second.id)))
+    hashes = json.loads(receipt.verified_files_json)
+    assert set(hashes) == {"math_utils.py", "task_note.py"}
+    assert hashes["math_utils.py"] == changesets.sha256_text((root / "math_utils.py").read_bytes().decode("utf-8"))
+    assert hashes["math_utils.py"] == second.operations[0].result_sha256
+    assert hashes["math_utils.py"] != first.operations[0].result_sha256
+    assert verification.receipt_is_current(session, receipt)
+    (root / "task_note.py").write_bytes(b"TASK = False\n")
+    assert not verification.receipt_is_current(session, receipt)
+
+
+def test_task_receipt_includes_applied_repair_from_an_earlier_source_session(session, records):
+    root, workspace_record, conversation = records
+    first = _apply_real_source(session, records)
+    task = _task_for_changes(session, records, [first])
+    (root / "verification_helper.py").write_bytes(b"VALUE = 1\n")
+    failed, _ = finish_command(session, records, approve(session, create(session, records, source_change_set_id=first.id)),
+                               status="failed", exit_code=1, stderr="verification_helper.py:1: assertion failed")
+    attempt, _feedback = verification.begin_repair(session, failed)
+    prepared = changesets.prepare_change_set(root, "Repair verification helper", [{
+        "type": "modify", "relative_path": "verification_helper.py", "summary": "Correct helper value",
+        "edits": [{"old_text": "VALUE = 1", "new_text": "VALUE = 2"}],
+    }])
+    repair = changesets.persist_change_set(session, conversation.id, workspace_record.id, prepared)
+    rerun = verification.attach_repair(session, failed, attempt, repair, "The reported helper value is wrong")
+    assert rerun.state == "AWAITING_REPAIR_APPROVAL"
+    changesets.record_decision(session, repair, schemas.ChangeSetDecision(decision="approve"))
+    (root / "verification_helper.py").write_bytes(repair.operations[0].proposed_content.encode("utf-8"))
+    changesets.record_apply_result(session, repair, schemas.ChangeSetApplyResult(
+        status="applied", result_hashes={"verification_helper.py": repair.operations[0].proposed_sha256},
+        checkpoint_reference="checkpoint.json",
+    ))
+    rerun = verification.record_repair_result(session, rerun, schemas.VerificationRepairResult(status="applied", change_set_id=repair.id))
+    rerun, _ = finish_command(session, records, rerun)
+    assert rerun.state == "COMPLETED"
+    second = _apply_real_operations(session, records, "Next task cycle", [{
+        "type": "modify", "relative_path": "math_utils.py", "summary": "Return three",
+        "edits": [{"old_text": "return 2", "new_text": "return 3"}],
+    }])
+    task.change_set_ids_json = json.dumps([first.id, second.id])
+    session.commit()
+    receipt, _ = finish_command(session, records, approve(session, create(session, records, source_change_set_id=second.id)))
+    assert set(json.loads(receipt.verified_files_json)) == {"math_utils.py", "verification_helper.py"}
+    assert verification.receipt_is_current(session, receipt)
+    (root / "verification_helper.py").write_bytes(b"VALUE = 99\n")
+    assert not verification.receipt_is_current(session, receipt)
+    # A restored historical repair can leave its attempt marked "applied" until
+    # that session's separate restore event is recorded. Old receipts expire,
+    # while a fresh check of the later task change can still run.
+    (root / "verification_helper.py").write_bytes(b"VALUE = 1\n")
+    changesets.record_restore_result(session, repair, schemas.ChangeSetRestoreResult(status="restored"))
+    assert attempt.result == "applied"
+    assert not verification.receipt_is_current(session, rerun)
+    assert not verification.receipt_is_current(session, receipt)
+    fresh, _ = finish_command(session, records, approve(session, create(session, records, source_change_set_id=second.id)))
+    assert fresh.state == "COMPLETED" and verification.receipt_is_current(session, fresh)
+    assert set(json.loads(fresh.verified_files_json)) == {"math_utils.py"}

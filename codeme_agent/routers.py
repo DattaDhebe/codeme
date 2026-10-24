@@ -1,14 +1,37 @@
 import json
 from pathlib import Path
+from time import monotonic
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from fastapi.responses import StreamingResponse
+from sqlalchemy import select
 from sqlalchemy.orm import Session
+from starlette.background import BackgroundTask
 
-from codeme_agent import agent, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
+from codeme_agent import agent, agent_runs, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
 from codeme_agent.db import get_db
+from codeme_agent.model_client import create_model_client
 
 router = APIRouter(prefix="/api")
+
+
+def _require_idle_execution(db: Session, owner_field: str, owner_id: int) -> None:
+    """Keep durable records while the extension may still be using them."""
+    for model, state_field, active_states in (
+        (models.AgentRun, "status", {"running"}),
+        (models.CommandRun, "status", {"approved", "starting", "running"}),
+        (models.ChangeSet, "status", {"approved", "applying"}),
+        (models.VerificationSession, "state", {"RUNNING", "REVERIFYING", "PREPARING_REPAIR"}),
+    ):
+        active = db.scalar(select(model.id).where(
+            getattr(model, owner_field) == owner_id,
+            getattr(model, state_field).in_(active_states),
+        ).limit(1))
+        if active is not None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Finish or cancel active commands, changes, and verification before removing this item",
+            )
 
 
 @router.get("/workspaces", response_model=list[schemas.WorkspaceRead])
@@ -31,6 +54,7 @@ def create_workspace(request: schemas.WorkspaceCreate, db: Session = Depends(get
 def delete_workspace(workspace_id: int, db: Session = Depends(get_db)):
     if crud.get_workspace(db, workspace_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+    _require_idle_execution(db, "workspace_id", workspace_id)
     crud.delete_workspace(db, workspace_id)
 
 
@@ -125,6 +149,7 @@ def rename_conversation(conversation_id: int, update: schemas.ConversationUpdate
 def delete_conversation(conversation_id: int, db: Session = Depends(get_db)):
     if crud.get_conversation(db, conversation_id) is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    _require_idle_execution(db, "conversation_id", conversation_id)
     crud.delete_conversation(db, conversation_id)
 
 
@@ -396,6 +421,45 @@ def interrupt_verification_session(session_id: str, request: schemas.Verificatio
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
 
 
+def _chat_events(client, db, assistant_message_id: int, history, model):
+    """Stream immediately while batching SQLite writes; save partial replies.
+
+    Persist before the terminal frame so a history reload after `done` sees the
+    complete reply. Closing the stream also closes the underlying Ollama HTTP
+    generator and saves any tokens already delivered.
+    """
+    pending = ""
+    last_saved = monotonic()
+    chunks = client.stream_chat(history, model=model)
+
+    def flush():
+        nonlocal pending, last_saved
+        if pending:
+            crud.append_message_content(db, assistant_message_id, pending)
+            pending = ""
+            last_saved = monotonic()
+
+    try:
+        for chunk in chunks:
+            if chunk:
+                pending += chunk
+                if len(pending) >= 2048 or monotonic() - last_saved >= 0.25:
+                    flush()
+                yield f"data: {json.dumps(chunk)}\n\n"
+        flush()
+        yield "event: done\ndata: [DONE]\n\n"
+    except ollama.OllamaError as exc:
+        flush()
+        yield f"event: error\ndata: {json.dumps({'error': str(exc)})}\n\n"
+    finally:
+        try:
+            flush()
+        finally:
+            close = getattr(chunks, "close", None)
+            if close:
+                close()
+
+
 @router.post("/conversations/{conversation_id}/chat")
 def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depends(get_db)):
     conversation = crud.get_conversation(db, conversation_id)
@@ -408,71 +472,80 @@ def chat(conversation_id: int, request: schemas.ChatRequest, db: Session = Depen
         crud.add_message(db, conversation_id, role=message.role, content=message.content)
 
     assistant_message = crud.add_message(db, conversation_id, role="assistant", content="")
-    client = ollama.OllamaClient()
+    client = create_model_client()
 
-    def event_stream():
-        try:
-            for chunk in client.stream_chat(history, model=request.model):
-                if chunk:
-                    crud.append_message_content(db, assistant_message.id, chunk)
-                    yield f"data: {json.dumps(chunk)}\n\n"
-            yield "event: done\ndata: [DONE]\n\n"
-        except ollama.OllamaError as exc:
-            error = json.dumps({"error": str(exc)})
-            yield f"event: error\ndata: {error}\n\n"
+    return StreamingResponse(
+        _chat_events(client, db, assistant_message.id, history, request.model),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+def _agent_response(db, record, runtime, cancellation):
+    def events():
+        for event in agent_runs.stream_cycle(db, record, runtime, cancellation):
+            yield f"event: {event.get('type', 'agent')}\ndata: {json.dumps(event, default=str)}\n\n"
+        yield "event: done\ndata: [DONE]\n\n"
+
+    return StreamingResponse(
+        events(), media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        background=BackgroundTask(agent_runs.cleanup_cycle, db, record.id),
+    )
 
 
 @router.post("/conversations/{conversation_id}/agent")
 def run_agent(conversation_id: int, request: schemas.AgentRequest, db: Session = Depends(get_db)):
-    conversation = crud.get_conversation(db, conversation_id)
-    if conversation is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Conversation not found")
+    if crud.get_conversation(db, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
     workspace_record = crud.get_workspace(db, request.workspace_id)
     if workspace_record is None:
-        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Workspace not found")
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        runtime = agent.WorkspaceAgent(Path(workspace_record.root_path))
+        record = agent_runs.create_run(db, conversation_id, request)
+        cancellation = agent_runs.claim_cycle(db, record)
+        crud.add_message(db, conversation_id, role="user", content=request.prompt)
+    except agent_runs.AgentRunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _agent_response(db, record, runtime, cancellation)
 
-    history = crud.get_conversation_messages_for_model(db, conversation_id)
-    crud.add_message(db, conversation_id, role="user", content=request.prompt)
-    runtime = agent.WorkspaceAgent(Path(workspace_record.root_path))
 
-    def event_stream():
-        final_content = ""
-        try:
-            for event in runtime.run(request.prompt, history, model=request.model, context=request.context):
-                if event.get("type") == "proposal":
-                    if event.get("kind") == "command_proposal":
-                        prepared_command = event.get("command_run")
-                        if prepared_command:
-                            command_record = command_runs.persist_command_run(
-                                db, conversation_id, request.workspace_id, prepared_command
-                            )
-                            event = {**event, "command_run": command_runs.serialize_command_run(command_record)}
-                        prepared = None
-                    elif event.get("kind") == "change_set":
-                        prepared = event.get("change_set")
-                    elif event.get("kind") == "file_change":
-                        prepared = changesets.prepare_legacy_change_set(
-                            Path(workspace_record.root_path),
-                            str(event.get("path", "")),
-                            str(event.get("content", "")),
-                            str(event.get("explanation", "")),
-                        )
-                    else:
-                        prepared = None
-                    if prepared:
-                        record = changesets.persist_change_set(db, conversation_id, request.workspace_id, prepared)
-                        event = {**event, "change_set": changesets.serialize_change_set(record)}
-                if event.get("type") == "message":
-                    final_content = str(event.get("content", ""))
-                event_name = str(event.get("type", "agent"))
-                yield f"event: {event_name}\ndata: {json.dumps(event)}\n\n"
-            if final_content:
-                crud.add_message(db, conversation_id, role="assistant", content=final_content)
-            yield "event: done\ndata: [DONE]\n\n"
-        except (ollama.OllamaError, workspace.WorkspaceError) as exc:
-            error = json.dumps({"error": str(exc)})
-            yield f"event: error\ndata: {error}\n\n"
+@router.get("/agent-runs", response_model=list[schemas.AgentRunRead])
+def list_agent_runs(conversation_id: int = Query(...), db: Session = Depends(get_db)):
+    if crud.get_conversation(db, conversation_id) is None:
+        raise HTTPException(status_code=404, detail="Conversation not found")
+    return [agent_runs.serialize_run(db, record) for record in agent_runs.list_runs(db, conversation_id)]
 
-    return StreamingResponse(event_stream(), media_type="text/event-stream")
+
+def _get_agent_run(db: Session, run_id: str):
+    record = agent_runs.get_run(db, run_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Agent task not found")
+    return record
+
+
+@router.get("/agent-runs/{run_id}", response_model=schemas.AgentRunRead)
+def get_agent_run(run_id: str, db: Session = Depends(get_db)):
+    record = agent_runs.reconcile(db, _get_agent_run(db, run_id))
+    return agent_runs.serialize_run(db, record)
+
+
+@router.post("/agent-runs/{run_id}/continue")
+def continue_agent_run(run_id: str, request: schemas.AgentRunContinue, db: Session = Depends(get_db)):
+    record = _get_agent_run(db, run_id)
+    workspace_record = crud.get_workspace(db, record.workspace_id)
+    if workspace_record is None:
+        raise HTTPException(status_code=404, detail="Workspace not found")
+    try:
+        runtime = agent.WorkspaceAgent(Path(workspace_record.root_path))
+        cancellation = agent_runs.claim_cycle(db, record)
+    except agent_runs.AgentRunError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _agent_response(db, record, runtime, cancellation)
+
+
+@router.post("/agent-runs/{run_id}/cancel", response_model=schemas.AgentRunRead)
+def cancel_agent_run(run_id: str, request: schemas.AgentRunCancel, db: Session = Depends(get_db)):
+    record = agent_runs.cancel_run(db, _get_agent_run(db, run_id), request.reason)
+    return agent_runs.serialize_run(db, record)

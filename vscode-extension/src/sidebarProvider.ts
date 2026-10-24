@@ -1,6 +1,6 @@
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { AgentEvent, BackendClient } from './backendClient';
+import { AgentEvent, AgentRun, BackendClient } from './backendClient';
 import { ContextReferenceResolver } from './contextResolver';
 import { webviewHtml } from './webviewHtml';
 import { ChangeSet } from './changeSet';
@@ -17,6 +17,7 @@ interface WebviewMessage {
 
 interface ChatRequestArgs {
   prompt: string;
+  requestId?: string;
   conversationId?: number | null;
   model?: string;
   context?: Array<{ label: string; kind: string; content: string; language?: string }>;
@@ -28,6 +29,19 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private webviewReady = false;
   private pendingMessages: WebviewMessage[] = [];
   private currentWorkspaceId?: number;
+  private chatGeneration = 0;
+  private conversationLoadGeneration = 0;
+  private activeChat?: { requestId?: string; conversationId: number | null; runId?: string; cancelled?: boolean };
+  private selectedConversationId?: number;
+  private readonly agentRuns = new Map<number, AgentRun>();
+  private readonly continuingAgentRuns = new Set<string>();
+  private readonly pendingTaskContinuations = new Map<string, number>();
+  private readonly cancelledAgentRuns = new Set<string>();
+  private readonly cancellingAgentRuns = new Set<string>();
+  private readonly taskActiveCommands = new Map<string, { runId: string; conversationId: number }>();
+  private readonly taskVerificationOwners = new Map<string, { runId: string; generation: number }>();
+  private historyGeneration = 0;
+  private conversationQuery = '';
   private readonly proposedDocuments = new Map<string, string>();
   private readonly legacyChangeSets = new Map<string, ChangeSet>();
   private readonly commandPolicies = new Map<string, CommandPolicyDecision>();
@@ -47,7 +61,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       displayLimitBytes: configuration.get('commandOutputLimitBytes', 1_048_576),
       tailLimitBytes: configuration.get('commandTailLimitBytes', 65_536),
     });
-    this.context.subscriptions.push({ dispose: () => this.processRunner.dispose() });
+    this.context.subscriptions.push({ dispose: () => { this.cancelActiveChat(); this.processRunner.dispose(); } });
     this.context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('codeme-proposed', {
       provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || '',
     }));
@@ -65,12 +79,37 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     };
     webviewView.webview.html = webviewHtml(webviewView.webview, this.context.extensionUri);
     this.context.subscriptions.push(
-      webviewView.webview.onDidReceiveMessage((data) => void this.handleMessage(data)),
+      webviewView.webview.onDidReceiveMessage((data) => {
+        void this.handleMessage(data).catch((error: unknown) => this.send({
+          command: 'operationError', payload: { message: error instanceof Error ? error.message : String(error) },
+        }));
+      }),
       webviewView.onDidDispose(() => {
+        this.cancelActiveChat();
         this.view = undefined;
         this.webviewReady = false;
       })
     );
+  }
+
+  private cancelActiveChat(notify = false, cancelTask = false): void {
+    const active = this.activeChat;
+    this.chatGeneration += 1;
+    this.conversationLoadGeneration += 1;
+    this.activeChat = undefined;
+    this.backend.cancel();
+    if (cancelTask && active) {
+      active.cancelled = true;
+      if (active.runId) void this.cancelTask(active.runId);
+    }
+    if (notify && active) void this.send({ command: 'streamStopped', payload: active });
+  }
+
+  public async workspaceChanged(): Promise<void> {
+    this.cancelActiveChat(true);
+    this.currentWorkspaceId = undefined;
+    await this.syncActiveWorkspaceRegistration();
+    await this.refreshWorkspaceState();
   }
 
   public async reveal(): Promise<void> {
@@ -81,6 +120,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   public async createNewChat(): Promise<void> {
+    this.cancelActiveChat();
+    this.selectedConversationId = undefined;
     await this.reveal();
     await this.send({ command: 'newChat', payload: {} });
   }
@@ -289,7 +330,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
           online: true,
           model: health.model || this.backend.configuredModel,
           models: health.models || [this.backend.configuredModel],
-          ollama: health.ollama === 'ok',
+          ollama: (health.inference || health.ollama) === 'ok',
+          provider: health.provider || 'Ollama',
         },
       });
     } catch (error) {
@@ -307,8 +349,11 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async refreshConversations(query?: string): Promise<void> {
+    const generation = ++this.historyGeneration;
+    if (query !== undefined) this.conversationQuery = query;
     try {
-      const conversations = await this.backend.listConversations(query);
+      const conversations = await this.backend.listConversations(this.conversationQuery);
+      if (generation !== this.historyGeneration) return;
       await this.send({ command: 'conversationsUpdated', payload: conversations });
     } catch (error) {
       console.warn('Unable to load Personal Codeme conversations.', error);
@@ -316,12 +361,166 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async loadConversation(conversationId: number): Promise<void> {
+    const generation = ++this.conversationLoadGeneration;
+    this.selectedConversationId = conversationId;
     try {
-      const messages = await this.backend.getConversationMessages(conversationId);
+      const [messages, runs] = await Promise.all([
+        this.backend.getConversationMessages(conversationId),
+        this.backend.listAgentRuns?.(conversationId).catch(() => []) || Promise.resolve([]),
+      ]);
+      if (generation !== this.conversationLoadGeneration) return;
+      const run = runs.sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      if (run) this.agentRuns.set(conversationId, run);
       await this.send({ command: 'conversationLoaded', payload: { conversationId, messages } });
+      if (run) {
+        await this.send({ command: 'agentRunUpdated', payload: run });
+        await this.restoreTaskProposals(run, generation);
+      }
     } catch (error) {
+      if (generation !== this.conversationLoadGeneration) return;
       await this.send({ command: 'operationError', payload: { message: (error as Error).message } });
     }
+  }
+
+  private async restoreTaskProposals(run: AgentRun, generation: number): Promise<void> {
+    const changes = await Promise.allSettled(run.pending_change_set_ids.map((id) => this.backend.getChangeSet(id)));
+    const commands = await Promise.allSettled(run.pending_command_run_ids.map((id) => this.backend.getCommandRun(id)));
+    if (generation !== this.conversationLoadGeneration || this.selectedConversationId !== run.conversation_id) return;
+    for (const result of changes) if (result.status === 'fulfilled') {
+      await this.send({ command: 'agentProposalRecovered', payload: { conversationId: run.conversation_id, changeSet: result.value } });
+    }
+    for (const result of commands) if (result.status === 'fulfilled') {
+      await this.prepareCommandProposalEvent(run.conversation_id, result.value, undefined, this.chatGeneration, true);
+    }
+  }
+
+  private taskForAction(conversationId: number, actionId?: string): AgentRun | undefined {
+    const run = this.agentRuns.get(conversationId);
+    if (!run || run.workspace_id !== this.currentWorkspaceId || this.selectedConversationId !== conversationId) return undefined;
+    if (['completed', 'cancelled', 'exhausted'].includes(run.status)) return undefined;
+    if (actionId && !run.pending_change_set_ids.includes(actionId) && !run.pending_command_run_ids.includes(actionId)) return undefined;
+    return run;
+  }
+
+  private ownsTask(runId: string, conversationId: number, generation: number): boolean {
+    return !this.cancelledAgentRuns.has(runId) && generation === this.chatGeneration && this.selectedConversationId === conversationId
+      && this.agentRuns.get(conversationId)?.id === runId;
+  }
+
+  private acceptAgentEvent(event: AgentEvent, conversationId: number, requestId: string | undefined, generation: number,
+    active = this.activeChat): void {
+    if (event.type === 'task') {
+      if (active) active.runId = event.run.id;
+      if (active?.cancelled) { void this.cancelTask(event.run.id); return; }
+    }
+    if (generation !== this.chatGeneration) return;
+    if (event.type === 'task') this.agentRuns.set(conversationId, event.run);
+    if (event.type === 'proposal' && event.kind === 'verification_plan') {
+      const runId = active?.runId || this.agentRuns.get(conversationId)?.id;
+      if (runId) this.taskVerificationOwners.set(event.verification_session.id, { runId, generation });
+      void this.publishVerification(event.verification_session).catch((error: Error) => {
+        if (generation === this.chatGeneration) void this.send({ command: 'operationError', payload: { message: error.message } });
+      });
+      return;
+    }
+    if (event.type === 'proposal' && event.kind === 'file_change' && event.change_set) this.legacyChangeSets.set(event.path, event.change_set);
+    if (event.type === 'proposal' && event.kind === 'command_proposal') {
+      void this.prepareCommandProposalEvent(conversationId, event.command_run, requestId, generation);
+      return;
+    }
+    void this.send({ command: 'agentEvent', payload: { conversationId, requestId, event } });
+  }
+
+  private async cancelTask(runId: string): Promise<void> {
+    if (this.cancellingAgentRuns.has(runId)) return;
+    this.cancellingAgentRuns.add(runId);
+    this.cancelledAgentRuns.add(runId);
+    this.pendingTaskContinuations.delete(runId);
+    const known = [...this.agentRuns.values()].find((item) => item.id === runId);
+    try {
+      for (const [commandId, owner] of this.taskActiveCommands) {
+        if (owner.runId === runId && (!known || owner.conversationId === known.conversation_id)) await this.processRunner.cancel(commandId);
+      }
+      if (known && this.backend.listVerificationSessions) {
+        const sessions = await this.backend.listVerificationSessions(known.workspace_id, true).catch(() => []);
+        for (const session of sessions) {
+          if (session.conversation_id === known.conversation_id && session.source_change_set_id
+            && known.pending_change_set_ids.includes(session.source_change_set_id)) {
+            this.taskVerificationOwners.set(session.id, { runId, generation: this.chatGeneration });
+          }
+        }
+      }
+      for (const [sessionId, owner] of this.taskVerificationOwners) {
+        if (owner.runId !== runId) continue;
+        this.taskVerificationOwners.delete(sessionId);
+        await this.cancelVerification(sessionId);
+      }
+      const run = await this.backend.cancelAgentRun(runId);
+      const current = this.agentRuns.get(run.conversation_id);
+      if (!current || current.id === runId) this.agentRuns.set(run.conversation_id, run);
+      await this.send({ command: 'agentRunUpdated', payload: run });
+    } catch (error) {
+      await this.send({ command: 'operationError', payload: { message: `Unable to cancel task: ${(error as Error).message}` } });
+    } finally {
+      this.cancellingAgentRuns.delete(runId);
+    }
+  }
+
+  private async continueTask(runId: string, requestId?: string, automatic = false, ownerGeneration = this.chatGeneration): Promise<void> {
+    if (this.continuingAgentRuns.has(runId) || this.activeChat) {
+      if (automatic && this.activeChat?.runId === runId) this.pendingTaskContinuations.set(runId, ownerGeneration);
+      if (!automatic) await this.send({ command: 'taskNotice', payload: { conversationId: this.selectedConversationId, message: 'A local request is already running. Wait for it to finish before resuming.' } });
+      return;
+    }
+    const known = [...this.agentRuns.values()].find((item) => item.id === runId);
+    if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration) this.cancelledAgentRuns.delete(runId);
+    if (!known || !this.ownsTask(runId, known.conversation_id, ownerGeneration) || known.workspace_id !== this.currentWorkspaceId) {
+      if (!automatic) await this.send({ command: 'taskNotice', payload: { conversationId: this.selectedConversationId, message: 'Reload this conversation and register its workspace before resuming the saved task.' } });
+      return;
+    }
+    this.continuingAgentRuns.add(runId);
+    try {
+      const run = await this.backend.getAgentRun(runId);
+      if (!this.ownsTask(runId, run.conversation_id, ownerGeneration)) return;
+      this.agentRuns.set(run.conversation_id, run);
+      await this.send({ command: 'agentRunUpdated', payload: run });
+      if (['completed', 'cancelled', 'exhausted'].includes(run.status)) {
+        await this.send({ command: 'taskNotice', payload: { conversationId: run.conversation_id, message: run.summary || `Task is ${run.status}.` } });
+        return;
+      }
+      if (automatic && ['interrupted', 'blocked'].includes(run.status)) return;
+      const generation = this.chatGeneration;
+      const active = { requestId, conversationId: run.conversation_id, runId };
+      this.activeChat = active;
+      await this.send({ command: 'streamStarted', payload: active });
+      await this.backend.continueAgentRun(runId,
+        (event) => this.acceptAgentEvent(event, run.conversation_id, requestId, generation, active),
+        () => { if (generation === this.chatGeneration) void this.send({ command: 'streamComplete', payload: active }); },
+        (error) => {
+          if (generation !== this.chatGeneration) return;
+          if (error.message.includes('409')) {
+            void this.send({ command: 'streamStopped', payload: active });
+            void this.send({ command: 'taskNotice', payload: { conversationId: run.conversation_id, message: 'Review pending changes, commands, or the verification plan before resuming.' } });
+          } else void this.send({ command: error.name === 'AbortError' ? 'streamStopped' : 'streamError', payload: { ...active, message: error.message } });
+        });
+      if (generation === this.chatGeneration) this.activeChat = undefined;
+    } catch (error) {
+      if (this.ownsTask(runId, known.conversation_id, ownerGeneration)) {
+        this.activeChat = undefined;
+        await this.send({ command: 'streamError', payload: { conversationId: known.conversation_id, requestId, message: (error as Error).message } });
+      }
+    } finally {
+      this.continuingAgentRuns.delete(runId);
+      void this.drainTaskContinuation();
+    }
+  }
+
+  private async drainTaskContinuation(): Promise<void> {
+    if (this.activeChat) return;
+    const pending = this.pendingTaskContinuations?.entries().next().value;
+    if (!pending) return;
+    this.pendingTaskContinuations.delete(pending[0]);
+    await this.continueTask(pending[0], undefined, true, pending[1]);
   }
 
   private async send(message: WebviewMessage): Promise<void> {
@@ -360,15 +559,33 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         await this.handleChatRequest(message.args as unknown as ChatRequestArgs);
         break;
       case 'cancelStream':
-        this.backend.cancel();
+        this.cancelActiveChat(true, true);
+        break;
+      case 'abandonChat':
+        this.cancelActiveChat();
+        this.selectedConversationId = undefined;
+        break;
+      case 'resumeAgentRun':
+        if (typeof message.args?.runId === 'string') await this.continueTask(message.args.runId, typeof message.args.requestId === 'string' ? message.args.requestId : undefined);
+        break;
+      case 'cancelAgentRun':
+        if (typeof message.args?.runId === 'string') {
+          if (this.activeChat?.runId === message.args.runId) this.cancelActiveChat(true);
+          await this.cancelTask(message.args.runId);
+        }
+        break;
+      case 'registerWorkspace':
+        await this.registerWorkspace();
         break;
       case 'loadConversation':
+        this.cancelActiveChat();
         if (typeof message.args?.conversationId === 'number') {
           await this.loadConversation(message.args.conversationId);
         }
         break;
       case 'deleteConversation':
         if (typeof message.args?.conversationId === 'number') {
+          if (this.activeChat?.conversationId === message.args.conversationId) this.cancelActiveChat(true);
           await this.backend.deleteConversation(message.args.conversationId);
           await this.send({ command: 'conversationDeleted', payload: { conversationId: message.args.conversationId } });
           await this.refreshConversations();
@@ -414,7 +631,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         break;
       case 'applyChangeSet':
         if (message.args?.changeSet) {
-          await this.applyChangeSet(message.args.changeSet as unknown as ChangeSet);
+          await this.applyTaskChangeSet(message.args.changeSet as unknown as ChangeSet);
         }
         break;
       case 'rejectChangeSet':
@@ -556,78 +773,62 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async handleChatRequest(args: ChatRequestArgs): Promise<void> {
-    const prompt = args.prompt?.trim();
-    if (!prompt) {
-      return;
-    }
-
+    const prompt = typeof args.prompt === 'string' ? args.prompt.trim() : '';
+    if (!prompt) return;
+    this.cancelActiveChat();
+    const generation = this.chatGeneration;
     let conversationId = args.conversationId || null;
-    if (!conversationId) {
-      const conversation = await this.backend.createConversation(this.createTitle(prompt));
-      conversationId = conversation.id;
-      await this.send({ command: 'conversationCreated', payload: conversation });
-    }
-
-    const contextText = (args.context || [])
-      .map((item) => {
-        const language = item.language || 'text';
-        return `Context: ${item.label} (${item.kind})\n\`\`\`${language}\n${item.content}\n\`\`\``;
-      })
-      .join('\n\n');
-    const content = contextText ? `${prompt}\n\n${contextText}` : prompt;
-    await this.send({ command: 'streamStarted', payload: { conversationId } });
-    if (args.mode === 'agent') {
-      if (!this.currentWorkspaceId) {
-        await this.syncActiveWorkspaceRegistration();
+    this.activeChat = { requestId: args.requestId, conversationId };
+    this.selectedConversationId = conversationId || undefined;
+    const active = this.activeChat;
+    const sendCurrent = (command: string, detail: Record<string, unknown> = {}): void => {
+      if (generation !== this.chatGeneration) return;
+      void this.send({ command, payload: { conversationId, requestId: args.requestId, ...detail } });
+    };
+    try {
+      if (prompt.length > 100_000) throw new Error('Keep the request below 100,000 characters. Attach a focused selection for context.');
+      const contextText = (args.context || []).map((item) => {
+        if (typeof item.content !== 'string') throw new Error('The attached context is invalid.');
+        return 'Context: ' + item.label + ' (' + item.kind + ')\n\x60\x60\x60' + (item.language || 'text') + '\n' + item.content + '\n\x60\x60\x60';
+      }).join('\n\n');
+      if (contextText.length > 180_000) throw new Error('Attached context is too large. Remove a file or attach a smaller selection.');
+      if (!conversationId) {
+        const conversation = await this.backend.createConversation(this.createTitle(prompt));
+        if (generation !== this.chatGeneration) return;
+        conversationId = conversation.id;
+        active.conversationId = conversationId;
+        this.selectedConversationId = conversationId;
+        sendCurrent('conversationCreated', { ...conversation });
       }
-      if (!this.currentWorkspaceId) {
-        await this.requestWorkspaceRegistration();
-      }
-      if (!this.currentWorkspaceId) {
-        await this.send({ command: 'streamError', payload: { conversationId, message: 'Open a workspace and start the backend to use Agent mode.' } });
-        return;
-      }
-      await this.backend.streamAgent(
-        conversationId,
-        prompt,
-        this.currentWorkspaceId,
-        contextText || undefined,
-        args.model,
-        (event: AgentEvent) => {
-          if (event.type === 'proposal' && event.kind === 'file_change' && event.change_set) {
-            this.legacyChangeSets.set(event.path, event.change_set);
-          }
-          if (event.type === 'proposal' && event.kind === 'command_proposal') {
-            void this.prepareCommandProposalEvent(conversationId!, event.command_run);
-            return;
-          }
-          void this.send({ command: 'agentEvent', payload: { conversationId, event } });
-        },
-        () => {
-          void this.send({ command: 'streamComplete', payload: { conversationId } });
-          void this.refreshConversations();
-        },
-        (error) => {
-          void this.send({ command: 'streamError', payload: { conversationId, message: error.message } });
-          void this.refreshConversations();
+      sendCurrent('streamStarted');
+      if (args.mode === 'agent') {
+        if ((vscode.workspace.workspaceFolders?.length || 0) !== 1) {
+          throw new Error('Open one workspace folder to use Agent mode. Ask mode works with explicitly attached context.');
         }
-      );
-      return;
-    }
-    await this.backend.streamChat(
-      conversationId,
-      [{ role: 'user', content }],
-      args.model,
-      (chunk) => void this.send({ command: 'streamChunk', payload: { conversationId, chunk } }),
-      () => {
-        void this.send({ command: 'streamComplete', payload: { conversationId } });
-        void this.refreshConversations();
-      },
-      (error) => {
-        void this.send({ command: 'streamError', payload: { conversationId, message: error.message } });
-        void this.refreshConversations();
+        await this.syncActiveWorkspaceRegistration();
+        if (generation !== this.chatGeneration) return;
+        if (!this.currentWorkspaceId) await this.requestWorkspaceRegistration();
+        if (generation !== this.chatGeneration) return;
+        if (!this.currentWorkspaceId) throw new Error('Register the workspace to let Agent mode inspect your local files.');
+        await this.backend.streamAgent(conversationId, prompt, this.currentWorkspaceId, contextText || undefined, args.model,
+          (event: AgentEvent) => this.acceptAgentEvent(event, conversationId!, args.requestId, generation, active),
+          () => { sendCurrent('streamComplete'); void this.refreshConversations(); },
+          (error) => { sendCurrent(error.name === 'AbortError' ? 'streamStopped' : 'streamError', { message: error.message }); void this.refreshConversations(); },
+        );
+      } else {
+        const content = contextText ? prompt + '\n\n' + contextText : prompt;
+        await this.backend.streamChat(conversationId, [{ role: 'user', content }], args.model,
+          (chunk) => sendCurrent('streamChunk', { chunk }),
+          () => { sendCurrent('streamComplete'); void this.refreshConversations(); },
+          (error) => { sendCurrent(error.name === 'AbortError' ? 'streamStopped' : 'streamError', { message: error.message }); void this.refreshConversations(); },
+        );
       }
-    );
+    } catch (error) {
+      sendCurrent('streamError', { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (generation === this.chatGeneration) this.activeChat = undefined;
+      void this.drainTaskContinuation();
+    }
   }
 
   private createTitle(prompt: string): string {
@@ -715,7 +916,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       );
       return;
     }
-    await this.applyChangeSet(changeSet);
+    await this.applyTaskChangeSet(changeSet);
   }
 
   private async previewChangeSet(changeSet: ChangeSet): Promise<void> {
@@ -731,6 +932,15 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       }
     } catch (error) {
       void vscode.window.showErrorMessage((error as Error).message);
+    }
+  }
+
+  private async applyTaskChangeSet(changeSet: ChangeSet): Promise<void> {
+    const owner = this.taskForAction(changeSet.conversation_id, changeSet.id);
+    const generation = this.chatGeneration;
+    const applied = await this.applyChangeSet(changeSet);
+    if (applied && owner && this.ownsTask(owner.id, owner.conversation_id, generation)) {
+      await this.startVerification(owner.conversation_id, owner.goal, applied.id, 'quick', owner.id);
     }
   }
 
@@ -884,7 +1094,13 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     };
   }
 
-  private async prepareCommandProposalEvent(conversationId: number, commandRun: CommandRun): Promise<void> {
+  private async prepareCommandProposalEvent(conversationId: number, commandRun: CommandRun, requestId?: string, generation = this.chatGeneration, recovered = false): Promise<void> {
+    const sendProposal = (run: CommandRun): Promise<void> => {
+      if (generation !== this.chatGeneration) return Promise.resolve();
+      return recovered
+        ? this.send({ command: 'agentProposalRecovered', payload: { conversationId, commandRun: run } })
+        : this.send({ command: 'agentEvent', payload: { conversationId, requestId, event: { type: 'proposal', kind: 'command_proposal', command_run: run } } });
+    };
     try {
       const policy = await this.evaluateCommand(commandRun);
       this.commandPolicies.set(commandRun.id, policy);
@@ -892,16 +1108,10 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         const blocked = await this.backend.decideCommandRun(
           commandRun.id, 'block', 'BLOCKED', policy.explanation, policy.executableName, policy.environmentKeys,
         );
-        await this.send({
-          command: 'agentEvent',
-          payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: this.withPolicy(blocked, policy) } },
-        });
+        await sendProposal(this.withPolicy(blocked, policy));
         return;
       }
-      await this.send({
-        command: 'agentEvent',
-        payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: this.withPolicy(commandRun, policy) } },
-      });
+      await sendProposal(this.withPolicy(commandRun, policy));
     } catch (error) {
       const explanation = `Blocked by extension policy: ${(error as Error).message}`;
       let blocked: CommandRun = { ...commandRun, status: 'blocked', calculated_risk: 'BLOCKED', risk_explanation: explanation, policy_blocked: true };
@@ -913,10 +1123,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       } catch {
         // Still render the local policy block if persistence is temporarily unavailable.
       }
-      await this.send({
-        command: 'agentEvent',
-        payload: { conversationId, event: { type: 'proposal', kind: 'command_proposal', command_run: blocked } },
-      });
+      await sendProposal(blocked);
     }
   }
 
@@ -938,6 +1145,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async runControlledCommand(commandRun: CommandRun): Promise<void> {
+    const owner = this.taskForAction(commandRun.conversation_id, commandRun.id);
+    const ownerGeneration = this.chatGeneration;
     let fresh = await this.backend.getCommandRun(commandRun.id);
     let processStarted = false;
     if (fresh.status !== 'proposed') {
@@ -974,6 +1183,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
 
     try {
       policy = await this.evaluateCommand(fresh);
+      if (owner) this.taskActiveCommands.set(fresh.id, { runId: owner.id, conversationId: owner.conversation_id });
       const resultPromise = this.processRunner.run(fresh, policy, (event) => {
         void this.send({ command: 'commandRunOutput', payload: event });
       });
@@ -995,7 +1205,10 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         failureReason: (error as Error).message,
       });
       await this.send({ command: 'commandRunUpdated', payload: failed });
+    } finally {
+      this.taskActiveCommands.delete(commandRun.id);
     }
+    if (owner && this.ownsTask(owner.id, owner.conversation_id, ownerGeneration)) await this.continueTask(owner.id, undefined, true, ownerGeneration);
   }
 
   private async rejectControlledCommand(commandRun: CommandRun): Promise<void> {
@@ -1036,6 +1249,13 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       }
     }));
     await this.send({ command: 'verificationSessionUpdated', payload: { ...session, steps } });
+    if (verificationTerminalStates.has(session.state) && this.taskVerificationOwners.has(session.id)) {
+      const owner = this.taskVerificationOwners.get(session.id)!;
+      this.taskVerificationOwners.delete(session.id);
+      if (this.ownsTask(owner.runId, session.conversation_id, owner.generation)) {
+        await this.continueTask(owner.runId, undefined, true, owner.generation);
+      }
+    }
   }
 
   private async recoverVerificationSessions(): Promise<void> {
@@ -1054,17 +1274,20 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async startVerification(
-    conversationId: number, originalRequest: string, sourceChangeSetId: string | undefined, mode: VerificationMode,
+    conversationId: number, originalRequest: string, sourceChangeSetId: string | undefined, mode: VerificationMode, ownerRunId?: string,
   ): Promise<void> {
     if (!this.currentWorkspaceId) {
       void vscode.window.showWarningMessage('Register the active workspace before starting verification.');
       return;
     }
     try {
+      const owner = this.taskForAction(conversationId, sourceChangeSetId);
+      const ownerGeneration = this.chatGeneration;
       const session = await this.backend.createVerificationSession({
         conversationId, workspaceId: this.currentWorkspaceId, originalRequest, mode, sourceChangeSetId,
         ...this.verificationSettings(),
       });
+      if (ownerRunId || owner?.id) this.taskVerificationOwners.set(session.id, { runId: ownerRunId || owner!.id, generation: ownerGeneration });
       await this.publishVerification(session);
     } catch (error) {
       void vscode.window.showErrorMessage(`Unable to create verification plan: ${(error as Error).message}`);
@@ -1074,6 +1297,8 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private async approveVerification(sessionId: string): Promise<void> {
     const session = await this.backend.getVerificationSession(sessionId);
     if (session.state !== 'AWAITING_PLAN_APPROVAL') return;
+    const owner = this.taskForAction(session.conversation_id, session.source_change_set_id || undefined);
+    if (owner) this.taskVerificationOwners.set(session.id, { runId: owner.id, generation: this.chatGeneration });
     await this.publishVerification(session);
     const plan = session.steps.map((step, index) => [
       `${index + 1}. ${step.purpose}${step.required ? ' (required)' : ' (optional)'}`,

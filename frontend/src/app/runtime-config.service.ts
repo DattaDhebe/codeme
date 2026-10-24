@@ -6,13 +6,11 @@ import { firstValueFrom } from 'rxjs';
 export interface RuntimeConfig {
   backendUrl: string;
   defaultModel: string;
-  allowRemoteBackend: boolean;
 }
 
 const DEFAULT_CONFIG: RuntimeConfig = {
   backendUrl: 'http://127.0.0.1:8000',
   defaultModel: 'qwen2.5-coder:7b',
-  allowRemoteBackend: false,
 };
 
 @Injectable({ providedIn: 'root' })
@@ -46,11 +44,9 @@ export class RuntimeConfigService {
     }
     try {
       const loaded = await firstValueFrom(this.http.get<Partial<RuntimeConfig>>('/runtime-config.json'));
-      const allowRemoteBackend = loaded.allowRemoteBackend === true;
       this.value = {
-        backendUrl: this.validateBackendUrl(loaded.backendUrl || DEFAULT_CONFIG.backendUrl, allowRemoteBackend),
+        backendUrl: this.validateBackendUrl(loaded.backendUrl || DEFAULT_CONFIG.backendUrl),
         defaultModel: this.validateModel(loaded.defaultModel),
-        allowRemoteBackend,
       };
     } catch (error) {
       console.warn('Personal Codex runtime configuration was rejected; safe local defaults are active.', error);
@@ -58,15 +54,15 @@ export class RuntimeConfigService {
     }
   }
 
-  private validateBackendUrl(rawUrl: string, allowRemoteBackend: boolean): string {
+  private validateBackendUrl(rawUrl: string): string {
     const parsed = new URL(rawUrl);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
       throw new Error('The backend URL must be an HTTP(S) URL without embedded credentials.');
     }
     const hostname = parsed.hostname.toLowerCase();
-    const isLocal = hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1';
-    if (!isLocal && !allowRemoteBackend) {
-      throw new Error('Non-local backends require allowRemoteBackend=true.');
+    const isLocal = hostname === '127.0.0.1' || hostname === 'localhost' || hostname === '::1' || hostname === '[::1]';
+    if (!isLocal) {
+      throw new Error('Only local loopback backends are supported.');
     }
     parsed.pathname = parsed.pathname.replace(/\/+$/, '');
     parsed.search = '';

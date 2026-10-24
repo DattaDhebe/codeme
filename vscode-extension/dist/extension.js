@@ -859,6 +859,17 @@ var ControlledProcessRunner = class {
   }
 };
 
+// src/verification.ts
+var verificationTerminalStates = /* @__PURE__ */ new Set([
+  "PASSED",
+  "REJECTED",
+  "CANCELLED",
+  "TIMED_OUT",
+  "EXHAUSTED",
+  "BLOCKED",
+  "STOPPED_NO_PROGRESS"
+]);
+
 // src/sidebarProvider.ts
 var PersonalCodexSidebarProvider = class {
   constructor(context, backend, resolver) {
@@ -867,6 +878,17 @@ var PersonalCodexSidebarProvider = class {
     this.resolver = resolver;
     this.webviewReady = false;
     this.pendingMessages = [];
+    this.chatGeneration = 0;
+    this.conversationLoadGeneration = 0;
+    this.agentRuns = /* @__PURE__ */ new Map();
+    this.continuingAgentRuns = /* @__PURE__ */ new Set();
+    this.pendingTaskContinuations = /* @__PURE__ */ new Map();
+    this.cancelledAgentRuns = /* @__PURE__ */ new Set();
+    this.cancellingAgentRuns = /* @__PURE__ */ new Set();
+    this.taskActiveCommands = /* @__PURE__ */ new Map();
+    this.taskVerificationOwners = /* @__PURE__ */ new Map();
+    this.historyGeneration = 0;
+    this.conversationQuery = "";
     this.proposedDocuments = /* @__PURE__ */ new Map();
     this.legacyChangeSets = /* @__PURE__ */ new Map();
     this.commandPolicies = /* @__PURE__ */ new Map();
@@ -878,7 +900,10 @@ var PersonalCodexSidebarProvider = class {
       displayLimitBytes: configuration.get("commandOutputLimitBytes", 1048576),
       tailLimitBytes: configuration.get("commandTailLimitBytes", 65536)
     });
-    this.context.subscriptions.push({ dispose: () => this.processRunner.dispose() });
+    this.context.subscriptions.push({ dispose: () => {
+      this.cancelActiveChat();
+      this.processRunner.dispose();
+    } });
     this.context.subscriptions.push(vscode3.workspace.registerTextDocumentContentProvider("codeme-proposed", {
       provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || ""
     }));
@@ -895,12 +920,38 @@ var PersonalCodexSidebarProvider = class {
     };
     webviewView.webview.html = webviewHtml(webviewView.webview, this.context.extensionUri);
     this.context.subscriptions.push(
-      webviewView.webview.onDidReceiveMessage((data) => void this.handleMessage(data)),
+      webviewView.webview.onDidReceiveMessage((data) => {
+        void this.handleMessage(data).catch((error) => this.send({
+          command: "operationError",
+          payload: { message: error instanceof Error ? error.message : String(error) }
+        }));
+      }),
       webviewView.onDidDispose(() => {
+        this.cancelActiveChat();
         this.view = void 0;
         this.webviewReady = false;
       })
     );
+  }
+  cancelActiveChat(notify = false, cancelTask = false) {
+    const active = this.activeChat;
+    this.chatGeneration += 1;
+    this.conversationLoadGeneration += 1;
+    this.activeChat = void 0;
+    this.backend.cancel();
+    if (cancelTask && active) {
+      active.cancelled = true;
+      if (active.runId)
+        void this.cancelTask(active.runId);
+    }
+    if (notify && active)
+      void this.send({ command: "streamStopped", payload: active });
+  }
+  async workspaceChanged() {
+    this.cancelActiveChat(true);
+    this.currentWorkspaceId = void 0;
+    await this.syncActiveWorkspaceRegistration();
+    await this.refreshWorkspaceState();
   }
   async reveal() {
     if (!this.view) {
@@ -909,6 +960,8 @@ var PersonalCodexSidebarProvider = class {
     this.view?.show?.(true);
   }
   async createNewChat() {
+    this.cancelActiveChat();
+    this.selectedConversationId = void 0;
     await this.reveal();
     await this.send({ command: "newChat", payload: {} });
   }
@@ -1104,7 +1157,8 @@ var PersonalCodexSidebarProvider = class {
           online: true,
           model: health.model || this.backend.configuredModel,
           models: health.models || [this.backend.configuredModel],
-          ollama: health.ollama === "ok"
+          ollama: (health.inference || health.ollama) === "ok",
+          provider: health.provider || "Ollama"
         }
       });
     } catch (error) {
@@ -1121,20 +1175,207 @@ var PersonalCodexSidebarProvider = class {
     }
   }
   async refreshConversations(query) {
+    const generation = ++this.historyGeneration;
+    if (query !== void 0)
+      this.conversationQuery = query;
     try {
-      const conversations = await this.backend.listConversations(query);
+      const conversations = await this.backend.listConversations(this.conversationQuery);
+      if (generation !== this.historyGeneration)
+        return;
       await this.send({ command: "conversationsUpdated", payload: conversations });
     } catch (error) {
       console.warn("Unable to load Personal Codeme conversations.", error);
     }
   }
   async loadConversation(conversationId) {
+    const generation = ++this.conversationLoadGeneration;
+    this.selectedConversationId = conversationId;
     try {
-      const messages = await this.backend.getConversationMessages(conversationId);
+      const [messages, runs] = await Promise.all([
+        this.backend.getConversationMessages(conversationId),
+        this.backend.listAgentRuns?.(conversationId).catch(() => []) || Promise.resolve([])
+      ]);
+      if (generation !== this.conversationLoadGeneration)
+        return;
+      const run = runs.sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+      if (run)
+        this.agentRuns.set(conversationId, run);
       await this.send({ command: "conversationLoaded", payload: { conversationId, messages } });
+      if (run) {
+        await this.send({ command: "agentRunUpdated", payload: run });
+        await this.restoreTaskProposals(run, generation);
+      }
     } catch (error) {
+      if (generation !== this.conversationLoadGeneration)
+        return;
       await this.send({ command: "operationError", payload: { message: error.message } });
     }
+  }
+  async restoreTaskProposals(run, generation) {
+    const changes = await Promise.allSettled(run.pending_change_set_ids.map((id) => this.backend.getChangeSet(id)));
+    const commands3 = await Promise.allSettled(run.pending_command_run_ids.map((id) => this.backend.getCommandRun(id)));
+    if (generation !== this.conversationLoadGeneration || this.selectedConversationId !== run.conversation_id)
+      return;
+    for (const result of changes)
+      if (result.status === "fulfilled") {
+        await this.send({ command: "agentProposalRecovered", payload: { conversationId: run.conversation_id, changeSet: result.value } });
+      }
+    for (const result of commands3)
+      if (result.status === "fulfilled") {
+        await this.prepareCommandProposalEvent(run.conversation_id, result.value, void 0, this.chatGeneration, true);
+      }
+  }
+  taskForAction(conversationId, actionId) {
+    const run = this.agentRuns.get(conversationId);
+    if (!run || run.workspace_id !== this.currentWorkspaceId || this.selectedConversationId !== conversationId)
+      return void 0;
+    if (["completed", "cancelled", "exhausted"].includes(run.status))
+      return void 0;
+    if (actionId && !run.pending_change_set_ids.includes(actionId) && !run.pending_command_run_ids.includes(actionId))
+      return void 0;
+    return run;
+  }
+  ownsTask(runId, conversationId, generation) {
+    return !this.cancelledAgentRuns.has(runId) && generation === this.chatGeneration && this.selectedConversationId === conversationId && this.agentRuns.get(conversationId)?.id === runId;
+  }
+  acceptAgentEvent(event, conversationId, requestId, generation, active = this.activeChat) {
+    if (event.type === "task") {
+      if (active)
+        active.runId = event.run.id;
+      if (active?.cancelled) {
+        void this.cancelTask(event.run.id);
+        return;
+      }
+    }
+    if (generation !== this.chatGeneration)
+      return;
+    if (event.type === "task")
+      this.agentRuns.set(conversationId, event.run);
+    if (event.type === "proposal" && event.kind === "verification_plan") {
+      const runId = active?.runId || this.agentRuns.get(conversationId)?.id;
+      if (runId)
+        this.taskVerificationOwners.set(event.verification_session.id, { runId, generation });
+      void this.publishVerification(event.verification_session).catch((error) => {
+        if (generation === this.chatGeneration)
+          void this.send({ command: "operationError", payload: { message: error.message } });
+      });
+      return;
+    }
+    if (event.type === "proposal" && event.kind === "file_change" && event.change_set)
+      this.legacyChangeSets.set(event.path, event.change_set);
+    if (event.type === "proposal" && event.kind === "command_proposal") {
+      void this.prepareCommandProposalEvent(conversationId, event.command_run, requestId, generation);
+      return;
+    }
+    void this.send({ command: "agentEvent", payload: { conversationId, requestId, event } });
+  }
+  async cancelTask(runId) {
+    if (this.cancellingAgentRuns.has(runId))
+      return;
+    this.cancellingAgentRuns.add(runId);
+    this.cancelledAgentRuns.add(runId);
+    this.pendingTaskContinuations.delete(runId);
+    const known = [...this.agentRuns.values()].find((item) => item.id === runId);
+    try {
+      for (const [commandId, owner] of this.taskActiveCommands) {
+        if (owner.runId === runId && (!known || owner.conversationId === known.conversation_id))
+          await this.processRunner.cancel(commandId);
+      }
+      if (known && this.backend.listVerificationSessions) {
+        const sessions = await this.backend.listVerificationSessions(known.workspace_id, true).catch(() => []);
+        for (const session of sessions) {
+          if (session.conversation_id === known.conversation_id && session.source_change_set_id && known.pending_change_set_ids.includes(session.source_change_set_id)) {
+            this.taskVerificationOwners.set(session.id, { runId, generation: this.chatGeneration });
+          }
+        }
+      }
+      for (const [sessionId, owner] of this.taskVerificationOwners) {
+        if (owner.runId !== runId)
+          continue;
+        this.taskVerificationOwners.delete(sessionId);
+        await this.cancelVerification(sessionId);
+      }
+      const run = await this.backend.cancelAgentRun(runId);
+      const current = this.agentRuns.get(run.conversation_id);
+      if (!current || current.id === runId)
+        this.agentRuns.set(run.conversation_id, run);
+      await this.send({ command: "agentRunUpdated", payload: run });
+    } catch (error) {
+      await this.send({ command: "operationError", payload: { message: `Unable to cancel task: ${error.message}` } });
+    } finally {
+      this.cancellingAgentRuns.delete(runId);
+    }
+  }
+  async continueTask(runId, requestId, automatic = false, ownerGeneration = this.chatGeneration) {
+    if (this.continuingAgentRuns.has(runId) || this.activeChat) {
+      if (automatic && this.activeChat?.runId === runId)
+        this.pendingTaskContinuations.set(runId, ownerGeneration);
+      if (!automatic)
+        await this.send({ command: "taskNotice", payload: { conversationId: this.selectedConversationId, message: "A local request is already running. Wait for it to finish before resuming." } });
+      return;
+    }
+    const known = [...this.agentRuns.values()].find((item) => item.id === runId);
+    if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration)
+      this.cancelledAgentRuns.delete(runId);
+    if (!known || !this.ownsTask(runId, known.conversation_id, ownerGeneration) || known.workspace_id !== this.currentWorkspaceId) {
+      if (!automatic)
+        await this.send({ command: "taskNotice", payload: { conversationId: this.selectedConversationId, message: "Reload this conversation and register its workspace before resuming the saved task." } });
+      return;
+    }
+    this.continuingAgentRuns.add(runId);
+    try {
+      const run = await this.backend.getAgentRun(runId);
+      if (!this.ownsTask(runId, run.conversation_id, ownerGeneration))
+        return;
+      this.agentRuns.set(run.conversation_id, run);
+      await this.send({ command: "agentRunUpdated", payload: run });
+      if (["completed", "cancelled", "exhausted"].includes(run.status)) {
+        await this.send({ command: "taskNotice", payload: { conversationId: run.conversation_id, message: run.summary || `Task is ${run.status}.` } });
+        return;
+      }
+      if (automatic && ["interrupted", "blocked"].includes(run.status))
+        return;
+      const generation = this.chatGeneration;
+      const active = { requestId, conversationId: run.conversation_id, runId };
+      this.activeChat = active;
+      await this.send({ command: "streamStarted", payload: active });
+      await this.backend.continueAgentRun(
+        runId,
+        (event) => this.acceptAgentEvent(event, run.conversation_id, requestId, generation, active),
+        () => {
+          if (generation === this.chatGeneration)
+            void this.send({ command: "streamComplete", payload: active });
+        },
+        (error) => {
+          if (generation !== this.chatGeneration)
+            return;
+          if (error.message.includes("409")) {
+            void this.send({ command: "streamStopped", payload: active });
+            void this.send({ command: "taskNotice", payload: { conversationId: run.conversation_id, message: "Review pending changes, commands, or the verification plan before resuming." } });
+          } else
+            void this.send({ command: error.name === "AbortError" ? "streamStopped" : "streamError", payload: { ...active, message: error.message } });
+        }
+      );
+      if (generation === this.chatGeneration)
+        this.activeChat = void 0;
+    } catch (error) {
+      if (this.ownsTask(runId, known.conversation_id, ownerGeneration)) {
+        this.activeChat = void 0;
+        await this.send({ command: "streamError", payload: { conversationId: known.conversation_id, requestId, message: error.message } });
+      }
+    } finally {
+      this.continuingAgentRuns.delete(runId);
+      void this.drainTaskContinuation();
+    }
+  }
+  async drainTaskContinuation() {
+    if (this.activeChat)
+      return;
+    const pending = this.pendingTaskContinuations?.entries().next().value;
+    if (!pending)
+      return;
+    this.pendingTaskContinuations.delete(pending[0]);
+    await this.continueTask(pending[0], void 0, true, pending[1]);
   }
   async send(message) {
     if (!this.view || !this.webviewReady) {
@@ -1169,15 +1410,36 @@ var PersonalCodexSidebarProvider = class {
         await this.handleChatRequest(message.args);
         break;
       case "cancelStream":
-        this.backend.cancel();
+        this.cancelActiveChat(true, true);
+        break;
+      case "abandonChat":
+        this.cancelActiveChat();
+        this.selectedConversationId = void 0;
+        break;
+      case "resumeAgentRun":
+        if (typeof message.args?.runId === "string")
+          await this.continueTask(message.args.runId, typeof message.args.requestId === "string" ? message.args.requestId : void 0);
+        break;
+      case "cancelAgentRun":
+        if (typeof message.args?.runId === "string") {
+          if (this.activeChat?.runId === message.args.runId)
+            this.cancelActiveChat(true);
+          await this.cancelTask(message.args.runId);
+        }
+        break;
+      case "registerWorkspace":
+        await this.registerWorkspace();
         break;
       case "loadConversation":
+        this.cancelActiveChat();
         if (typeof message.args?.conversationId === "number") {
           await this.loadConversation(message.args.conversationId);
         }
         break;
       case "deleteConversation":
         if (typeof message.args?.conversationId === "number") {
+          if (this.activeChat?.conversationId === message.args.conversationId)
+            this.cancelActiveChat(true);
           await this.backend.deleteConversation(message.args.conversationId);
           await this.send({ command: "conversationDeleted", payload: { conversationId: message.args.conversationId } });
           await this.refreshConversations();
@@ -1223,7 +1485,7 @@ var PersonalCodexSidebarProvider = class {
         break;
       case "applyChangeSet":
         if (message.args?.changeSet) {
-          await this.applyChangeSet(message.args.changeSet);
+          await this.applyTaskChangeSet(message.args.changeSet);
         }
         break;
       case "rejectChangeSet":
@@ -1368,79 +1630,93 @@ var PersonalCodexSidebarProvider = class {
     }
   }
   async handleChatRequest(args) {
-    const prompt = args.prompt?.trim();
-    if (!prompt) {
+    const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
+    if (!prompt)
       return;
-    }
+    this.cancelActiveChat();
+    const generation = this.chatGeneration;
     let conversationId = args.conversationId || null;
-    if (!conversationId) {
-      const conversation = await this.backend.createConversation(this.createTitle(prompt));
-      conversationId = conversation.id;
-      await this.send({ command: "conversationCreated", payload: conversation });
-    }
-    const contextText = (args.context || []).map((item) => {
-      const language = item.language || "text";
-      return `Context: ${item.label} (${item.kind})
-\`\`\`${language}
-${item.content}
-\`\`\``;
-    }).join("\n\n");
-    const content = contextText ? `${prompt}
-
-${contextText}` : prompt;
-    await this.send({ command: "streamStarted", payload: { conversationId } });
-    if (args.mode === "agent") {
-      if (!this.currentWorkspaceId) {
-        await this.syncActiveWorkspaceRegistration();
-      }
-      if (!this.currentWorkspaceId) {
-        await this.requestWorkspaceRegistration();
-      }
-      if (!this.currentWorkspaceId) {
-        await this.send({ command: "streamError", payload: { conversationId, message: "Open a workspace and start the backend to use Agent mode." } });
+    this.activeChat = { requestId: args.requestId, conversationId };
+    this.selectedConversationId = conversationId || void 0;
+    const active = this.activeChat;
+    const sendCurrent = (command, detail = {}) => {
+      if (generation !== this.chatGeneration)
         return;
+      void this.send({ command, payload: { conversationId, requestId: args.requestId, ...detail } });
+    };
+    try {
+      if (prompt.length > 1e5)
+        throw new Error("Keep the request below 100,000 characters. Attach a focused selection for context.");
+      const contextText = (args.context || []).map((item) => {
+        if (typeof item.content !== "string")
+          throw new Error("The attached context is invalid.");
+        return "Context: " + item.label + " (" + item.kind + ")\n```" + (item.language || "text") + "\n" + item.content + "\n```";
+      }).join("\n\n");
+      if (contextText.length > 18e4)
+        throw new Error("Attached context is too large. Remove a file or attach a smaller selection.");
+      if (!conversationId) {
+        const conversation = await this.backend.createConversation(this.createTitle(prompt));
+        if (generation !== this.chatGeneration)
+          return;
+        conversationId = conversation.id;
+        active.conversationId = conversationId;
+        this.selectedConversationId = conversationId;
+        sendCurrent("conversationCreated", { ...conversation });
       }
-      await this.backend.streamAgent(
-        conversationId,
-        prompt,
-        this.currentWorkspaceId,
-        contextText || void 0,
-        args.model,
-        (event) => {
-          if (event.type === "proposal" && event.kind === "file_change" && event.change_set) {
-            this.legacyChangeSets.set(event.path, event.change_set);
-          }
-          if (event.type === "proposal" && event.kind === "command_proposal") {
-            void this.prepareCommandProposalEvent(conversationId, event.command_run);
-            return;
-          }
-          void this.send({ command: "agentEvent", payload: { conversationId, event } });
-        },
-        () => {
-          void this.send({ command: "streamComplete", payload: { conversationId } });
-          void this.refreshConversations();
-        },
-        (error) => {
-          void this.send({ command: "streamError", payload: { conversationId, message: error.message } });
-          void this.refreshConversations();
+      sendCurrent("streamStarted");
+      if (args.mode === "agent") {
+        if ((vscode3.workspace.workspaceFolders?.length || 0) !== 1) {
+          throw new Error("Open one workspace folder to use Agent mode. Ask mode works with explicitly attached context.");
         }
-      );
-      return;
-    }
-    await this.backend.streamChat(
-      conversationId,
-      [{ role: "user", content }],
-      args.model,
-      (chunk) => void this.send({ command: "streamChunk", payload: { conversationId, chunk } }),
-      () => {
-        void this.send({ command: "streamComplete", payload: { conversationId } });
-        void this.refreshConversations();
-      },
-      (error) => {
-        void this.send({ command: "streamError", payload: { conversationId, message: error.message } });
-        void this.refreshConversations();
+        await this.syncActiveWorkspaceRegistration();
+        if (generation !== this.chatGeneration)
+          return;
+        if (!this.currentWorkspaceId)
+          await this.requestWorkspaceRegistration();
+        if (generation !== this.chatGeneration)
+          return;
+        if (!this.currentWorkspaceId)
+          throw new Error("Register the workspace to let Agent mode inspect your local files.");
+        await this.backend.streamAgent(
+          conversationId,
+          prompt,
+          this.currentWorkspaceId,
+          contextText || void 0,
+          args.model,
+          (event) => this.acceptAgentEvent(event, conversationId, args.requestId, generation, active),
+          () => {
+            sendCurrent("streamComplete");
+            void this.refreshConversations();
+          },
+          (error) => {
+            sendCurrent(error.name === "AbortError" ? "streamStopped" : "streamError", { message: error.message });
+            void this.refreshConversations();
+          }
+        );
+      } else {
+        const content = contextText ? prompt + "\n\n" + contextText : prompt;
+        await this.backend.streamChat(
+          conversationId,
+          [{ role: "user", content }],
+          args.model,
+          (chunk) => sendCurrent("streamChunk", { chunk }),
+          () => {
+            sendCurrent("streamComplete");
+            void this.refreshConversations();
+          },
+          (error) => {
+            sendCurrent(error.name === "AbortError" ? "streamStopped" : "streamError", { message: error.message });
+            void this.refreshConversations();
+          }
+        );
       }
-    );
+    } catch (error) {
+      sendCurrent("streamError", { message: error instanceof Error ? error.message : String(error) });
+    } finally {
+      if (generation === this.chatGeneration)
+        this.activeChat = void 0;
+      void this.drainTaskContinuation();
+    }
   }
   createTitle(prompt) {
     const title = prompt.replace(/\s+/g, " ").trim();
@@ -1532,7 +1808,7 @@ ${contextText}` : prompt;
       );
       return;
     }
-    await this.applyChangeSet(changeSet);
+    await this.applyTaskChangeSet(changeSet);
   }
   async previewChangeSet(changeSet) {
     const folder = this.getActiveWorkspaceFolder();
@@ -1547,6 +1823,14 @@ ${contextText}` : prompt;
       }
     } catch (error) {
       void vscode3.window.showErrorMessage(error.message);
+    }
+  }
+  async applyTaskChangeSet(changeSet) {
+    const owner = this.taskForAction(changeSet.conversation_id, changeSet.id);
+    const generation = this.chatGeneration;
+    const applied = await this.applyChangeSet(changeSet);
+    if (applied && owner && this.ownsTask(owner.id, owner.conversation_id, generation)) {
+      await this.startVerification(owner.conversation_id, owner.goal, applied.id, "quick", owner.id);
     }
   }
   async applyChangeSet(changeSet) {
@@ -1698,7 +1982,12 @@ ${files}`,
       policy_blocked: policy.blocked
     };
   }
-  async prepareCommandProposalEvent(conversationId, commandRun) {
+  async prepareCommandProposalEvent(conversationId, commandRun, requestId, generation = this.chatGeneration, recovered = false) {
+    const sendProposal = (run) => {
+      if (generation !== this.chatGeneration)
+        return Promise.resolve();
+      return recovered ? this.send({ command: "agentProposalRecovered", payload: { conversationId, commandRun: run } }) : this.send({ command: "agentEvent", payload: { conversationId, requestId, event: { type: "proposal", kind: "command_proposal", command_run: run } } });
+    };
     try {
       const policy = await this.evaluateCommand(commandRun);
       this.commandPolicies.set(commandRun.id, policy);
@@ -1711,16 +2000,10 @@ ${files}`,
           policy.executableName,
           policy.environmentKeys
         );
-        await this.send({
-          command: "agentEvent",
-          payload: { conversationId, event: { type: "proposal", kind: "command_proposal", command_run: this.withPolicy(blocked, policy) } }
-        });
+        await sendProposal(this.withPolicy(blocked, policy));
         return;
       }
-      await this.send({
-        command: "agentEvent",
-        payload: { conversationId, event: { type: "proposal", kind: "command_proposal", command_run: this.withPolicy(commandRun, policy) } }
-      });
+      await sendProposal(this.withPolicy(commandRun, policy));
     } catch (error) {
       const explanation = `Blocked by extension policy: ${error.message}`;
       let blocked = { ...commandRun, status: "blocked", calculated_risk: "BLOCKED", risk_explanation: explanation, policy_blocked: true };
@@ -1731,10 +2014,7 @@ ${files}`,
         };
       } catch {
       }
-      await this.send({
-        command: "agentEvent",
-        payload: { conversationId, event: { type: "proposal", kind: "command_proposal", command_run: blocked } }
-      });
+      await sendProposal(blocked);
     }
   }
   approvalText(commandRun, policy) {
@@ -1752,6 +2032,8 @@ ${files}`,
     ].join("\n") + warning;
   }
   async runControlledCommand(commandRun) {
+    const owner = this.taskForAction(commandRun.conversation_id, commandRun.id);
+    const ownerGeneration = this.chatGeneration;
     let fresh = await this.backend.getCommandRun(commandRun.id);
     let processStarted = false;
     if (fresh.status !== "proposed") {
@@ -1792,6 +2074,8 @@ ${files}`,
     await this.send({ command: "commandRunUpdated", payload: this.withPolicy(fresh, policy) });
     try {
       policy = await this.evaluateCommand(fresh);
+      if (owner)
+        this.taskActiveCommands.set(fresh.id, { runId: owner.id, conversationId: owner.conversation_id });
       const resultPromise = this.processRunner.run(fresh, policy, (event) => {
         void this.send({ command: "commandRunOutput", payload: event });
       });
@@ -1821,7 +2105,11 @@ ${files}`,
         failureReason: error.message
       });
       await this.send({ command: "commandRunUpdated", payload: failed });
+    } finally {
+      this.taskActiveCommands.delete(commandRun.id);
     }
+    if (owner && this.ownsTask(owner.id, owner.conversation_id, ownerGeneration))
+      await this.continueTask(owner.id, void 0, true, ownerGeneration);
   }
   async rejectControlledCommand(commandRun) {
     try {
@@ -1871,6 +2159,13 @@ ${files}`,
       }
     }));
     await this.send({ command: "verificationSessionUpdated", payload: { ...session, steps } });
+    if (verificationTerminalStates.has(session.state) && this.taskVerificationOwners.has(session.id)) {
+      const owner = this.taskVerificationOwners.get(session.id);
+      this.taskVerificationOwners.delete(session.id);
+      if (this.ownsTask(owner.runId, session.conversation_id, owner.generation)) {
+        await this.continueTask(owner.runId, void 0, true, owner.generation);
+      }
+    }
   }
   async recoverVerificationSessions() {
     if (!this.currentWorkspaceId)
@@ -1887,12 +2182,14 @@ ${files}`,
       console.warn("Unable to recover verification sessions.", error);
     }
   }
-  async startVerification(conversationId, originalRequest, sourceChangeSetId, mode) {
+  async startVerification(conversationId, originalRequest, sourceChangeSetId, mode, ownerRunId) {
     if (!this.currentWorkspaceId) {
       void vscode3.window.showWarningMessage("Register the active workspace before starting verification.");
       return;
     }
     try {
+      const owner = this.taskForAction(conversationId, sourceChangeSetId);
+      const ownerGeneration = this.chatGeneration;
       const session = await this.backend.createVerificationSession({
         conversationId,
         workspaceId: this.currentWorkspaceId,
@@ -1901,6 +2198,8 @@ ${files}`,
         sourceChangeSetId,
         ...this.verificationSettings()
       });
+      if (ownerRunId || owner?.id)
+        this.taskVerificationOwners.set(session.id, { runId: ownerRunId || owner.id, generation: ownerGeneration });
       await this.publishVerification(session);
     } catch (error) {
       void vscode3.window.showErrorMessage(`Unable to create verification plan: ${error.message}`);
@@ -1910,6 +2209,9 @@ ${files}`,
     const session = await this.backend.getVerificationSession(sessionId);
     if (session.state !== "AWAITING_PLAN_APPROVAL")
       return;
+    const owner = this.taskForAction(session.conversation_id, session.source_change_set_id || void 0);
+    if (owner)
+      this.taskVerificationOwners.set(session.id, { runId: owner.id, generation: this.chatGeneration });
     await this.publishVerification(session);
     const plan = session.steps.map((step, index) => [
       `${index + 1}. ${step.purpose}${step.required ? " (required)" : " (optional)"}`,
@@ -2071,28 +2373,103 @@ ${explanation}` : ""}`
 
 // src/backendClient.ts
 var vscode4 = __toESM(require("vscode"));
-var LOCALHOST_URLS = ["http://127.0.0.1", "http://localhost"];
+
+// src/eventStream.ts
+async function readEventStream(response, consume) {
+  const reader = response.body?.getReader();
+  if (!reader)
+    throw new Error("The backend response stream is unavailable.");
+  const decoder = new TextDecoder();
+  let pending = "";
+  let data = [];
+  let event = "message";
+  let frameSize = 0;
+  let stopped = false;
+  const dispatch = () => {
+    if (data.length)
+      stopped = consume({ event, data: data.join("\n") }) === false;
+    data = [];
+    event = "message";
+    frameSize = 0;
+  };
+  const line = (value) => {
+    if (!value) {
+      dispatch();
+      return;
+    }
+    if (value.startsWith(":"))
+      return;
+    frameSize += value.length;
+    if (frameSize > 4194304)
+      throw new Error("The backend event exceeded the 4 MB limit.");
+    const colon = value.indexOf(":");
+    const field = colon < 0 ? value : value.slice(0, colon);
+    let content = colon < 0 ? "" : value.slice(colon + 1);
+    if (content.startsWith(" "))
+      content = content.slice(1);
+    if (field === "data")
+      data.push(content);
+    else if (field === "event")
+      event = content;
+  };
+  try {
+    while (!stopped) {
+      const { done, value } = await reader.read();
+      pending += done ? decoder.decode() : decoder.decode(value, { stream: true });
+      const lines = pending.split(/\r\n|\n|\r(?!$)/);
+      pending = lines.pop() || "";
+      for (const item of lines) {
+        line(item);
+        if (stopped)
+          break;
+      }
+      if (pending.length + frameSize > 4194304)
+        throw new Error("The backend event exceeded the 4 MB limit.");
+      if (done) {
+        if (!stopped && pending)
+          line(pending.replace(/\r$/, ""));
+        if (!stopped)
+          dispatch();
+        break;
+      }
+    }
+  } finally {
+    await reader.cancel().catch(() => void 0);
+    reader.releaseLock();
+  }
+}
+
+// src/backendClient.ts
+function localBackendUrl(value) {
+  let url;
+  try {
+    url = new URL(value);
+  } catch {
+    throw new Error("Use a valid local backend URL, such as http://127.0.0.1:8000.");
+  }
+  if (!["http:", "https:"].includes(url.protocol) || !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
+    throw new Error("Personal Codeme only connects to a local backend on localhost, 127.0.0.1, or [::1].");
+  }
+  return url.toString().replace(/\/+$/, "");
+}
 var BackendClient = class {
   constructor(config) {
     this.config = config;
   }
   get configuredModel() {
-    return this.config.get("personalCodex.defaultModel", "qwen2.5-coder:7b");
+    return this.config.get("defaultModel", "qwen2.5-coder:7b");
   }
   get backendUrl() {
-    return this.config.get("personalCodex.backendUrl", "http://127.0.0.1:8000");
+    return localBackendUrl(this.config.get("backendUrl", "http://127.0.0.1:8000"));
   }
   get showNotifications() {
-    return this.config.get("personalCodex.showNotifications", true);
+    return this.config.get("showNotifications", true);
   }
   async checkConnection(userTriggered) {
-    if (!LOCALHOST_URLS.some((host) => this.backendUrl.startsWith(host))) {
-      void vscode4.window.showWarningMessage("Personal Codeme is configured to use a non-local backend URL.");
-    }
     try {
       const response = await this.request("/health", void 0, 3e3, 3);
       if (response.status === "ok" && this.showNotifications && userTriggered) {
-        const target = response.model ? `${response.model} through Ollama` : "the local backend";
+        const target = response.model ? `${response.model} through ${response.provider || "Ollama"}` : "the local backend";
         void vscode4.window.showInformationMessage(`Personal Codeme is connected to ${target}.`);
       }
       return response;
@@ -2238,124 +2615,97 @@ var BackendClient = class {
     });
   }
   async streamChat(conversationId, messages, model, onChunk, onComplete, onError) {
-    const url = this.getUrl(`/conversations/${conversationId}/chat`);
-    this.controller = new AbortController();
-    try {
-      const response = await fetch(url, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ model: model || this.configuredModel, messages }),
-        signal: this.controller.signal
-      });
-      if (!response.ok) {
-        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
-      }
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("The backend response stream is unavailable.");
-      }
-      const decoder = new TextDecoder();
-      let buffer = "";
-      let completed = false;
-      while (!completed) {
-        const { done, value } = await reader.read();
-        if (done) {
-          break;
+    await this.stream(
+      "/conversations/" + conversationId + "/chat",
+      { model: model || this.configuredModel, messages },
+      (event) => {
+        if (event.data === "[DONE]")
+          return false;
+        let decoded;
+        try {
+          decoded = JSON.parse(event.data);
+        } catch {
+          throw new Error("The backend returned an invalid chat event.");
         }
-        buffer += decoder.decode(value, { stream: true });
-        const lines = buffer.split("\n");
-        buffer = lines.pop() ?? "";
-        for (const rawLine of lines) {
-          const line = rawLine.trim();
-          if (!line.startsWith("data:")) {
-            continue;
-          }
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") {
-            completed = true;
-            break;
-          }
-          try {
-            const decoded = JSON.parse(payload);
-            if (typeof decoded === "string") {
-              onChunk(decoded);
-            } else if (decoded.error) {
-              throw new Error(decoded.error);
-            }
-          } catch (error) {
-            if (error instanceof SyntaxError) {
-              onChunk(payload);
-            } else {
-              throw error;
-            }
-          }
+        if (event.event === "error" || decoded && typeof decoded === "object" && "error" in decoded) {
+          throw new Error(String(decoded?.error || "Chat request failed."));
         }
-      }
-      onComplete();
-    } catch (error) {
-      if (error?.name === "AbortError") {
-        onError(new Error("Generation stopped."));
-      } else {
-        onError(error);
-      }
-    } finally {
-      this.controller = void 0;
-    }
+        if (typeof decoded === "string")
+          onChunk(decoded);
+      },
+      onComplete,
+      onError
+    );
+  }
+  async listAgentRuns(conversationId) {
+    return this.request(`/agent-runs?conversation_id=${conversationId}`);
+  }
+  async getAgentRun(runId) {
+    return this.request(`/agent-runs/${encodeURIComponent(runId)}`);
+  }
+  async cancelAgentRun(runId, reason = "Stopped by user") {
+    return this.post(`/agent-runs/${encodeURIComponent(runId)}/cancel`, { reason });
+  }
+  async continueAgentRun(runId, onEvent, onComplete, onError) {
+    await this.streamAgentEvents(`/agent-runs/${encodeURIComponent(runId)}/continue`, {}, onEvent, onComplete, onError);
   }
   async streamAgent(conversationId, prompt, workspaceId, context, model, onEvent, onComplete, onError) {
-    const url = this.getUrl(`/conversations/${conversationId}/agent`);
-    this.controller = new AbortController();
+    await this.streamAgentEvents(
+      "/conversations/" + conversationId + "/agent",
+      { model: model || this.configuredModel, prompt, workspace_id: workspaceId, context },
+      onEvent,
+      onComplete,
+      onError
+    );
+  }
+  async streamAgentEvents(endpoint, body, onEvent, onComplete, onError) {
+    await this.stream(endpoint, body, (event) => {
+      if (event.event === "done" || event.data === "[DONE]")
+        return false;
+      const decoded = JSON.parse(event.data);
+      if (event.event === "error" || "error" in decoded) {
+        throw new Error("error" in decoded ? decoded.error : "Agent request failed.");
+      }
+      onEvent(decoded);
+    }, onComplete, onError);
+  }
+  async stream(endpoint, body, consume, onComplete, onError) {
+    this.cancel();
+    const controller = new AbortController();
+    this.controller = controller;
     try {
-      const response = await fetch(url, {
+      const response = await fetch(this.getUrl(endpoint), {
         method: "POST",
+        redirect: "error",
         headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
-        body: JSON.stringify({ model: model || this.configuredModel, prompt, workspace_id: workspaceId, context }),
-        signal: this.controller.signal
+        body: JSON.stringify(body),
+        signal: controller.signal
       });
-      if (!response.ok) {
-        throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
-      }
-      const reader = response.body?.getReader();
-      if (!reader) {
-        throw new Error("The backend response stream is unavailable.");
-      }
-      const decoder = new TextDecoder();
-      let buffer = "";
+      if (!response.ok)
+        throw new Error("Backend request failed: " + response.status + " " + await response.text());
       let completed = false;
-      while (!completed) {
-        const { done, value } = await reader.read();
-        if (done)
-          break;
-        buffer += decoder.decode(value, { stream: true });
-        const blocks = buffer.split("\n\n");
-        buffer = blocks.pop() ?? "";
-        for (const block of blocks) {
-          let eventName = "message";
-          let data = "";
-          for (const line of block.split("\n")) {
-            if (line.startsWith("event:"))
-              eventName = line.slice(6).trim();
-            if (line.startsWith("data:"))
-              data += line.slice(5).trim();
-          }
-          if (eventName === "done" || data === "[DONE]") {
-            completed = true;
-            break;
-          }
-          if (!data)
-            continue;
-          const decoded = JSON.parse(data);
-          if (eventName === "error" || "error" in decoded) {
-            throw new Error("error" in decoded ? decoded.error : "Agent request failed.");
-          }
-          onEvent(decoded);
+      await readEventStream(response, (event) => {
+        if (controller.signal.aborted)
+          throw new DOMException("Generation stopped.", "AbortError");
+        if (consume(event) === false) {
+          completed = true;
+          return false;
         }
-      }
+      });
+      if (!completed)
+        throw new Error("The backend stream ended early. Retry your request.");
       onComplete();
     } catch (error) {
-      onError(error?.name === "AbortError" ? new Error("Generation stopped.") : error);
+      const failure = error instanceof Error ? error : new Error(String(error));
+      if (controller.signal.aborted || failure.name === "AbortError") {
+        const cancelled = new Error("Generation stopped.");
+        cancelled.name = "AbortError";
+        onError(cancelled);
+      } else
+        onError(failure);
     } finally {
-      this.controller = void 0;
+      if (this.controller === controller)
+        this.controller = void 0;
     }
   }
   cancel() {
@@ -2373,7 +2723,7 @@ var BackendClient = class {
       const controller = new AbortController();
       const timer = setTimeout(() => controller.abort(), timeout);
       try {
-        const response = await fetch(url, { signal: controller.signal, ...init });
+        const response = await fetch(url, { ...init, redirect: "error", signal: controller.signal });
         if (!response.ok) {
           throw new Error(`Backend request failed: ${response.status} ${await response.text()}`);
         }
@@ -2482,9 +2832,10 @@ function activate(context) {
     await backendClient.checkConnection(true);
   });
   registerCommand("personalCodex.startBackend", async () => sidebarProvider.startBackend());
-  context.subscriptions.push(vscode6.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.refreshWorkspaceState()));
+  context.subscriptions.push(vscode6.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.workspaceChanged()));
   context.subscriptions.push(vscode6.workspace.onDidChangeConfiguration((event) => {
-    sidebarProvider.updateConfiguration();
+    if (event.affectsConfiguration("personalCodex"))
+      void sidebarProvider.updateConfiguration();
     if (event.affectsConfiguration("personalCodex.enableUnsafeCommandExecution") && vscode6.workspace.getConfiguration("personalCodex").get("enableUnsafeCommandExecution", false)) {
       void vscode6.window.showWarningMessage(
         "personalCodex.enableUnsafeCommandExecution is deprecated. Raw commands remain display-only."

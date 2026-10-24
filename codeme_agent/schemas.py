@@ -126,7 +126,7 @@ class AgentInstructionsResponse(BaseModel):
 
 class MessageCreate(BaseModel):
     role: str = Field(..., pattern="^(user|assistant|system|tool)$")
-    content: str = Field(..., min_length=1)
+    content: str = Field(..., min_length=1, max_length=100_000)
 
 
 class MessageRead(BaseModel):
@@ -138,12 +138,12 @@ class MessageRead(BaseModel):
     created_at: datetime
 
 class ChatRequest(BaseModel):
-    model: str | None = None
-    messages: list[MessageCreate]
+    model: str | None = Field(None, min_length=1, max_length=200)
+    messages: list[MessageCreate] = Field(..., min_length=1, max_length=20)
 
 
 class AgentRequest(BaseModel):
-    model: str | None = None
+    model: str | None = Field(None, min_length=1, max_length=200)
     prompt: str = Field(..., min_length=1, max_length=100_000)
     workspace_id: int
     context: str | None = Field(None, max_length=200_000)
@@ -578,6 +578,7 @@ class VerificationSessionRead(BaseModel):
     final_summary: str | None = None
     failure_reason: str | None = None
     cancellation_reason: str | None = None
+    verified_files: dict[str, str] = Field(default_factory=dict)
     created_at: datetime
     updated_at: datetime
     approved_at: datetime | None = None
@@ -591,3 +592,45 @@ class VerificationSessionRead(BaseModel):
 class VerificationStepStartRead(BaseModel):
     session: VerificationSessionRead
     command_run: CommandRunRead
+
+
+class AgentPlanStep(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(..., min_length=1, max_length=80)
+    description: str = Field(..., min_length=1, max_length=500)
+    status: Literal["pending", "in_progress", "completed"] = "pending"
+
+
+class AgentRunContinue(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+
+class AgentRunCancel(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str = Field("Stopped by user", min_length=1, max_length=1000)
+
+
+class AgentRunRead(BaseModel):
+    id: str
+    schema_version: Literal[1] = 1
+    conversation_id: int
+    workspace_id: int
+    goal: str
+    model: str
+    provider: str
+    status: Literal["running", "awaiting_approval", "completed", "blocked", "exhausted", "cancelled", "interrupted"]
+    plan: list[AgentPlanStep]
+    cycle_count: int
+    max_cycles: int
+    time_budget_seconds: int
+    elapsed_ms: int
+    summary: str
+    evidence: dict
+    pending_change_set_ids: list[str]
+    pending_command_run_ids: list[str]
+    requires_verification: bool
+    created_at: datetime
+    updated_at: datetime
+    completed_at: datetime | None = None

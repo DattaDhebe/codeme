@@ -8,6 +8,19 @@ The effective Python requirement is Python 3.10 or newer because the backend use
 
 ## Completed or substantially completed
 
+### Local reasoning and task controller (v0.7)
+
+Implemented:
+
+- A shared local model interface for native Ollama and loopback OpenAI-compatible tool/chat servers.
+- Scoped inspection, read-before-edit checks, structured public plans, canonical execution feedback, bounded correction, and explicit completed/review/blocked/exhausted/cancelled outcomes.
+- Durable conversation-owned goals, plans, action references, progress events, cycle/time limits, cancellation, interruption recovery, and explicit resume.
+- Extension continuation after reviewed commands or completed verification; approved edits open a verification plan that still requires approval.
+- Completion based on actual applied hashes, exact approved plan/command membership, required passing checks, and file versions captured before those checks. Later or concurrent edits invalidate the receipt.
+- Startup migrations and consistent SQLite backups before pending upgrades.
+
+Remaining limits: reasoning depends on the selected local model; context budgets estimate characters rather than exact tokens; no repository index, multi-root execution, remote models, unattended approval, background task service, or full Codex feature parity. Task ownership uses one backend worker.
+
 ### Phase 1: Local backend, Ollama chat, and persistence
 
 Implemented:
@@ -20,7 +33,7 @@ Implemented:
 
 Partial:
 
-- Streaming messages are committed chunk by chunk rather than through a durable message lifecycle.
+- Streaming persistence batches tokens and saves partial replies; a richer durable message lifecycle remains future work.
 - Database tables are still created through SQLAlchemy metadata for clean installs.
 - `/generate` is a retained legacy placeholder, not the primary model path.
 
@@ -40,8 +53,8 @@ Implemented:
 
 Partial:
 
-- Conversation rename, delete, and search exist in backend contracts but are not exposed in the web chat.
-- Theme, model settings, responsive polish, web agent mode, tool cards, and change approval are incomplete.
+- Browser conversation search/rename/delete, model selection, responsive layout, readiness guidance, and accessible composer controls are implemented.
+- Theme switching, web agent mode, tool cards, and web change approval remain incomplete.
 - Phase 4A stabilizes Markdown, SSE parsing, runtime configuration, and stale tests.
 
 Dependencies: Phase 1 API contracts, Angular 18, Node supported by Angular 18, and npm.
@@ -59,13 +72,13 @@ Implemented:
 - Text file listing and reading with binary, secret-name, and size checks.
 - ripgrep search.
 - Read-only Git status and diff.
-- Nearest applicable `AGENTS.md` lookup.
+- Bounded root-to-folder `AGENTS.md` merging, including guidance returned alongside nested file reads.
 
 Partial:
 
 - Repository mapping is heuristic.
-- Symbol extraction, hierarchical instruction merging, content secret detection, and large-repository indexing are not implemented.
-- Search output and generated-directory exclusions need further bounding.
+- Symbol extraction, content-based secret detection, exact token budgets, and large-repository indexing remain incomplete.
+- Search, Git, and instruction output are bounded; generated/protected directories and escaping links are excluded.
 
 Dependencies: Phase 1, local filesystem access, Git, and ripgrep.
 
@@ -88,7 +101,7 @@ Partial:
 - Only the first workspace folder is supported.
 - Diagnostics are not collected.
 - Structured create/modify change sets are now preferred; verified legacy complete-file proposals are translated into the same transactional pipeline.
-- Command proposals use an unsafe raw terminal path; Phase 4A disables it by default, and Phase 5 replaces it.
+- Structured command proposals use the Phase 5 controlled runner. Legacy raw commands are always display-only.
 - Tool events are not retained with old conversation messages.
 
 Dependencies: Phases 1 and 3, VS Code 1.90+, and the local backend.
@@ -120,7 +133,7 @@ Acceptance criteria:
 - Escaped text, Unicode, code blocks, split frames, multiple frames, errors, completion, and cancellation behave correctly.
 - Angular uses one validated runtime backend URL and obtains model inventory from `/api/health`.
 - Workspaces are never silently registered while automatic registration is disabled.
-- Raw terminal commands cannot execute unless the user explicitly enables the unsafe compatibility setting and approves each command.
+- Raw terminal commands cannot execute; the deprecated unsafe compatibility setting cannot enable them.
 - Scoped tests and production builds pass, excluding clearly documented environment-only runner failures.
 
 Out of scope: controlled command execution, autonomous tests, cloud models, multi-root support, and web agent parity.
@@ -315,6 +328,8 @@ Out of scope: automatic plan or repair approval, always-allow rules, package ins
 
 ### Phase 7: Repository intelligence and context management
 
+Status: partly implemented. Scoped instruction merging, ranged reads, bounded tool/history/context output, safe search/Git output, and reliable mutation-intent routing are present. Exact token budgets, indexing/symbols, durable compaction, and content-based secret detection remain.
+
 Scope: repository map, symbols, relevant-file selection, context budgets, conversation compaction, hierarchical `AGENTS.md`, prompt-injection boundaries, secret detection, and large-repository handling.
 
 Dependencies: stable read tools and an explicit context policy.
@@ -325,6 +340,8 @@ Out of scope: embedding services that require a cloud provider.
 
 ### Phase 8: Editor and web parity
 
+Status: partly implemented. Both clients have improved streaming ownership/cancellation, setup guidance, accessible responsive controls, and local-model validation. Browser conversation management and explorer pagination/navigation are present. The extension additionally has durable task plans, resume/cancel, and reviewed result-driven continuation. Web editing/execution parity, diagnostics, and multi-root execution remain out of scope.
+
 Scope: VS Code diagnostics, multi-root workspaces, inline actions, change-set history, Angular agent mode, web diff/approvals, conversation parity, model/theme settings, responsiveness, and accessibility.
 
 Dependencies: Phases 4-7 contracts.
@@ -334,6 +351,8 @@ Acceptance criteria: both clients expose consistent safe workflows while respect
 Out of scope: marketplace publishing.
 
 ### Phase 9: Production hardening and packaging
+
+Status: partly implemented. Loopback peer/Host/Origin enforcement, local-only settings, proxy bypass, cloud-model rejection, batched streaming persistence, SQLite deletion cascades, automatic migrations, and pre-upgrade backups are implemented. This remains a single-machine application without account authentication or an installer.
 
 Scope: Alembic lifecycle, local authentication, loopback enforcement, rate/body limits, structured logging, durable audit, health/observability, installer/startup experience, VSIX packaging, backup/restore, and security documentation.
 

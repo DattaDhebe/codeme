@@ -10,3 +10,7 @@ coverage
 .gitignore
 npm-debug.log*
 .vscode-test
+
+.runtime/**
+.pytest_cache/**
+tsconfig.json

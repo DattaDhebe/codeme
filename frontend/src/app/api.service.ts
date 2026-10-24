@@ -5,6 +5,7 @@ import { RuntimeConfigService } from './runtime-config.service';
 
 import {
   ChatRequest,
+  HealthRead,
   ConversationSummary,
   FileEntry,
   FileRead,
@@ -39,8 +40,8 @@ export class ApiService {
     return `${this.baseUrl}/conversations/${conversationId}/chat`;
   }
 
-  getHealth(): Observable<{ status: string; model?: string; models?: string[] }> {
-    return this.http.get<{ status: string; model?: string; models?: string[] }>(`${this.baseUrl}/health`);
+  getHealth(): Observable<HealthRead> {
+    return this.http.get<HealthRead>(`${this.baseUrl}/health`);
   }
 
   listConversations(query?: string): Observable<ConversationSummary[]> {

@@ -2,14 +2,16 @@
   "name": "personal-codeme",
   "displayName": "Personal Codeme",
   "publisher": "personal-codex-local",
-  "description": "A local-first Copilot-style coding assistant powered by Ollama.",
+  "description": "A local-only coding agent with durable tasks, reviewable changes, and controlled commands, powered by local models.",
   "repository": "https://github.com/personal-codex-local/personal-codex",
   "license": "MIT",
-  "version": "0.5.0",
+  "version": "0.7.0",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Other"
+  ],
   "activationEvents": [
     "onCommand:personalCodeme.openChat",
     "onCommand:personalCodex.newChat",
@@ -36,7 +38,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
     "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.5.0.vsix"
+    "package": "vsce package --out personal-codeme-0.7.0.vsix"
   },
   "files": [
     "dist/**",
@@ -72,7 +74,7 @@
         "personalCodex.defaultModel": {
           "type": "string",
           "default": "qwen2.5-coder:7b",
-          "description": "Default Ollama model requested by Personal Codeme."
+          "description": "Default local model requested by Personal Codeme."
         },
         "personalCodex.autoRegisterWorkspace": {
           "type": "boolean",
@@ -123,7 +125,9 @@
         "personalCodex.customExecutableAllowlist": {
           "type": "object",
           "default": {},
-          "additionalProperties": { "type": "string" },
+          "additionalProperties": {
+            "type": "string"
+          },
           "description": "Explicit user-owned alias-to-executable allowlist. Repository content cannot modify it."
         },
         "personalCodex.commandOutputLimitBytes": {
@@ -234,17 +238,39 @@
     ],
     "menus": {
       "commandPalette": [
-        { "command": "personalCodeme.openChat" },
-        { "command": "personalCodex.newChat" },
-        { "command": "personalCodex.explainSelection" },
-        { "command": "personalCodex.fixSelection" },
-        { "command": "personalCodex.refactorSelection" },
-        { "command": "personalCodex.generateTests" },
-        { "command": "personalCodex.askCurrentFile" },
-        { "command": "personalCodex.reviewChanges" },
-        { "command": "personalCodex.registerWorkspace" },
-        { "command": "personalCodex.checkBackend" },
-        { "command": "personalCodex.startBackend" }
+        {
+          "command": "personalCodeme.openChat"
+        },
+        {
+          "command": "personalCodex.newChat"
+        },
+        {
+          "command": "personalCodex.explainSelection"
+        },
+        {
+          "command": "personalCodex.fixSelection"
+        },
+        {
+          "command": "personalCodex.refactorSelection"
+        },
+        {
+          "command": "personalCodex.generateTests"
+        },
+        {
+          "command": "personalCodex.askCurrentFile"
+        },
+        {
+          "command": "personalCodex.reviewChanges"
+        },
+        {
+          "command": "personalCodex.registerWorkspace"
+        },
+        {
+          "command": "personalCodex.checkBackend"
+        },
+        {
+          "command": "personalCodex.startBackend"
+        }
       ],
       "editor/context": [
         {

@@ -1109,3 +1109,100 @@ pre code {
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { scroll-behavior: auto !important; animation-duration: .01ms !important; animation-iteration-count: 1 !important; }
 }
+
+/* A readable workspace and review surface at normal sidebar widths. */
+:root { --success: var(--vscode-testing-iconPassed, #45c47c); }
+.local-badge { margin: 0 0 9px; color: var(--muted); font-size: 11px; }
+.empty-state > p { font-size: 13px; }
+.suggestion strong { font-size: 12px; }
+.suggestion small { font-size: 11px; }
+.suggestion { min-height: 76px; }
+.setup-card { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin: 12px 14px; padding: 12px; border: 1px solid var(--border); border-radius: 9px; background: var(--surface-raised); text-align: left; }
+.empty-state .setup-card { width: 100%; margin: 0 0 14px; }
+.setup-card > div { display: flex; flex: 1 1 160px; flex-direction: column; gap: 4px; }
+.setup-card strong { font-size: 12px; }
+.setup-card span { color: var(--muted); font-size: 11px; line-height: 1.5; }
+.setup-card button, .verification-card button { min-height: 28px; padding: 5px 9px; border: 1px solid transparent; border-radius: 5px; background: var(--vscode-button-background); color: var(--vscode-button-foreground); font: inherit; font-size: 11px; cursor: pointer; }
+.setup-card button:hover, .verification-card button:hover { background: var(--vscode-button-hoverBackground); }
+.setup-card button.secondary, .verification-card button.secondary { border-color: var(--border); color: var(--vscode-foreground); background: var(--surface-soft); }
+.task-status { display: flex; min-height: 30px; padding: 4px 3px 8px; align-items: center; gap: 7px; color: var(--muted); }
+.task-status > div { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 3px; }
+.task-status strong { color: var(--vscode-foreground); font-size: 11px; font-weight: 500; }
+.task-status span:not(.task-indicator) { overflow: hidden; font-size: 11px; line-height: 1.4; text-overflow: ellipsis; }
+.task-status .task-error { color: var(--danger); max-height: 58px; overflow-y: auto; }
+.task-indicator { display: grid; width: 15px; flex: none; place-items: center; }
+.task-status.working .task-indicator { color: var(--accent); }
+.task-status.error .task-indicator { color: var(--danger); }
+.task-status.complete .task-indicator { color: var(--success); }
+.task-indicator i { width: 11px; height: 11px; border: 1.5px solid currentColor; border-top-color: transparent; border-radius: 50%; animation: agent-spin .7s linear infinite; }
+.task-status button { flex: none; padding: 4px 6px; border: 1px solid var(--border); border-radius: 5px; background: transparent; color: var(--vscode-textLink-foreground); font-size: 10px; cursor: pointer; }
+.mode-switch button { font-size: 11px; height: 27px; }
+.mode-switch button:disabled { cursor: default; opacity: .65; }
+.mode-switch > span { font-size: 10px; }
+.composer-hint { height: auto; min-height: 22px; font-size: 9px; gap: 8px; flex-wrap: wrap; }
+.composer select { max-width: 160px; font-size: 11px; }
+.tool-button { font-size: 11px; }
+.send-button { width: 30px; height: 30px; }
+.message-actions { opacity: .75; }
+.message-actions button, .code-toolbar button { font-size: 10px; min-height: 25px; }
+.assistant-label { font-size: 11px; }
+.assistant-label span { font-size: 10px; }
+.agent-activity-title, .agent-step, .agent-step strong { font-size: 11px; }
+.agent-step { min-height: 30px; grid-template-columns: 15px minmax(85px, auto) minmax(0, 1fr); }
+.agent-step small { font-size: 10px; }
+.proposal-card { grid-template-columns: 28px minmax(0, 1fr); padding: 10px; gap: 8px; align-items: start; }
+.proposal-copy strong { font-size: 12px; white-space: normal; overflow-wrap: anywhere; }
+.proposal-copy span { font-size: 11px; white-space: normal; overflow-wrap: anywhere; }
+.proposal-files { font-size: 11px; }
+.proposal-actions { grid-column: 1 / -1; justify-content: flex-end; flex-wrap: wrap; gap: 5px; margin-top: 3px; }
+.proposal-card button { min-height: 28px; height: auto; padding: 5px 8px; font-size: 11px; }
+.command-details span { overflow: visible; }
+.verification-card { margin: 12px 0; }
+.verification-heading strong { overflow-wrap: anywhere; }
+.verification-heading span, .verification-step small, .verification-analysis, .verification-detail { font-size: 11px; line-height: 1.5; overflow-wrap: anywhere; }
+.verification-limits span { font-size: 10px; }
+.verification-step strong { font-size: 11px; }
+.verification-step.running .verification-step-state i { animation-name: agent-spin; }
+.history-title { font-size: 12px; }
+.history-date, .drawer-header span { font-size: 10px; }
+.history-action { color: var(--muted); }
+.search-box { height: 34px; }
+.search-box input { font-size: 12px; }
+.jump-wrap { position: sticky; bottom: 12px; display: flex; justify-content: center; height: 0; overflow: visible; pointer-events: none; }
+.jump-latest { position: relative; top: -32px; display: none; align-items: center; gap: 5px; min-height: 28px; padding: 4px 10px; border: 1px solid var(--border); border-radius: 16px; background: var(--surface-raised); color: var(--vscode-foreground); box-shadow: 0 3px 10px rgba(0,0,0,.15); cursor: pointer; pointer-events: auto; font-size: 11px; }
+.jump-latest .icon { transform: rotate(90deg); }
+.is-scrolled-up .jump-latest { display: flex; }
+.markdown-body table { display: block; overflow-x: auto; width: 100%; border-collapse: collapse; }
+.markdown-body th, .markdown-body td { padding: 6px 8px; border: 1px solid var(--border); text-align: left; }
+.markdown-body th { background: var(--surface-soft); }
+.code-toolbar > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.code-toolbar > div { flex: none; }
+@media (max-width: 380px) { .suggestion-grid { grid-template-columns: 1fr; } .mode-switch > span { display: none; } .empty-state { padding-top: 22px; justify-content: flex-start; } .assistant-avatar { display: none; } .user-row { padding-left: 12px; } .user-message { max-width: 96%; } .message-list { padding-inline: 10px; } }
+@media (max-height: 600px) { .hero-mark { display: none; } .empty-state { justify-content: flex-start; padding-top: 22px; } .suggestion { min-height: 58px; } }
+body.vscode-light .token.comment { color: #52733a; }
+body.vscode-light .token.punctuation, body.vscode-light .token.operator { color: #333; }
+body.vscode-light .token.string, body.vscode-light .token.char { color: #a31515; }
+body.vscode-light .token.keyword { color: #800080; }
+body.vscode-light .token.function, body.vscode-light .token.class-name { color: #795e26; }
+body.vscode-light .token.number, body.vscode-light .token.boolean { color: #176528; }
+body.vscode-high-contrast .proposal-card, body.vscode-high-contrast .setup-card, body.vscode-high-contrast .composer { border-color: var(--vscode-contrastBorder, currentColor); }
+
+.agent-step.error > span, .agent-step.error strong { color: var(--danger); }
+.agent-step.stopped > span { color: var(--muted); }
+
+.agent-task-card { margin: 12px 0 22px; padding: 15px; border: 1px solid var(--vscode-panel-border, #34343c); border-radius: 12px; background: var(--vscode-sideBar-background); }
+.agent-task-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
+.agent-task-heading strong, .agent-task-heading span { display: block; }
+.agent-task-heading strong { font-size: 13px; }
+.agent-task-heading span, .agent-plan small, .agent-task-detail { font-size: 11px; color: var(--vscode-descriptionForeground); }
+.local-task-badge { white-space: nowrap; padding: 3px 7px; border-radius: 10px; background: var(--vscode-badge-background); color: var(--vscode-badge-foreground) !important; }
+.agent-task-goal { font-size: 12px; line-height: 1.55; overflow-wrap: anywhere; margin: 12px 0; }
+.agent-plan { list-style: none; padding: 0; margin: 10px 0; }
+.agent-plan-step { display: flex; gap: 9px; align-items: flex-start; padding: 8px 0; font-size: 12px; line-height: 1.45; }
+.agent-plan-step > span { width: 19px; height: 19px; flex: 0 0 19px; border: 1px solid var(--vscode-panel-border, #45454e); border-radius: 50%; display: grid; place-items: center; font-size: 10px; }
+.agent-plan-step > div { overflow-wrap: anywhere; min-width: 0; }
+.agent-plan small { display: block; text-transform: capitalize; margin-top: 2px; }
+.agent-plan-step.completed > span { color: var(--vscode-testing-iconPassed, #7dc498); }
+.agent-plan-step.in_progress > span { color: var(--vscode-focusBorder); border-color: currentColor; }
+.agent-plan-step i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.agent-task-detail { line-height: 1.5; overflow-wrap: anywhere; margin: 10px 0 0; }

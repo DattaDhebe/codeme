@@ -1,194 +1,352 @@
-import { Component, OnInit } from '@angular/core';
+import { AfterViewChecked, Component, DestroyRef, ElementRef, OnDestroy, OnInit, ViewChild, inject } from '@angular/core';
 import { CommonModule } from '@angular/common';
 import { FormsModule } from '@angular/forms';
 import { RouterModule } from '@angular/router';
-import { MatButtonModule } from '@angular/material/button';
-import { MatIconModule } from '@angular/material/icon';
-import { MatInputModule } from '@angular/material/input';
-import { MatListModule } from '@angular/material/list';
-import { MatToolbarModule } from '@angular/material/toolbar';
-import { MatSidenavModule } from '@angular/material/sidenav';
-import { MatDialogModule } from '@angular/material/dialog';
-import { MatCardModule } from '@angular/material/card';
-
+import { HttpErrorResponse } from '@angular/common/http';
+import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
+import { firstValueFrom } from 'rxjs';
 import { ApiService } from './api.service';
-import { ConversationSummary, MessageRead, MessageCreate, ChatRequest } from './models';
+import { ConversationSummary, MessageRead, ChatRequest, HealthRead } from './models';
 import { MarkdownPipe } from './markdown.pipe';
 import { SseEvent, SseParser } from './sse-parser';
 
 @Component({
   selector: 'app-chat-shell',
   standalone: true,
-  imports: [
-    CommonModule,
-    FormsModule,
-    RouterModule,
-    MatButtonModule,
-    MatIconModule,
-    MatInputModule,
-    MatListModule,
-    MatToolbarModule,
-    MatSidenavModule,
-    MatDialogModule,
-    MatCardModule,
-    MarkdownPipe,
-  ],
+  imports: [CommonModule, FormsModule, RouterModule, MarkdownPipe],
   templateUrl: './chat-shell.component.html',
   styleUrls: ['./chat-shell.component.scss'],
 })
-export class ChatShellComponent implements OnInit {
+export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
+  @ViewChild('messageList') private messageList?: ElementRef<HTMLElement>;
+  @ViewChild('composer') private composer?: ElementRef<HTMLTextAreaElement>;
   conversations: ConversationSummary[] = [];
   activeConversation: ConversationSummary | null = null;
   messages: MessageRead[] = [];
   inputText = '';
-  model = '';
+  model: string;
   models: string[] = [];
   streaming = false;
+  creating = false;
+  loadingConversations = false;
+  loadingMessages = false;
+  healthChecking = false;
+  connection: 'checking' | 'ready' | 'offline' | 'model-missing' = 'checking';
+  connectionDetail = 'Connecting to your local model service…';
+  provider: 'ollama' | 'openai_compatible' = 'ollama';
   error: string | null = null;
+  notice = '';
+  searchQuery = '';
+  sidebarOpen = false;
+  renameId: number | null = null;
+  renameTitle = '';
+  deleteId: number | null = null;
+  conversationBusy = false;
+  showJumpToLatest = false;
+  private readonly destroyRef = inject(DestroyRef);
   private abortController: AbortController | null = null;
+  private messageLoadId = 0;
+  private conversationLoadId = 0;
+  private streamingMessageId: number | null = null;
+  private nextMessageId = -1;
+  private pendingScroll = false;
+  private followStream = true;
+  private destroyed = false;
+  private healthTimer?: ReturnType<typeof setInterval>;
+  private readonly drafts = new Map<number | 'new', string>();
 
   constructor(private readonly api: ApiService) {
     this.model = api.defaultModel;
-    this.models = [api.defaultModel];
+  }
+
+  get filteredConversations(): ConversationSummary[] {
+    const query = this.searchQuery.trim().toLocaleLowerCase();
+    return this.conversations.filter(item => item.title.toLocaleLowerCase().includes(query));
+  }
+
+  get canSend(): boolean {
+    return !!this.inputText.trim() && !this.streaming && !this.creating && !this.loadingMessages && this.connection === 'ready';
+  }
+
+  get connectionLabel(): string {
+    return { checking: 'Connecting', ready: 'Local model ready', offline: 'Connection unavailable', 'model-missing': 'Model setup needed' }[this.connection];
   }
 
   ngOnInit(): void {
+    if (!this.api.isBrowser) return;
     this.loadConversations();
-    if (this.api.isBrowser) {
-      this.api.getHealth().subscribe({
-        next: (health) => {
-          this.models = health.models?.length ? health.models : this.models;
-          if (!this.models.includes(this.model)) this.model = health.model || this.models[0] || this.api.defaultModel;
-        },
-      });
+    this.refreshHealth();
+    this.healthTimer = setInterval(() => this.refreshHealth(), 30000);
+  }
+
+  ngOnDestroy(): void {
+    this.destroyed = true;
+    this.stopGeneration(false);
+    if (this.healthTimer) clearInterval(this.healthTimer);
+  }
+
+  ngAfterViewChecked(): void {
+    if (this.pendingScroll) {
+      this.pendingScroll = false;
+      const element = this.messageList?.nativeElement;
+      if (element) element.scrollTop = element.scrollHeight;
     }
   }
 
-  loadConversations(): void {
-    this.api.listConversations().subscribe({
-      next: (conversations) => {
-        this.conversations = conversations;
-        if (!this.activeConversation && conversations.length > 0) {
-          this.selectConversation(conversations[0]);
+  refreshHealth(): void {
+    if (this.healthChecking) return;
+    this.healthChecking = true;
+    this.api.getHealth().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: health => this.applyHealth(health),
+      error: (failure: HttpErrorResponse) => {
+        if (failure.error && typeof failure.error === 'object' && failure.error.ollama === 'ok') {
+          this.applyHealth(failure.error as HealthRead);
+        } else {
+          this.models = [];
+          this.connection = 'offline';
+          this.connectionDetail = failure.status === 0
+            ? 'Start the local backend and your local model server, then reconnect.'
+            : 'The local model service is unavailable. Start it on this machine, then reconnect.';
+          this.healthChecking = false;
         }
       },
-      error: () => {
-        this.error = 'Unable to load conversations.';
-      },
+    });
+  }
+
+  private applyHealth(health: HealthRead): void {
+    this.provider = health.provider || 'ollama';
+    this.models = (health.models || []).filter((value): value is string => typeof value === 'string' && !!value.trim());
+    if (!this.models.includes(this.model)) this.model = this.models.includes(health.model || '') ? health.model! : this.models[0] || this.api.defaultModel;
+    this.connection = this.models.length && health.ollama !== 'unavailable' ? 'ready' : 'model-missing';
+    this.connectionDetail = this.connection === 'ready'
+      ? 'Responses run through ' + (this.provider === 'ollama' ? 'Ollama' : 'your local model server') + ' on your machine.'
+      : this.provider === 'ollama'
+        ? 'Install a coding model with ollama pull ' + this.api.defaultModel + ', then reconnect.'
+        : 'Load a local coding model in your model server, then reconnect.';
+    this.healthChecking = false;
+  }
+
+  loadConversations(): void {
+    this.loadingConversations = true;
+    const requestId = ++this.conversationLoadId;
+    this.api.listConversations().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: conversations => { if (requestId !== this.conversationLoadId) return; this.conversations = conversations;
+        if (this.activeConversation) this.activeConversation = conversations.find(item => item.id === this.activeConversation?.id) || this.activeConversation;
+        this.loadingConversations = false; },
+      error: () => { if (requestId !== this.conversationLoadId) return; this.error = 'Could not load conversation history. Check the local backend and retry.'; this.loadingConversations = false; },
     });
   }
 
   createConversation(): void {
-    this.api.createConversation().subscribe({
-      next: (conversation) => {
-        this.conversations = [conversation, ...this.conversations];
-        this.selectConversation(conversation);
-      },
-      error: () => (this.error = 'Unable to create conversation.'),
-    });
+    if (this.creating) return;
+    this.saveDraft();
+    this.stopGeneration(false);
+    this.messageLoadId++;
+    this.activeConversation = null;
+    this.messages = [];
+    this.loadingMessages = false;
+    this.inputText = this.drafts.get('new') || '';
+    this.error = null;
+    this.notice = '';
+    this.sidebarOpen = false;
+    this.followStream = true;
+    this.showJumpToLatest = false;
+    this.composer?.nativeElement.focus();
   }
 
   selectConversation(conversation: ConversationSummary): void {
+    if (this.creating || this.activeConversation?.id === conversation.id) { this.sidebarOpen = false; return; }
+    this.saveDraft();
+    this.stopGeneration(false);
+    const requestId = ++this.messageLoadId;
     this.activeConversation = conversation;
+    this.messages = [];
+    this.inputText = this.drafts.get(conversation.id) || '';
     this.error = null;
-    this.api.getMessages(conversation.id).subscribe({
-      next: (messages) => (this.messages = messages),
-      error: () => (this.error = 'Unable to load messages.'),
+    this.notice = '';
+    this.loadingMessages = true;
+    this.sidebarOpen = false;
+    this.followStream = true;
+    this.showJumpToLatest = false;
+    this.api.getMessages(conversation.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: messages => {
+        if (requestId !== this.messageLoadId) return;
+        this.messages = messages.filter(message => message.role === 'user' || message.role === 'assistant');
+        this.loadingMessages = false;
+        this.pendingScroll = true;
+      },
+      error: () => {
+        if (requestId !== this.messageLoadId) return;
+        this.error = 'Could not load this conversation. Select it again to retry.';
+        this.loadingMessages = false;
+        this.activeConversation = null;
+      },
     });
   }
 
-  stopGeneration(): void {
-    if (this.abortController) {
-      this.abortController.abort();
-      this.abortController = null;
-      this.streaming = false;
+  private saveDraft(): void {
+    this.drafts.set(this.activeConversation?.id || 'new', this.inputText);
+  }
+
+  startRename(conversation: ConversationSummary): void {
+    this.renameId = conversation.id;
+    this.renameTitle = conversation.title;
+    this.deleteId = null;
+  }
+
+  renameConversation(conversation: ConversationSummary): void {
+    const title = this.renameTitle.trim();
+    if (!title || this.conversationBusy) return;
+    this.conversationBusy = true;
+    this.api.renameConversation(conversation.id, title).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: updated => {
+        this.conversations = this.conversations.map(item => item.id === updated.id ? updated : item);
+        if (this.activeConversation?.id === updated.id) this.activeConversation = updated;
+        this.renameId = null;
+        this.conversationBusy = false;
+      },
+      error: () => { this.error = 'Could not rename this conversation.'; this.conversationBusy = false; },
+    });
+  }
+
+  deleteConversation(conversation: ConversationSummary): void {
+    if (this.conversationBusy || this.creating || (this.streaming && this.activeConversation?.id === conversation.id)) return;
+    this.conversationBusy = true;
+    this.api.deleteConversation(conversation.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: () => {
+        this.conversations = this.conversations.filter(item => item.id !== conversation.id);
+        this.drafts.delete(conversation.id);
+        if (this.activeConversation?.id === conversation.id) this.createConversation();
+        this.deleteId = null;
+        this.conversationBusy = false;
+      },
+      error: () => { this.error = 'Could not delete this conversation.'; this.conversationBusy = false; },
+    });
+  }
+
+  usePrompt(prompt: string): void {
+    this.inputText = prompt;
+    this.composer?.nativeElement.focus();
+  }
+
+  onComposerKeydown(event: KeyboardEvent): void {
+    if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) {
+      event.preventDefault();
+      if (this.canSend) void this.sendMessage();
     }
   }
 
-  sendMessage(): void {
-    if (!this.activeConversation || !this.inputText.trim()) {
-      return;
+  onMessagesScroll(): void {
+    const element = this.messageList?.nativeElement;
+    if (!element) return;
+    this.followStream = element.scrollHeight - element.scrollTop - element.clientHeight < 100;
+    this.showJumpToLatest = !this.followStream;
+  }
+
+  jumpToLatest(): void {
+    this.followStream = true;
+    this.showJumpToLatest = false;
+    this.pendingScroll = true;
+  }
+
+  async copyMessage(message: MessageRead): Promise<void> {
+    try { await navigator.clipboard.writeText(message.content); this.notice = 'Response copied.'; }
+    catch { this.notice = 'Clipboard unavailable. Select the response text to copy it.'; }
+  }
+
+  stopGeneration(showNotice = true): void {
+    if (!this.abortController) return;
+    const controller = this.abortController;
+    this.abortController = null;
+    controller.abort();
+    this.messages = this.messages.filter(message => message.id !== this.streamingMessageId || !!message.content);
+    this.streamingMessageId = null;
+    this.streaming = false;
+    if (showNotice) this.notice = 'Response stopped. Your partial response is kept.';
+  }
+
+  async sendMessage(): Promise<void> {
+    if (!this.canSend) return;
+    const content = this.inputText.trim();
+    this.error = null;
+    this.notice = '';
+    if (!this.activeConversation) {
+      this.creating = true;
+      try {
+        const conversation = await firstValueFrom(this.api.createConversation().pipe(takeUntilDestroyed(this.destroyRef)));
+        if (this.destroyed) return;
+        this.conversations = [conversation, ...this.conversations];
+        this.activeConversation = conversation;
+        this.messages = [];
+        this.drafts.delete('new');
+      } catch {
+        if (!this.destroyed) this.error = 'Could not start a conversation. Your message is still in the composer.';
+        return;
+      } finally { this.creating = false; }
     }
-
-    const message: MessageCreate = { role: 'user', content: this.inputText.trim() };
-    this.messages = [...this.messages, { id: Date.now(), role: 'user', content: this.inputText.trim(), created_at: new Date().toISOString() }];
+    if (this.destroyed || !this.activeConversation) return;
+    const conversationId = this.activeConversation.id;
+    const now = new Date().toISOString();
+    const userMessage: MessageRead = { id: this.nextMessageId--, role: 'user', content, created_at: now };
+    let assistantMessage: MessageRead = { id: this.nextMessageId--, role: 'assistant', content: '', created_at: now };
+    this.messages = [...this.messages, userMessage, assistantMessage];
+    this.streamingMessageId = assistantMessage.id;
     this.inputText = '';
+    this.drafts.delete(conversationId);
     this.streaming = true;
-
-    const request: ChatRequest = { model: this.model, messages: [message] };
+    this.jumpToLatest();
     const controller = new AbortController();
     this.abortController = controller;
-    let assistantMessage: MessageRead = {
-      id: Date.now() + 1,
-      role: 'assistant',
-      content: '',
-      created_at: new Date().toISOString(),
-    };
-
-    this.messages = [...this.messages, assistantMessage];
-    this.streaming = true;
-
-    const streamUrl = this.api.chatStreamUrl(this.activeConversation.id);
-
-    fetch(streamUrl, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Accept: 'text/event-stream',
-      },
-      body: JSON.stringify(request),
-      signal: controller.signal,
-    })
-      .then(async (response) => {
-        if (!response.ok) {
-          throw new Error('Server error');
-        }
-        const reader = response.body?.getReader();
-        if (!reader) {
-          throw new Error('No response stream');
-        }
-
-        const decoder = new TextDecoder();
-        const parser = new SseParser();
-        let completed = false;
-
-        const handleEvent = (event: SseEvent): void => {
-          if (event.event === 'done' || event.data === '[DONE]') {
-            completed = true;
-            return;
-          }
-          if (event.event === 'error') {
-            const decoded = JSON.parse(event.data) as { error?: string };
-            throw new Error(decoded.error || 'Backend stream error');
-          }
-          const decoded = JSON.parse(event.data) as string | { error?: string };
-          if (typeof decoded !== 'string') {
-            throw new Error(decoded.error || 'Unexpected backend stream payload');
-          }
-          assistantMessage = { ...assistantMessage, content: assistantMessage.content + decoded };
-          this.messages = [...this.messages.filter((msg) => msg.id !== assistantMessage.id), assistantMessage];
-        };
-
-        while (!completed) {
-          const { done, value } = await reader.read();
-          if (done) {
-            break;
-          }
-          parser.feed(decoder.decode(value, { stream: true })).forEach(handleEvent);
-        }
-        const finalText = decoder.decode();
-        if (finalText) parser.feed(finalText).forEach(handleEvent);
-        parser.finish().forEach(handleEvent);
-      })
-      .catch((error) => {
-        if (controller.signal.aborted) {
-          this.error = 'Generation cancelled.';
-        } else {
-          this.error = 'Stream error from backend.';
-        }
-      })
-      .finally(() => {
-        this.streaming = false;
+    const isCurrent = () => !this.destroyed && this.abortController === controller && this.activeConversation?.id === conversationId;
+    const request: ChatRequest = { model: this.model, messages: [{ role: 'user', content }] };
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    try {
+      const response = await fetch(this.api.chatStreamUrl(conversationId), {
+        method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
+        body: JSON.stringify(request), signal: controller.signal,
       });
+      if (!response.ok) {
+        const failure = await response.json().catch(() => null);
+        throw new Error(typeof failure?.detail === 'string' ? failure.detail : 'The local backend could not start a response (' + response.status + ').');
+      }
+      reader = response.body?.getReader();
+      if (!reader) throw new Error('The local backend did not provide a response stream.');
+      const decoder = new TextDecoder();
+      const parser = new SseParser();
+      let completed = false;
+      const handleEvent = (event: SseEvent): void => {
+        if (completed || !isCurrent()) return;
+        if (event.event === 'done' || event.data === '[DONE]') { completed = true; return; }
+        const decoded = JSON.parse(event.data) as string | { error?: string };
+        if (event.event === 'error' || typeof decoded !== 'string') {
+          throw new Error(typeof decoded === 'object' && decoded?.error ? decoded.error : 'Unexpected response from the local backend.');
+        }
+        assistantMessage = { ...assistantMessage, content: assistantMessage.content + decoded };
+        this.messages = this.messages.map(message => message.id === assistantMessage.id ? assistantMessage : message);
+        this.pendingScroll = this.followStream;
+      };
+      while (!completed && isCurrent()) {
+        const chunk = await reader.read();
+        if (chunk.done) break;
+        parser.feed(decoder.decode(chunk.value, { stream: true })).forEach(handleEvent);
+      }
+      if (isCurrent() && !completed) {
+        parser.feed(decoder.decode()).forEach(handleEvent);
+        parser.finish().forEach(handleEvent);
+        if (!completed) throw new Error('The response ended before completion. The partial response is kept; you can try again.');
+      }
+      if (isCurrent()) this.loadConversations();
+    } catch (failure) {
+      if (isCurrent() && !controller.signal.aborted) this.error = failure instanceof Error ? failure.message : 'Could not connect to the local backend.';
+    } finally {
+      if (reader) { try { await reader.cancel(); } catch { /* The network may already be closed. */ } reader.releaseLock(); }
+      if (isCurrent()) {
+        this.streaming = false;
+        this.abortController = null;
+        this.streamingMessageId = null;
+        if (!assistantMessage.content) this.messages = this.messages.filter(message => message.id !== assistantMessage.id);
+        this.composer?.nativeElement.focus();
+      }
+    }
   }
 }

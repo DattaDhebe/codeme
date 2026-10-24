@@ -1,6 +1,8 @@
 from pathlib import Path
 
-from codeme_agent.repair_agent import REPAIR_TOOLS, RepairAgent
+import pytest
+
+from codeme_agent.repair_agent import REPAIR_TOOLS, RepairAgent, _is_test_path
 
 
 class FakeClient:
@@ -80,4 +82,30 @@ def test_repair_agent_rejects_test_edit_and_can_correct_to_source(tmp_path: Path
     ])
     _analysis, proposal = RepairAgent(tmp_path, client=client).run("Return two", {"diagnostics": []})
     assert proposal and proposal["operations"][0]["relative_path"] == "math_utils.py"
+    assert "immutable" in client.calls[1]["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize("path", ["src/app.component.spec.ts", "src/value.test.js", "Tests/Value.cs", "src/ValueTest.java", "math_test.py", "__tests__/value.js"])
+def test_repair_identifies_test_files_across_supported_languages(path):
+    assert _is_test_path(path)
+    assert not _is_test_path("src/value.py")
+
+
+def test_repair_handles_malformed_json_arrays_without_crashing(tmp_path: Path):
+    malformed = {"role": "assistant", "content": "", "tool_calls": [{"function": {"name": "read_file", "arguments": "[]"}}]}
+    client = FakeClient([malformed, malformed, malformed])
+    analysis, proposal = RepairAgent(tmp_path, client=client).run("Fix a bug", {})
+    assert proposal is None and "malformed" in analysis
+
+
+def test_repair_refuses_spec_file_edits(tmp_path: Path):
+    (tmp_path / "value.spec.ts").write_text("expect(1).toBe(2);\n", encoding="utf-8")
+    client = FakeClient([
+        call("propose_change_set", {"summary": "Weaken spec", "operations": [{
+            "type": "modify", "path": "value.spec.ts", "summary": "Weaken", "edits": [{"old_text": "toBe(2)", "new_text": "toBe(1)"}],
+        }]}),
+        {"role": "assistant", "content": "Cannot safely change the source."},
+    ])
+    analysis, proposal = RepairAgent(tmp_path, client=client).run("Fix behavior", {})
+    assert proposal is None
     assert "immutable" in client.calls[1]["messages"][-1]["content"]

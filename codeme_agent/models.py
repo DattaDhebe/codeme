@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import Column, DateTime, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import Column, DateTime, ForeignKey, Index, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import relationship
 
 from codeme_agent.db import Base
@@ -199,6 +199,7 @@ class VerificationSession(Base):
     final_summary = Column(Text, nullable=True)
     failure_reason = Column(Text, nullable=True)
     cancellation_reason = Column(Text, nullable=True)
+    verified_files_json = Column(Text, nullable=False, default="{}")
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
     updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
     approved_at = Column(DateTime(timezone=True), nullable=True)
@@ -287,3 +288,54 @@ class VerificationEvent(Base):
     created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
 
     session = relationship("VerificationSession", back_populates="events")
+
+
+class AgentRun(Base):
+    __tablename__ = "agent_runs"
+
+    id = Column(String(36), primary_key=True)
+    schema_version = Column(Integer, nullable=False, default=1)
+    conversation_id = Column(Integer, ForeignKey("conversations.id", ondelete="CASCADE"), nullable=False, index=True)
+    workspace_id = Column(Integer, ForeignKey("workspaces.id", ondelete="CASCADE"), nullable=False, index=True)
+    goal = Column(Text, nullable=False)
+    editor_context = Column(Text, nullable=True)
+    model = Column(String(250), nullable=False)
+    provider = Column(String(32), nullable=False, default="ollama")
+    endpoint_fingerprint = Column(String(64), nullable=False)
+    status = Column(String(32), nullable=False, default="interrupted", index=True)
+    plan_json = Column(Text, nullable=False, default="[]")
+    change_set_ids_json = Column(Text, nullable=False, default="[]")
+    command_run_ids_json = Column(Text, nullable=False, default="[]")
+    cycle_count = Column(Integer, nullable=False, default=0)
+    max_cycles = Column(Integer, nullable=False, default=8)
+    time_budget_seconds = Column(Integer, nullable=False, default=900)
+    elapsed_ms = Column(Integer, nullable=False, default=0)
+    summary = Column(Text, nullable=False, default="")
+    evidence_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime(timezone=True), default=datetime.utcnow, onupdate=datetime.utcnow, nullable=False)
+    completed_at = Column(DateTime(timezone=True), nullable=True)
+
+    events = relationship(
+        "AgentRunEvent", back_populates="run", cascade="all, delete-orphan", order_by="AgentRunEvent.id",
+    )
+
+
+class AgentRunEvent(Base):
+    __tablename__ = "agent_run_events"
+
+    id = Column(Integer, primary_key=True)
+    run_id = Column(String(36), ForeignKey("agent_runs.id", ondelete="CASCADE"), nullable=False, index=True)
+    event_type = Column(String(32), nullable=False)
+    status = Column(String(32), nullable=False)
+    detail_json = Column(Text, nullable=False, default="{}")
+    created_at = Column(DateTime(timezone=True), default=datetime.utcnow, nullable=False)
+
+    run = relationship("AgentRun", back_populates="events")
+
+
+Index(
+    "uq_agent_runs_active_conversation", AgentRun.conversation_id, unique=True,
+    sqlite_where=AgentRun.status.in_(["running", "awaiting_approval", "interrupted"]),
+    postgresql_where=AgentRun.status.in_(["running", "awaiting_approval", "interrupted"]),
+)

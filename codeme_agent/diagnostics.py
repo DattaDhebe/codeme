@@ -9,12 +9,12 @@ SECRET_PATTERN = re.compile(
 
 
 def sanitize_output(value: str | None, limit: int = 32_768) -> str:
-    if not value:
+    if not value or limit <= 0:
         return ""
     clean = ANSI_PATTERN.sub("", value)
     clean = CONTROL_PATTERN.sub("", clean)
     clean = SECRET_PATTERN.sub(lambda match: f"{match.group(1)}=[REDACTED]", clean)
-    return clean[-max(0, limit):]
+    return clean[-limit:]
 
 
 def safe_log_path(raw_path: str, root: Path) -> str | None:
@@ -50,16 +50,34 @@ PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("eslint", re.compile(r"(?P<line>\d+):(?P<column>\d+)\s+(?P<severity>error|warning)\s+(?P<message>.+?)\s+(?P<code>[\w@/-]+)$", re.I | re.M)),
 ]
 
+DIAGNOSTIC_MARKERS = {
+    "python_traceback": ('file "',), "typescript": (".ts(", ".tsx("),
+    "angular": (".ts:", ".html:", ".scss:"), "dotnet": (".cs(", ".fs(", ".vb("),
+    "maven": (".java:",), "gradle": (".java:", ".kt:", ".groovy:"),
+    "pytest": (".py:",),
+}
+
 
 def parse_diagnostics(output: str | None, root: Path, limit: int = 50) -> list[dict]:
+    if limit <= 0:
+        return []
     clean = sanitize_output(output, 128_000)
     diagnostics: list[dict] = []
     seen: set[tuple] = set()
     current_eslint_file: str | None = None
-    for line in clean.splitlines():
+    for raw_line in clean.splitlines():
+        # Compiler patterns may backtrack across a whole line at every offset.
+        # A single huge/minified line must not stall verification and repair.
+        # The bounded raw output remains available as separate failure evidence.
+        line = raw_line[:4096]
+        lower_line = line.lower()
         if line.strip().endswith((".js", ".jsx", ".ts", ".tsx")):
             current_eslint_file = safe_log_path(line.strip(), root)
         for kind, pattern in PATTERNS:
+            if kind in DIAGNOSTIC_MARKERS and not any(marker in lower_line for marker in DIAGNOSTIC_MARKERS[kind]):
+                continue
+            if kind == "eslint" and (not current_eslint_file or ":" not in line):
+                continue
             for match in pattern.finditer(line):
                 groups = match.groupdict()
                 raw_path = groups.get("file") or (current_eslint_file if kind == "eslint" else None)
