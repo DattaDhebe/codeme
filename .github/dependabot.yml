@@ -19,13 +19,16 @@ updates:
     open-pull-requests-limit: 3
     groups:
       angular-framework:
-        patterns: ["@angular/*"]
+        patterns: ["@angular/*", "typescript"]
       browser-test-runner:
         patterns: ["jasmine-core", "@types/jasmine", "karma", "karma-*"]
     ignore:
       # Angular majors require a coordinated Node/TypeScript/framework migration.
       - dependency-name: "@angular/*"
         update-types: ["version-update:semver-major"]
+      # The installed Angular build 21.2 peer range is >=5.9 <6.0.
+      - dependency-name: typescript
+        versions: [">=6.0.0"]
       # Review major runner/type migrations together with reporter compatibility.
       - dependency-name: jasmine-core
         update-types: ["version-update:semver-major"]
@@ -36,10 +39,16 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 3
+    groups:
+      eslint-tooling:
+        patterns: ["eslint", "eslint-*"]
     ignore:
       # Keep compilation compatible with engines.vscode ^1.90.0.
       - dependency-name: "@types/vscode"
         versions: [">=1.91.0"]
+      # eslint-plugin-import's current peer range ends at ESLint 9.
+      - dependency-name: eslint
+        versions: [">=10.0.0"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
