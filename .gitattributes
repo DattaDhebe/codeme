@@ -1,5 +1,6 @@
 * text=auto
 *.py text eol=lf
+*.php text eol=lf
 *.ts text eol=lf
 *.js text eol=lf
 *.cjs text eol=lf
@@ -19,3 +20,4 @@
 *.jpg binary
 *.vsix binary
 *.zip binary
+web-product/integrations/dhebe-homepage/*.patch text eol=lf whitespace=-blank-at-eol
