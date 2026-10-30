@@ -90,6 +90,28 @@ def test_command_profiles_reject_inline_and_destructive_arguments():
         schemas.CommandProposalInput(**proposal(profile="git_diff", arguments=["reset", "--hard"]))
 
 
+@pytest.mark.parametrize("bad_cwd", [
+    "C:\\Windows", "C:/Windows", "C:Windows", "C:", "\\Windows", "/Windows",
+    "\\\\server\\share", "//server/share", "\\\\?\\C:\\Windows", "\\\\.\\C:\\Windows",
+    "subdir\\..\\outside", "subdir/../outside",
+])
+def test_command_cwd_rejects_foreign_absolute_and_traversal_syntax(workspace_root: Path, bad_cwd: str):
+    with pytest.raises(command_runs.CommandRunError):
+        command_runs.prepare_command_run(workspace_root, proposal(cwd_relative=bad_cwd))
+
+
+def test_command_cwd_normalizes_relative_separators_and_keeps_workspace_root(workspace_root: Path):
+    (workspace_root / "subdir" / "nested folder").mkdir()
+    assert command_runs.validate_cwd(workspace_root, "subdir\\nested folder") == "subdir/nested folder"
+    assert command_runs.validate_cwd(workspace_root, "./subdir") == "subdir"
+    assert command_runs.validate_cwd(workspace_root, ".") == "."
+
+
+def test_missing_command_cwd_raises_a_controlled_domain_error(workspace_root: Path):
+    with pytest.raises(command_runs.CommandRunError, match="must exist"):
+        command_runs.prepare_command_run(workspace_root, proposal(cwd_relative="missing"))
+
+
 def test_persistence_requires_existing_relationships(session: Session, workspace_root: Path):
     prepared = command_runs.prepare_command_run(workspace_root, proposal())
     with pytest.raises(command_runs.CommandRunError, match="Conversation"):

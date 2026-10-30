@@ -51,13 +51,10 @@ def _normalize_new_text(content: str, line_ending: str) -> str:
 
 
 def _target(root: Path, relative_path: str) -> tuple[str, Path]:
-    if not relative_path or "\x00" in relative_path:
-        raise ChangeSetError("A workspace-relative path is required")
-    candidate = Path(relative_path)
-    if candidate.is_absolute() or workspace.is_unc_path(candidate):
-        raise ChangeSetError("Absolute and UNC paths are not allowed")
-    if any(part in {"", ".", ".."} for part in candidate.parts):
-        raise ChangeSetError("Traversal and ambiguous path segments are not allowed")
+    try:
+        candidate = Path(workspace.normalize_action_path(relative_path))
+    except workspace.WorkspaceSecurityError as exc:
+        raise ChangeSetError(str(exc)) from exc
     resolved = workspace._resolve_path(root / candidate, strict=False)
     try:
         workspace.assert_within_workspace(root, resolved)

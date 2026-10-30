@@ -85,6 +85,27 @@ def is_unc_path(path: Path) -> bool:
     return False
 
 
+def normalize_action_path(path: str, *, allow_root: bool = False) -> str:
+    """Normalize a relative edit/command path consistently on every host OS.
+
+    Native Path on POSIX treats Windows drives and backslashes as literal
+    filenames. Action paths cross the backend/editor boundary, so Windows
+    absolute, drive-relative, UNC and rooted syntax must never become a
+    seemingly safe relative filename on another operating system.
+    """
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise WorkspaceSecurityError("A workspace-relative action path is required")
+    windows = PureWindowsPath(path)
+    if windows.drive or windows.root or Path(path).is_absolute():
+        raise WorkspaceSecurityError("Absolute, drive-qualified and UNC action paths are not allowed")
+    candidate = Path(path.replace("\\", "/"))
+    if ".." in candidate.parts:
+        raise WorkspaceSecurityError("Parent traversal is not allowed in action paths")
+    if not allow_root and not candidate.parts:
+        raise WorkspaceSecurityError("A workspace-relative file path is required")
+    return candidate.as_posix()
+
+
 def _resolve_path(path: Path, strict: bool = True) -> Path:
     try:
         return path.resolve(strict=strict)

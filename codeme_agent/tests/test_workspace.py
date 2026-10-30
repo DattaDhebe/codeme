@@ -1,12 +1,23 @@
 import shutil
 import subprocess
 import sys
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 
 import pytest
 
 from codeme_agent import workspace
 from codeme_agent.workspace import canonicalize_workspace_path, normalize_workspace_root, WorkspaceSecurityError
+
+
+@pytest.mark.parametrize("native_path", [PurePosixPath, PureWindowsPath])
+def test_action_path_guards_do_not_depend_on_native_host_path_syntax(monkeypatch, native_path):
+    monkeypatch.setattr(workspace, "Path", native_path)
+    for forbidden in ("C:outside.txt", "C:/outside.txt", "C:\\outside.txt", "\\outside.txt", "\\\\server\\share\\file.txt", "/outside.txt"):
+        with pytest.raises(WorkspaceSecurityError):
+            workspace.normalize_action_path(forbidden)
+    assert workspace.normalize_action_path("src\\nested\\file.py") == "src/nested/file.py"
+    assert workspace.normalize_action_path("./src/file.py") == "src/file.py"
+    assert workspace.normalize_action_path(".", allow_root=True) == "."
 
 
 def test_normalize_workspace_root_with_existing_directory(tmp_path: Path):

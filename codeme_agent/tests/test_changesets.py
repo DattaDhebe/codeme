@@ -107,10 +107,20 @@ def test_duplicate_and_conflicting_paths_are_rejected(workspace_root: Path):
         changesets.prepare_change_set(workspace_root, "Duplicate", [create("A.txt", "a"), create("a.txt", "b")])
 
 
-@pytest.mark.parametrize("bad_path", ["../outside.txt", "/absolute.txt", "C:\\outside.txt"])
+@pytest.mark.parametrize("bad_path", [
+    "../outside.txt", "/absolute.txt", "C:\\outside.txt", "C:/outside.txt", "C:outside.txt", "C:",
+    "\\outside.txt", "\\\\server\\share\\outside.txt", "//server/share/outside.txt",
+    "\\\\?\\C:\\outside.txt", "\\\\.\\C:\\outside.txt", "src\\..\\outside.txt",
+])
 def test_boundary_paths_are_rejected(workspace_root: Path, bad_path: str):
     with pytest.raises(changesets.ChangeSetError):
         changesets.prepare_change_set(workspace_root, "Bad", [create(bad_path, "x")])
+
+
+def test_relative_backslash_create_path_is_normalized_without_writing(workspace_root: Path):
+    prepared = changesets.prepare_change_set(workspace_root, "New module", [create("src\\nested\\new.py", "pass\n")])
+    assert prepared["operations"][0]["relative_path"] == "src/nested/new.py"
+    assert not (workspace_root / "src").exists()
 
 
 def test_symlink_escape_is_rejected(workspace_root: Path, tmp_path: Path):

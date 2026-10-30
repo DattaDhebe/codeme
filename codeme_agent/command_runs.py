@@ -30,14 +30,14 @@ def redact(value: str | None, limit: int) -> str | None:
 
 
 def validate_cwd(root: Path, cwd_relative: str) -> str:
-    if not cwd_relative or "\x00" in cwd_relative:
-        raise CommandRunError("A workspace-relative working directory is required")
-    candidate = Path(cwd_relative)
-    if candidate.is_absolute() or workspace.is_unc_path(candidate):
-        raise CommandRunError("Absolute and UNC working directories are not allowed")
-    if cwd_relative != "." and any(part in {"", ".", ".."} for part in candidate.parts):
-        raise CommandRunError("Traversal and ambiguous working directories are not allowed")
-    resolved = (root / candidate).resolve(strict=True)
+    try:
+        candidate = Path(workspace.normalize_action_path(cwd_relative, allow_root=True))
+    except workspace.WorkspaceSecurityError as exc:
+        raise CommandRunError(str(exc)) from exc
+    try:
+        resolved = (root / candidate).resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise CommandRunError("The command working directory must exist and be resolvable") from exc
     try:
         workspace.assert_within_workspace(root, resolved)
     except workspace.WorkspaceSecurityError as exc:

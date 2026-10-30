@@ -28,12 +28,13 @@ This file records notable development changes. **Unreleased** means changes in t
 - Original tasks remain intact when context is compacted; oversized tasks fail explicitly rather than silently losing requirements.
 - Proposal validation identifies the operation and field without echoing invalid source values.
 - Windows launcher cleanup handles owned backend children, and installation checks require distinct server instances with closed ports across relaunch.
+- Edit targets and command working directories reject Windows drive, UNC, device and rooted paths on every supported host; missing command directories return a controlled error.
 
 ### Known limits
 
 - The browser remains a chat and read-only explorer; approved edits and commands use the VS Code extension.
 - The latest recorded Qwen 2.5 Coder 7B evaluation passed five of six coding tasks. Multi-file execution remained blocked. Other catalog models are research candidates, not locally validated equivalents.
-- Fresh-copy Windows evidence does not establish a clean OS/GPU installation; remote OS matrix runs and broader hardware coverage remain pending.
+- Fresh-copy Windows evidence does not establish a clean OS/GPU installation; the manual multi-OS installation matrix and broader hardware coverage remain pending.
 - The proposed ₹499 Cashfree product and paid-download gate are not live. No successful real purchase is claimed.
 
 ## Recorded source milestones
