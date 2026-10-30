@@ -67,3 +67,60 @@ export interface GitStatusResponse {
   is_git: boolean;
   status: GitStatusEntry[];
 }
+
+export interface HealthRead {
+  status: string;
+  provider?: 'ollama' | 'openai_compatible';
+  ollama?: string;
+  model?: string;
+  models?: string[];
+  detail?: string;
+}
+
+export interface ModelSetupStatus {
+  state: 'idle' | 'checking' | 'runtime_missing' | 'server_unavailable' | 'downloading' | 'loading' | 'ready' | 'error' | 'cancelled';
+  provider: 'ollama' | 'openai_compatible';
+  model: string | null;
+  available_models: string[];
+  message: string;
+  completed_bytes: number;
+  total_bytes: number;
+  percent: number | null;
+  progress_scope?: string;
+  error: string | null;
+  can_retry: boolean;
+  auto_setup_enabled: boolean;
+  tool_support?: 'supported' | 'unsupported' | 'unknown';
+  agent_ready?: boolean | null;
+  model_capabilities?: string[];
+  catalog_id?: string | null;
+  explicit_selection?: boolean;
+  preference_saved?: boolean | null;
+}
+
+export interface CodingModel {
+  id: string;
+  name: string;
+  ollama_model: string;
+  hugging_face_url: string;
+  ollama_url: string;
+  license: string;
+  download_size_gb: number;
+  memory_guidance: string;
+  tier: string;
+  description: string;
+  validation_note: string;
+  recommended: boolean;
+  installed: boolean | null;
+  active: boolean;
+}
+
+export interface ModelCatalog {
+  provider: 'ollama' | 'openai_compatible';
+  download_supported: boolean;
+  setup_active: boolean;
+  inventory_available: boolean;
+  inventory_error?: string | null;
+  researched_at: string;
+  models: CodingModel[];
+}

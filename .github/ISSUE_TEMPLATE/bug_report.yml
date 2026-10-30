@@ -1,0 +1,61 @@
+name: Bug report
+description: Report a reproducible CodeMe problem using a small, non-sensitive example.
+title: "[Bug]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        For a security weakness, follow SECURITY.md instead of disclosing details here.
+        Do not attach .env, keys, codeme.db, private conversations, payment records, or a private source tree.
+  - type: input
+    id: version
+    attributes:
+      label: CodeMe version or commit
+      placeholder: "For example: 0.7.0 / commit SHA"
+    validations:
+      required: true
+  - type: dropdown
+    id: client
+    attributes:
+      label: Where does it happen?
+      options:
+        - Browser
+        - VS Code extension
+        - Backend or launcher
+        - Installation or model setup
+        - Documentation or packaging
+    validations:
+      required: true
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Include operating system, relevant Python/Node/VS Code versions, local runtime version, and exact model ID. Omit private configuration values.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Steps to reproduce
+      description: Use a minimal synthetic project or non-sensitive example.
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected and actual behavior
+      description: Include the exact visible error or outcome and whether a model, approval, or command was involved.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Optional redacted evidence
+      description: Short relevant logs or screenshots only. Remove secrets, personal data, private source, and purchase identifiers before submitting.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Before submitting
+      options:
+        - label: I checked this report and attachments for credentials, private code, conversations, and personal or payment data.
+          required: true

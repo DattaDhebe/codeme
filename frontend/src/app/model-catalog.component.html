@@ -1,0 +1,23 @@
+<section class="catalog-panel" aria-labelledby="catalog-title" [attr.aria-busy]="loading">
+  <header class="catalog-heading"><div><span class="eyebrow">CHOOSE YOUR LOCAL MODEL</span><h2 id="catalog-title">Coding models</h2></div><div class="catalog-tools"><button class="button subtle" (click)="refresh.emit()" [disabled]="loading">Refresh</button><button class="icon-button" (click)="close.emit()" aria-label="Close coding models">&#215;</button></div></header>
+  <p class="catalog-intro">Freely downloadable coding models, with source cards on Hugging Face. Choose a model that fits your machine. Downloading is optional; your existing model stays available.</p>
+  <p class="catalog-error" *ngIf="error" role="alert">{{ error }} <button class="text-button" (click)="refresh.emit()" [disabled]="loading">Try again</button></p>
+  <p *ngIf="loading && !catalog" class="catalog-note" role="status">Checking available coding models...</p>
+  <ng-container *ngIf="catalog as list">
+    <p *ngIf="!downloadSupported" class="catalog-note">Your local server manages model installation. Open its model manager to download or load compatible weights, then reconnect CodeMe. Ollama is required for automatic model downloads.</p>
+    <p *ngIf="status?.state === 'ready' && status?.explicit_selection && status?.preference_saved === false" class="catalog-error" role="alert">{{ status?.message }}</p>
+    <p *ngIf="!list.inventory_available" class="catalog-note">Installed models could not be checked. Setup will check again before downloading. {{ list.inventory_error || '' }}</p>
+    <p *ngIf="setupActive" class="catalog-note" role="status">Finish or cancel the current model setup before choosing another. Progress and cancellation are shown above.</p>
+    <p *ngIf="streaming && !setupActive" class="catalog-note">Finish the current response before switching models.</p>
+    <div class="model-grid">
+      <article class="model-card" *ngFor="let model of list.models" [class.recommended]="model.recommended">
+        <div class="model-tags"><span>{{ model.tier }}</span><span *ngIf="model.recommended" class="recommendation">Recommended option</span><span *ngIf="model.installed === true">Installed</span></div>
+        <h3>{{ model.name }}</h3><p class="model-description">{{ model.description }}</p><p class="validation-note">{{ model.validation_note }}</p>
+        <dl><div><dt>Download</dt><dd>About {{ model.download_size_gb | number:'1.0-1' }} GB of weights</dd></div><div><dt>Memory</dt><dd>{{ model.memory_guidance }}</dd></div><div><dt>License</dt><dd>{{ model.license }}</dd></div></dl>
+        <div class="model-links"><a *ngIf="sourceLink(model.hugging_face_url, 'huggingface.co') as source" [href]="source" target="_blank" rel="noopener noreferrer">Hugging Face card</a><a *ngIf="sourceLink(model.ollama_url, 'ollama.com') as runtime" [href]="runtime" target="_blank" rel="noopener noreferrer">Ollama details</a></div>
+        <button *ngIf="downloadSupported" class="button" [class.primary]="model.recommended && canSelect(model)" (click)="select(model)" [disabled]="!canSelect(model)" [attr.aria-label]="actionLabel(model) + ': ' + model.name">{{ actionLabel(model) }}</button>
+      </article>
+    </div>
+    <p class="catalog-note">Weight size is approximate and is not total RAM or VRAM use. Context and runtime overhead need extra memory. Larger models may run slowly or fail to load. Review the source license before use. Recommendations were checked {{ list.researched_at }}; coding quality depends on your task and hardware.</p>
+  </ng-container>
+</section>

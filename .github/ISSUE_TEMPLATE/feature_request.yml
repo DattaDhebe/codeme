@@ -1,0 +1,33 @@
+name: Feature request
+description: Explain a user task and the limitation you want to solve.
+title: "[Feature]: "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Read PLAN.md and existing issues first. Keep examples synthetic and do not post private data.
+        CodeMe preserves local inference, reviewed source edits, and approved commands.
+  - type: textarea
+    id: task
+    attributes:
+      label: What are you trying to do?
+      description: Describe the user task, the client, and what prevents you from completing it today.
+    validations:
+      required: true
+  - type: textarea
+    id: behavior
+    attributes:
+      label: Proposed behavior
+      description: Explain the result you want. A small example is useful; an implementation plan is optional.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives and constraints
+      description: Mention existing workarounds, local hardware/runtime needs, and any relevant approval or privacy expectations.
+  - type: input
+    id: version
+    attributes:
+      label: Current version or commit
+      placeholder: "For example: 0.7.0 / commit SHA"

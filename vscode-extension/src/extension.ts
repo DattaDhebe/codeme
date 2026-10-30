@@ -5,6 +5,11 @@ import { ContextReferenceResolver } from './contextResolver';
 
 export function activate(context: vscode.ExtensionContext): void {
   const config = vscode.workspace.getConfiguration('personalCodex');
+  if (config.get('enableUnsafeCommandExecution', false)) {
+    void vscode.window.showWarningMessage(
+      'personalCodex.enableUnsafeCommandExecution is deprecated. Raw command proposals remain display-only and cannot bypass the controlled runner.'
+    );
+  }
   const backendClient = new BackendClient(config);
   const resolver = new ContextReferenceResolver();
 
@@ -33,8 +38,18 @@ export function activate(context: vscode.ExtensionContext): void {
   });
   registerCommand('personalCodex.startBackend', async () => sidebarProvider.startBackend());
 
-  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.refreshWorkspaceState()));
-  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration(() => sidebarProvider.updateConfiguration()));
+  context.subscriptions.push(vscode.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.workspaceChanged()));
+  context.subscriptions.push(vscode.workspace.onDidChangeConfiguration((event) => {
+    if (event.affectsConfiguration('personalCodex')) void sidebarProvider.updateConfiguration();
+    if (
+      event.affectsConfiguration('personalCodex.enableUnsafeCommandExecution')
+      && vscode.workspace.getConfiguration('personalCodex').get('enableUnsafeCommandExecution', false)
+    ) {
+      void vscode.window.showWarningMessage(
+        'personalCodex.enableUnsafeCommandExecution is deprecated. Raw commands remain display-only.'
+      );
+    }
+  }));
 }
 
 export function deactivate(): void {

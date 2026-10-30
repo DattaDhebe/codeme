@@ -1,4 +1,4 @@
-import { marked } from 'marked';
+import { escapeHtml, safeMarkdown } from './safeMarkdown';
 import Prism from 'prismjs';
 import 'prismjs/components/prism-markup';
 import 'prismjs/components/prism-css';
@@ -14,6 +14,13 @@ import 'prismjs/components/prism-rust';
 import 'prismjs/components/prism-sql';
 import 'prismjs/components/prism-markdown';
 import 'prismjs/components/prism-diff';
+import { inferCodeBlockTargets } from '../editTarget';
+import type { ChangeSet } from '../changeSet';
+import type { CommandRun } from '../commandRun';
+import type { VerificationSession } from '../verification';
+import type { AgentRun, ModelCapabilities, ModelSetupStatus, ModelCatalog } from '../backendClient';
+import { setupActive } from '../modelSetupMonitor';
+import { readyCatalogModel, renderModelCatalog } from './modelCatalog';
 
 declare const acquireVsCodeApi: any;
 
@@ -31,6 +38,7 @@ interface ChatMessage {
   id?: number;
   role: Role;
   content: string;
+  model?: string;
   attachments?: Attachment[];
   error?: boolean;
   activities?: AgentActivity[];
@@ -40,16 +48,20 @@ interface ChatMessage {
 interface AgentActivity {
   name: string;
   summary: string;
-  status: 'running' | 'complete';
+  status: 'running' | 'complete' | 'error' | 'stopped';
 }
 
 interface AgentProposal {
-  kind: 'file_change' | 'command';
+  kind: 'file_change' | 'command' | 'change_set' | 'command_proposal';
   path?: string;
   content?: string;
   command?: string;
-  explanation: string;
+  explanation?: string;
   applied?: boolean;
+  changeSet?: ChangeSet;
+  commandRun?: CommandRun;
+  stdout?: string;
+  stderr?: string;
 }
 
 interface Conversation {
@@ -69,6 +81,17 @@ interface UiState {
   models: string[];
   online: boolean;
   ollama: boolean;
+  provider: string;
+  modelSetup: ModelSetupStatus | null;
+  modelCatalog: ModelCatalog | null;
+  catalogOpen: boolean;
+  catalogLoading: boolean;
+  catalogPending: boolean;
+  catalogError: string;
+  pendingCatalogId: string | null;
+  modelCapabilities: ModelCapabilities | null;
+  checkingModelCapabilities: boolean;
+  agentRuns: AgentRun[];
   workspace: string | null;
   rootPath: string | null;
   streaming: boolean;
@@ -78,6 +101,10 @@ interface UiState {
   conversationSearch: string;
   mode: 'ask' | 'agent';
   workspaceRegistered: boolean;
+  workspaceFolders: number;
+  taskStatus: 'idle' | 'working' | 'complete' | 'stopped' | 'error';
+  lastError: string | null;
+  verifications: VerificationSession[];
 }
 
 const vscode = acquireVsCodeApi();
@@ -88,11 +115,22 @@ const state: UiState = {
   conversations: persisted.conversations || [],
   currentConversationId: persisted.currentConversationId || null,
   composer: persisted.composer || '',
-  attachments: [],
+  attachments: persisted.attachments || [],
   selectedModel: persisted.selectedModel || 'qwen2.5-coder:7b',
   models: persisted.models || ['qwen2.5-coder:7b'],
   online: false,
   ollama: false,
+  provider: persisted.provider || 'Local provider',
+  modelSetup: null,
+  modelCatalog: null,
+  catalogOpen: false,
+  catalogLoading: false,
+  catalogPending: false,
+  catalogError: '',
+  pendingCatalogId: persisted.pendingCatalogId || null,
+  modelCapabilities: null,
+  checkingModelCapabilities: false,
+  agentRuns: persisted.agentRuns || [],
   workspace: persisted.workspace || null,
   rootPath: persisted.rootPath || null,
   streaming: false,
@@ -102,12 +140,41 @@ const state: UiState = {
   conversationSearch: '',
   mode: persisted.mode || 'agent',
   workspaceRegistered: false,
+  workspaceFolders: 0,
+  taskStatus: 'idle',
+  lastError: null,
+  verifications: persisted.verifications || [],
 };
 
 let toastTimer: number | undefined;
+let renderFrame: number | undefined;
+let activeRequestId: string | null = null;
+let requestSequence = 0;
+let historySearchTimer: number | undefined;
+let catalogRequestId = 0;
+
+function requestModelCatalog(): void {
+  state.catalogLoading = true;
+  state.catalogError = '';
+  vscode.postMessage({ command: 'getModelCatalog', args: { requestId: ++catalogRequestId } });
+}
+let modelCapabilityRequest = 0;
+
+function checkSelectedModel(): void {
+  state.modelCapabilities = null;
+  state.checkingModelCapabilities = !!state.selectedModel && state.online;
+  modelCapabilityRequest++;
+  if (state.checkingModelCapabilities) vscode.postMessage({ command: 'checkModelCapabilities', args: { model: state.selectedModel, requestId: modelCapabilityRequest } });
+}
+
+function scheduleRender(): void {
+  if (renderFrame !== undefined) return;
+  renderFrame = requestAnimationFrame(() => { renderFrame = undefined; render(); });
+}
 
 const icons: Record<string, string> = {
   plus: '<path d="M12 5v14M5 12h14"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4"/>',
   history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
   send: '<path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/>',
@@ -135,52 +202,72 @@ function icon(name: string, size = 16): string {
   return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
 }
 
-function escapeHtml(value: string): string {
-  return value.replace(/[&<>'"]/g, (character) => ({
-    '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;',
-  })[character] || character);
+function brandMark(size: number): string {
+  const source = app?.dataset.logoUri;
+  return source ? `<img class="codeme-logo" src="${escapeHtml(source)}" alt="" width="${size}" height="${size}" />` : icon('code', size);
 }
 
 function render(): void {
-  if (!app) {
-    return;
-  }
+  if (!app) return;
+  const previousScroller = document.getElementById('chat-scroll');
+  const previousScrollTop = previousScroller?.scrollTop || 0;
   const shouldStickToBottom = isNearBottom();
+  const focused = document.activeElement as HTMLInputElement | HTMLTextAreaElement | null;
+  const focusedId = focused?.id;
+  const selection = focused && ['prompt', 'history-search'].includes(focused.id)
+    ? [focused.selectionStart, focused.selectionEnd] : null;
+  const outputScroll = Array.from(app.querySelectorAll<HTMLElement>('pre')).map((element) => [element.scrollTop, element.scrollLeft]);
   app.innerHTML = `
     <div class="codeme-shell">
       ${renderHeader()}
       ${renderHistoryDrawer()}
-      <main class="chat-scroll" id="chat-scroll">
+      <main class="chat-scroll" id="chat-scroll" aria-label="Conversation" aria-busy="${state.streaming || state.loadingConversation}">
+        ${state.catalogOpen ? renderModelCatalog(state.modelCatalog, state.modelSetup, { loading: state.catalogLoading, pending: state.catalogPending, streaming: state.streaming, error: state.catalogError }) : ''}
         ${renderChat()}
+        <div class="jump-wrap"><button class="jump-latest" data-action="scrollLatest" aria-label="Jump to latest response">${icon('chevron', 13)} Latest</button></div>
       </main>
       ${renderComposer()}
-      <div class="toast" id="toast" role="status"></div>
+      <div class="toast" id="toast" role="status" aria-live="polite"></div>
     </div>
   `;
-  if (shouldStickToBottom || state.streaming) {
-    requestAnimationFrame(scrollToBottom);
+  const scroller = document.getElementById('chat-scroll');
+  if (scroller) {
+    scroller.scrollTop = state.messages.length === 0 ? 0 : shouldStickToBottom ? scroller.scrollHeight : previousScrollTop;
+    scroller.classList.toggle('is-scrolled-up', !shouldStickToBottom);
   }
+  app.querySelectorAll<HTMLElement>('pre').forEach((element, index) => {
+    const position = outputScroll[index];
+    if (position) { element.scrollTop = position[0]; element.scrollLeft = position[1]; }
+  });
+  const replacement = focusedId ? document.getElementById(focusedId) as HTMLInputElement | HTMLTextAreaElement | null : null;
+  if (replacement) {
+    replacement.focus({ preventScroll: true });
+    if (selection && selection[0] !== null && selection[1] !== null) replacement.setSelectionRange(selection[0], selection[1]);
+  }
+  resizeComposer(document.getElementById('prompt') as HTMLTextAreaElement | null);
   persistState();
 }
 
 function renderHeader(): string {
-  const statusLabel = state.online ? state.selectedModel : 'Backend offline';
+  const statusLabel = !state.online ? 'Backend offline' : state.modelSetup && setupActive(state.modelSetup.state)
+    ? 'Preparing your local model' : !state.ollama ? 'Model setup needs attention' : 'Local model ready';
   return `
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">${icon('spark', 18)}</div>
-        <div class="brand-copy"><strong>CODEME</strong><span>Local coding agent</span></div>
+        <div class="brand-mark">${brandMark(32)}</div>
+        <div class="brand-copy"><strong>CodeMe</strong><span>By DHEBE Studios</span></div>
       </div>
       <div class="topbar-actions">
-        <button class="icon-button" data-action="newChat" title="New chat">${icon('plus')}</button>
-        <button class="icon-button ${state.historyOpen ? 'active' : ''}" data-action="toggleHistory" title="Chat history">${icon('history')}</button>
-        <button class="icon-button" data-action="settings" title="Settings">${icon('settings')}</button>
+        <button id="model-catalog-toggle" class="icon-button ${state.catalogOpen ? 'active' : ''}" data-action="toggleModelCatalog" title="Choose coding models" aria-label="Choose coding models" aria-expanded="${state.catalogOpen}">${icon('download')}</button>
+        <button class="icon-button" data-action="newChat" title="New chat" aria-label="New chat">${icon('plus')}</button>
+        <button class="icon-button ${state.historyOpen ? 'active' : ''}" data-action="toggleHistory" title="Chat history" aria-label="Chat history" aria-expanded="${state.historyOpen}">${icon('history')}</button>
+        <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">${icon('settings')}</button>
       </div>
     </header>
-    <button class="status-strip ${state.online ? 'online' : 'offline'}" data-action="health" title="Check backend connection">
+    <button class="status-strip ${state.online && state.ollama ? 'online' : 'offline'}" data-action="health" title="Check backend connection">
       <span class="status-dot"></span>
       <span class="status-model">${escapeHtml(statusLabel)}</span>
-      <span class="status-via">${state.online && state.ollama ? 'via Ollama' : 'click to check'}</span>
+      <span class="status-via">${state.online && state.ollama ? escapeHtml(state.provider) : 'Check connection'}</span>
       <span class="status-workspace">${icon('folder', 13)} ${escapeHtml(state.workspace || 'No workspace')}</span>
     </button>
   `;
@@ -202,14 +289,14 @@ function renderHistoryDrawer(): string {
   `).join('');
   return `
     <div class="drawer-backdrop" data-action="toggleHistory"></div>
-    <aside class="history-drawer" aria-label="Chat history">
+    <aside class="history-drawer" role="dialog" aria-modal="true" aria-label="Chat history">
       <div class="drawer-header">
         <div><strong>Chats</strong><span>${state.conversations.length} conversations</span></div>
-        <button class="icon-button" data-action="toggleHistory">${icon('close')}</button>
+        <button class="icon-button" data-action="toggleHistory" aria-label="Close chat history">${icon('close')}</button>
       </div>
-      <label class="search-box">${icon('search', 15)}<input id="history-search" value="${escapeHtml(state.conversationSearch)}" placeholder="Search chats" /></label>
+      <label class="search-box">${icon('search', 15)}<input id="history-search" aria-label="Search chats" value="${escapeHtml(state.conversationSearch)}" placeholder="Search chats" /></label>
       <div class="history-list">
-        ${conversations || '<div class="history-empty">No conversations yet</div>'}
+        ${conversations || `<div class="history-empty">${state.conversationSearch ? 'No matching chats' : 'No conversations yet'}</div>`}
       </div>
     </aside>
   `;
@@ -219,24 +306,111 @@ function renderChat(): string {
   if (state.loadingConversation) {
     return '<div class="loading-stack"><i></i><i></i><i></i></div>';
   }
-  if (state.messages.length === 0) {
+  const verificationCards = state.verifications
+    .filter((session) => Boolean(state.currentConversationId) && session.conversation_id === state.currentConversationId)
+    .map(renderVerification).join('');
+  const taskCard = renderAgentTask();
+  if (state.messages.length === 0 && !verificationCards && !taskCard) {
     return renderEmptyState();
   }
-  return `<div class="message-list">${state.messages.map(renderMessage).join('')}</div>`;
+  return `${renderSetupCard()}<div class="message-list">${state.messages.map(renderMessage).join('')}${verificationCards}${taskCard}</div>`;
+}
+
+function currentAgentRun(): AgentRun | undefined {
+  return state.agentRuns.find((run) => run.conversation_id === state.currentConversationId);
+}
+
+function updateAgentRun(run: AgentRun): void {
+  const index = state.agentRuns.findIndex((item) => item.conversation_id === run.conversation_id);
+  if (index >= 0) {
+    const previous = state.agentRuns[index];
+    if (previous.id !== run.id && previous.created_at > run.created_at) return;
+    if (previous.id === run.id && previous.updated_at > run.updated_at) return;
+    state.agentRuns[index] = run;
+  }
+  else state.agentRuns.push(run);
+}
+
+function renderAgentTask(): string {
+  const run = currentAgentRun();
+  if (!run) return '';
+  const labels: Record<AgentRun['status'], string> = {
+    running: state.streaming ? 'Working locally' : 'Interrupted · resume to continue',
+    awaiting_approval: 'Waiting for your review', completed: 'Task completed',
+    blocked: 'Task needs attention', exhausted: 'Task budget reached',
+    cancelled: 'Task cancelled', interrupted: 'Interrupted · resume to continue',
+  };
+  const active = !['completed', 'cancelled', 'exhausted'].includes(run.status);
+  const steps = (run.plan || []).map((step, index) => `<li class="agent-plan-step ${escapeHtml(step.status)}"><span>${step.status === 'completed' ? icon('check', 12) : step.status === 'in_progress' ? '<i></i>' : index + 1}</span><div>${escapeHtml(step.description)}<small>${step.status.replace('_', ' ')}</small></div></li>`).join('');
+  const detail = run.summary || (run.status === 'awaiting_approval'
+    ? 'Review proposals and approve verification after applying changes. The task will continue from recorded results.'
+    : run.status === 'interrupted' || (run.status === 'running' && !state.streaming)
+      ? 'The last session ended. Review saved actions, then resume when ready.' : 'Inspecting the workspace and checking the next step.');
+  return `<section class="agent-task-card" aria-label="Agent task" data-run-id="${escapeHtml(run.id)}">
+    <div class="agent-task-heading"><div><strong>${escapeHtml(labels[run.status])}</strong><span>Cycle ${run.cycle_count}/${run.max_cycles} · ${Math.ceil(run.elapsed_ms / 1000)}s / ${run.time_budget_seconds}s</span></div><span class="local-task-badge">Local task</span></div>
+    <p class="agent-task-goal">${escapeHtml(run.goal)}</p>
+    ${steps ? `<ol class="agent-plan">${steps}</ol>` : ''}
+    <p class="agent-task-detail">${escapeHtml(detail)}</p>
+    ${active ? `<div class="proposal-actions">${!state.streaming ? `<button class="secondary" data-action="cancelAgentRun" data-run-id="${escapeHtml(run.id)}">Cancel task</button><button data-action="resumeAgentRun" data-run-id="${escapeHtml(run.id)}" ${!state.online || !state.ollama || !state.workspaceRegistered ? 'disabled' : ''}>Resume task</button>` : '<span>Use Stop to cancel this task.</span>'}</div>` : ''}
+  </section>`;
+}
+
+function renderVerification(session: VerificationSession): string {
+  const attempt = session.repair_attempts.at(-1);
+  const running = session.state === 'RUNNING' || session.state === 'REVERIFYING';
+  const rows = session.steps.map((step) => `<div class="verification-step ${escapeHtml(step.status.toLowerCase())}">
+    <span class="verification-step-state">${step.status === 'STEP_PASSED' ? icon('check', 12) : step.status === 'RUNNING' ? '<i></i>' : step.position + 1}</span>
+    <div><strong>${escapeHtml(step.purpose)}</strong><small>${escapeHtml(step.profile)} ${escapeHtml(JSON.stringify(step.arguments))}</small>
+      <small>cwd ${escapeHtml(step.cwd_relative)} / ${step.timeout_seconds}s / ${step.required ? 'required' : 'optional'} / ${escapeHtml(step.calculated_risk || 'evaluating')}</small>
+      ${step.risk_explanation ? `<small>${escapeHtml(step.risk_explanation)}</small>` : ''}
+      ${step.output ? `<pre class="command-output">${escapeHtml(step.output)}</pre>` : ''}
+    </div>
+  </div>`).join('');
+  let actions = '';
+  if (session.state === 'AWAITING_PLAN_APPROVAL') actions = `<button class="secondary" data-action="rejectVerification" data-session-id="${session.id}">Reject</button><button data-action="approveVerification" data-session-id="${session.id}">Approve complete plan</button>`;
+  else if (running) actions = `<button data-action="cancelVerification" data-session-id="${session.id}">Cancel verification</button>`;
+  else if (session.state === 'AWAITING_REPAIR_APPROVAL' && attempt?.repair_change_set_id) actions = `
+    <button class="secondary" data-action="previewVerificationRepair" data-session-id="${session.id}" data-change-set-id="${attempt.repair_change_set_id}">Preview repair</button>
+    <button class="secondary" data-action="rejectVerificationRepair" data-session-id="${session.id}">Reject repair</button>
+    <button data-action="applyVerificationRepair" data-session-id="${session.id}">Apply repair</button>`;
+  else if (attempt?.result === 'applied' && !running) actions = `<button class="secondary" data-action="restoreVerificationRepair" data-session-id="${session.id}">${icon('refresh', 12)} Restore repair</button>`;
+  const detail = session.failure_reason || session.final_summary || session.cancellation_reason || (session.state === 'VERIFICATION_FAILED' ? 'Preparing a bounded repair proposal…' : '');
+  return `<section class="verification-card" data-verification-id="${session.id}">
+    <div class="verification-heading"><div class="proposal-icon">${icon('check', 15)}</div><div><strong>${escapeHtml(session.summary)}</strong><span>${escapeHtml(session.state)} · plan ${session.plan_fingerprint.slice(0, 10)}</span></div></div>
+    <div class="verification-limits"><span>${session.mode}</span><span>${session.total_time_budget_seconds}s budget</span><span>repair ${session.current_attempt}/${session.maximum_repair_attempts}</span><span>rerun ${session.current_rerun}/${session.maximum_reruns}</span></div>
+    <div class="verification-steps">${rows}</div>
+    ${detail ? `<div class="verification-detail">${escapeHtml(detail)}</div>` : ''}
+    ${actions ? `<div class="proposal-actions">${actions}</div>` : ''}
+  </section>`;
+}
+
+function renderSetupCard(): string {
+  if (!state.online) return '<section class="setup-card"><div><strong>Connect your local backend</strong><span>From your CodeMe installation folder, run <code>python start.py --backend-only</code>, then check the connection. First time? Run <code>python install.py</code>.</span></div><button data-action="startBackend">Start backend task</button><button class="secondary" data-action="health">Check</button></section>';
+  const setup = state.modelSetup;
+  if (setup && setup.state !== 'ready') {
+    const active = setupActive(setup.state);
+    const percent = typeof setup.percent === 'number' && Number.isFinite(setup.percent) ? Math.max(0, Math.min(100, setup.percent)) : null;
+    const bytes = (value: number) => Number.isFinite(value) && value > 0 ? (value / 1073741824).toFixed(2) + ' GB' : '0 GB';
+    const progress = setup.state === 'downloading' ? `<div class="model-download-progress"><progress aria-label="Current model download layer" max="100" ${percent === null ? '' : `value="${percent}"`}></progress><small>${percent === null ? 'Getting download details...' : `${percent.toFixed(0)}% of current layer`}${setup.total_bytes > 0 ? ` · ${bytes(setup.completed_bytes)} / ${bytes(setup.total_bytes)}` : ''}</small></div>` : '';
+    const title = setup.state === 'downloading' ? 'Downloading your coding model' : setup.state === 'loading' ? 'Loading the model into memory' : active ? 'Finding a local model' : setup.state === 'idle' ? 'Set up your local model' : 'Model setup needs attention';
+    return `<section class="setup-card model-setup-card" aria-label="Local model setup"><div role="status" aria-live="polite"><strong>${title}</strong><span>${escapeHtml(setup.message)}</span>${setup.model ? `<code>${escapeHtml(setup.model)}</code>` : ''}${progress}${setup.error && setup.error !== setup.message ? `<span class="model-setup-error">${escapeHtml(setup.error)}</span>` : ''}${setup.state === 'runtime_missing' ? '<span>From the CodeMe folder, run <code>python install.py</code>, then retry.</span>' : ''}<small>Installed models are reused. New model downloads need internet; your code stays local.</small></div>${active ? '<button class="secondary" data-action="cancelModelSetup">Cancel setup</button>' : '<button data-action="setupModel" ' + (!setup.can_retry ? 'disabled' : '') + '>' + (!setup.can_retry ? 'Finishing cancellation...' : setup.state === 'idle' ? 'Set up model' : 'Retry setup') + '</button>'}</section>`;
+  }
+  if (!state.ollama) return '<section class="setup-card"><div><strong>Prepare your local model</strong><span>CodeMe can find an installed model or download one through Ollama.</span></div><button data-action="setupModel">Set up model</button></section>';
+  if (state.mode === 'agent' && state.modelCapabilities?.agent_ready === false) return '<section class="setup-card"><div><strong>This model is ready for chat</strong><span>It does not advertise Agent tool support. Choose Ask mode, or select a local model with native tools.</span></div><button data-action="setMode" data-mode="ask">Switch to Ask</button></section>';
+  if (state.models.length === 0) return '<section class="setup-card"><div><strong>Install a local model</strong><span>No local models were found. Load a coding model in your local provider, then check again.</span></div><button data-action="health">Check models</button></section>';
+  if (state.mode === 'agent' && state.workspaceFolders !== 1) return '<section class="setup-card"><div><strong>Open one workspace folder</strong><span>Agent mode inspects one local repository. Use Ask with attached context for other files.</span></div></section>';
+  if (state.mode === 'agent' && !state.workspaceRegistered) return '<section class="setup-card"><div><strong>Connect this workspace</strong><span>Allow local repository inspection. Changes and commands need your review.</span></div><button data-action="registerWorkspace">Register workspace</button></section>';
+  return '';
 }
 
 function renderEmptyState(): string {
-  const offlineAction = state.online ? '' : `
-    <div class="offline-card">
-      <div><strong>Backend is offline</strong><span>Start the local API to chat with Qwen.</span></div>
-      <button data-action="startBackend">Start backend</button>
-    </div>`;
   return `
     <section class="empty-state">
-      <div class="hero-mark"><span></span>${icon('spark', 30)}</div>
-      <h1>Build with your code</h1>
-      <p>Ask Qwen to explain, fix, refactor, test, or review your workspace.</p>
-      ${offlineAction}
+      <div class="hero-mark"><span></span>${brandMark(64)}</div>
+      <div class="local-badge">On your machine · Local models</div>
+      <h1>What should we build?</h1>
+      <p>Explore your repository, make a focused change, and review every step.</p>
+      ${renderSetupCard()}
       <div class="suggestion-grid">
         <button class="suggestion" data-action="quickPrompt" data-context="selection" data-prompt="Explain the selected code. Focus on behavior, assumptions, and edge cases.">
           <span class="suggestion-icon violet">${icon('code')}</span><span><strong>Explain code</strong><small>Understand a selection</small></span>${icon('chevron', 14)}
@@ -261,7 +435,7 @@ function renderMessage(message: ChatMessage, index: number): string {
     <div class="message-attachments">${message.attachments.map((item) => `<span>${contextIcon(item.kind)}${escapeHtml(item.label)}</span>`).join('')}</div>` : '';
   if (message.role === 'user') {
     return `<article class="message-row user-row" data-message-index="${index}">
-      <div class="user-message">${attachments}<div>${renderMarkdown(message.content)}</div></div>
+      <div class="user-message">${attachments}<div>${renderMarkdown(message.content, false)}</div></div>
     </article>`;
   }
   if (message.role === 'system' || message.role === 'tool') {
@@ -270,28 +444,89 @@ function renderMessage(message: ChatMessage, index: number): string {
   const streaming = isLast && state.streaming;
   const activities = message.activities?.length ? `<div class="agent-activity">
     <div class="agent-activity-title">${icon('spark', 13)} Working in ${escapeHtml(state.workspace || 'workspace')}</div>
-    ${message.activities.map((item) => `<div class="agent-step ${item.status}"><span>${item.status === 'complete' ? icon('check', 12) : '<i></i>'}</span><strong>${escapeHtml(toolLabel(item.name))}</strong><small>${escapeHtml(item.summary)}</small></div>`).join('')}
+    ${message.activities.map((item) => `<div class="agent-step ${item.status}"><span>${item.status === 'complete' ? icon('check', 12) : item.status === 'error' ? icon('close', 12) : item.status === 'stopped' ? icon('stop', 12) : '<i></i>'}</span><strong>${escapeHtml(toolLabel(item.name))}</strong><small>${escapeHtml(item.summary)}</small></div>`).join('')}
   </div>` : '';
   const proposals = message.proposals?.map((proposal, proposalIndex) => renderProposal(proposal, index, proposalIndex)).join('') || '';
   return `<article class="message-row assistant-row ${message.error ? 'has-error' : ''}" data-message-index="${index}">
-    <div class="assistant-avatar">${icon('spark', 15)}</div>
+    <div class="assistant-avatar">${brandMark(25)}</div>
     <div class="assistant-content">
-      <div class="assistant-label">CODEME <span>${escapeHtml(state.selectedModel)}</span></div>
+      <div class="assistant-label">CODEME <span>${escapeHtml(message.model || 'Local model')}</span></div>
       ${activities}
       <div class="markdown-body">${renderMarkdown(message.content)}${streaming ? '<span class="stream-cursor"></span>' : ''}</div>
       ${proposals ? `<div class="proposal-list">${proposals}</div>` : ''}
-      ${!streaming && message.content ? `<div class="message-actions"><button data-action="copyMessage" data-index="${index}" title="Copy response">${icon('copy', 13)} Copy</button><button data-action="reusePrompt" data-index="${index}" title="Reuse previous prompt">${icon('refresh', 13)} Retry</button></div>` : ''}
+      ${!streaming && message.content ? `<div class="message-actions"><button data-action="copyMessage" data-index="${index}" title="Copy response">${icon('copy', 13)} Copy</button><button data-action="reusePrompt" data-index="${index}" title="Edit and resend the previous prompt">${icon('refresh', 13)} Edit request</button></div>` : ''}
     </div>
   </article>`;
 }
 
 function renderProposal(proposal: AgentProposal, messageIndex: number, proposalIndex: number): string {
+  if (proposal.kind === 'command_proposal' && proposal.commandRun) {
+    const run = proposal.commandRun;
+    const blocked = run.status === 'blocked' || run.policy_blocked || run.calculated_risk === 'BLOCKED';
+    const active = run.status === 'starting' || run.status === 'running';
+    const terminal = ['completed', 'failed', 'timed_out', 'cancelled', 'rejected', 'blocked'].includes(run.status);
+    const arguments_ = run.resolved_arguments || run.arguments;
+    const details = JSON.stringify({
+      purpose: run.purpose, profile: run.profile, executable: run.resolved_executable_name,
+      arguments: arguments_, cwd: run.cwd_relative, risk: run.calculated_risk,
+      timeoutSeconds: run.requested_timeout_seconds, environmentKeys: run.environment_keys || [],
+    }, null, 2);
+    return `<section class="proposal-card command-run-card ${blocked ? 'blocked' : ''}">
+      <div class="proposal-icon">${icon('terminal', 15)}</div>
+      <div class="proposal-copy">
+        <strong>${escapeHtml(run.purpose)}</strong>
+        <span>${escapeHtml(run.profile)} / ${escapeHtml(run.status)} / ${escapeHtml(run.calculated_risk || 'evaluating')}</span>
+        <div class="command-details">
+          <span><b>Executable</b> ${escapeHtml(run.resolved_executable_name || 'policy evaluation pending')}</span>
+          <span><b>Arguments</b> <code>${escapeHtml(JSON.stringify(arguments_))}</code></span>
+          <span><b>Working directory</b> ${escapeHtml(run.cwd_relative)}</span>
+          <span><b>Timeout</b> ${run.requested_timeout_seconds}s</span>
+          <span><b>Network</b> ${run.network_access ? 'may occur' : 'not indicated'} / <b>Workspace writes</b> ${run.writes_workspace ? 'may occur' : 'not indicated'}</span>
+          <span><b>Environment keys</b> ${escapeHtml((run.environment_keys || []).join(', ') || '(none)')}</span>
+          <span><b>Policy</b> ${escapeHtml(run.risk_explanation || 'Pending independent evaluation')}</span>
+        </div>
+        ${proposal.stdout ? `<pre class="command-output stdout">${escapeHtml(proposal.stdout)}</pre>` : ''}
+        ${proposal.stderr ? `<pre class="command-output stderr">${escapeHtml(proposal.stderr)}</pre>` : ''}
+        ${run.output_truncated ? '<span class="truncation-warning">Output was truncated; the process pipes were still drained.</span>' : ''}
+        ${run.exit_code !== undefined && run.exit_code !== null ? `<span>Exit code ${run.exit_code} / ${run.duration_ms || 0}ms</span>` : ''}
+        ${run.failure_reason ? `<span class="command-failure">${escapeHtml(run.failure_reason)}</span>` : ''}
+      </div>
+      <div class="proposal-actions">
+        <button class="secondary" data-action="copyCommandDetails" data-details="${escapeHtml(details)}">${icon('copy', 12)} Copy details</button>
+        ${run.status === 'proposed' && !blocked ? `<button class="secondary" data-action="rejectCommandProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Reject</button><button data-action="runCommandProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Run once</button>` : ''}
+        ${active ? `<button data-action="cancelCommandRun" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Cancel run</button>` : ''}
+        ${terminal ? `<button class="secondary" data-action="copyCommandOutput" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Copy output</button>` : ''}
+      </div>
+    </section>`;
+  }
+  if (proposal.kind === 'change_set' && proposal.changeSet) {
+    const changeSet = proposal.changeSet;
+    const files = changeSet.operations.map((operation) => `<span><b>${escapeHtml(operation.type)}</b> ${escapeHtml(operation.relative_path)}</span>`).join('');
+    const isApplied = changeSet.status === 'applied';
+    const isTerminal = ['rejected', 'failed', 'restored', 'restore_failed'].includes(changeSet.status);
+    return `<section class="proposal-card change-set-card ${isApplied ? 'applied' : ''}">
+      <div class="proposal-icon">${icon('file', 15)}</div>
+      <div class="proposal-copy"><strong>${escapeHtml(changeSet.summary)}</strong><span>${changeSet.operations.length} file operation(s) · ${escapeHtml(changeSet.status)}</span><div class="proposal-files">${files}</div></div>
+      <div class="proposal-actions">
+        <button class="secondary" data-action="previewChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('external', 12)} Preview files</button>
+        ${changeSet.status === 'proposed' ? `<button class="secondary" data-action="rejectChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Reject</button><button data-action="applyChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">Apply complete set</button>` : ''}
+        ${isApplied ? `<button class="secondary" data-action="startVerification" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('check', 12)} Verify</button><button data-action="restoreChangeSet" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}">${icon('refresh', 12)} Restore</button>` : ''}
+        ${isTerminal ? `<button disabled>${escapeHtml(changeSet.status)}</button>` : ''}
+      </div>
+    </section>`;
+  }
   const isFile = proposal.kind === 'file_change';
   const title = isFile ? proposal.path || 'File change' : proposal.command || 'Terminal command';
   return `<section class="proposal-card ${proposal.applied ? 'applied' : ''}">
     <div class="proposal-icon">${icon(isFile ? 'file' : 'terminal', 15)}</div>
-    <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation)}</span></div>
-    <button data-action="${isFile ? 'applyProposal' : 'runProposal'}" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : isFile ? 'Apply' : 'Run'}</button>
+    <div class="proposal-copy"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(proposal.explanation || '')}</span></div>
+    <div class="proposal-actions">
+      ${isFile ? `<button class="secondary" data-action="openProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Open proposed diff">${icon('external', 12)} Open</button>` : ''}
+      <button class="secondary" data-action="copyProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" title="Copy ${isFile ? 'proposed file' : 'command'}">${icon('copy', 12)} Copy</button>
+      ${isFile
+        ? `<button data-action="applyProposal" data-message-index="${messageIndex}" data-proposal-index="${proposalIndex}" ${proposal.applied ? 'disabled' : ''}>${proposal.applied ? `${icon('check', 12)} Applied` : 'Apply'}</button>`
+        : '<button disabled title="Legacy raw commands cannot execute">Display only</button>'}
+    </div>
   </section>`;
 }
 
@@ -300,14 +535,23 @@ function toolLabel(name: string): string {
     status: 'Planning', list_files: 'Listed files', read_file: 'Read file', search_code: 'Searched code',
     project_snapshot: 'Inspected project architecture',
     git_status: 'Checked Git status', git_diff: 'Read Git diff', read_instructions: 'Read instructions',
-    propose_file_change: 'Prepared file change', propose_command: 'Prepared command',
+    propose_change_set: 'Prepared change set', propose_file_change: 'Prepared legacy file change', propose_command: 'Prepared command',
   };
   return labels[name] || name.replace(/_/g, ' ');
 }
 
+function renderTaskStatus(): string {
+  const reviewCount = state.messages.reduce((count, message) => count + (message.proposals || []).filter((item) => item.changeSet?.status === 'proposed' || item.commandRun?.status === 'proposed').length, 0);
+  const run = currentAgentRun();
+  const label = !state.online ? 'Connect your local backend' : !state.ollama ? 'Connect a local model' : state.streaming ? 'Working locally' : run?.status === 'awaiting_approval' ? 'Waiting for review or verification' : run?.status === 'blocked' ? 'Task needs attention' : run?.status === 'exhausted' ? 'Task budget reached' : run?.status === 'cancelled' ? 'Task cancelled' : (run?.status === 'interrupted' || run?.status === 'running') ? 'Task interrupted · resume available' : reviewCount ? 'Ready for your review' : state.taskStatus === 'error' ? 'Request needs attention' : state.taskStatus === 'stopped' ? 'Generation stopped' : state.taskStatus === 'complete' ? 'Response complete' : 'Ready when you are';
+  const activities = state.messages.at(-1)?.activities || [];
+  const active = [...activities].reverse().find((item) => item.status === 'running');
+  return `<div class="task-status ${state.streaming ? 'working' : state.taskStatus}" role="status" aria-live="polite"><span class="task-indicator">${state.streaming ? '<i></i>' : icon(reviewCount ? 'file' : state.taskStatus === 'error' ? 'close' : 'check', 13)}</span><div><strong>${label}</strong>${state.lastError ? `<span class="task-error">${escapeHtml(state.lastError)}</span>` : active && state.streaming ? `<span>${escapeHtml(active.summary)}</span>` : ''}</div>${reviewCount ? `<button data-action="reviewPending">${reviewCount} to review</button>` : ''}</div>`;
+}
+
 function renderComposer(): string {
   const attachments = state.attachments.map((item, index) => `
-    <span class="attachment-chip" title="${escapeHtml(item.detail || item.label)}">${contextIcon(item.kind)}<span>${escapeHtml(item.label)}</span><button data-action="removeAttachment" data-index="${index}">${icon('close', 12)}</button></span>
+    <span class="attachment-chip" title="${escapeHtml(item.detail || item.label)}">${contextIcon(item.kind)}<span>${escapeHtml(item.label)}</span><button data-action="removeAttachment" data-index="${index}" aria-label="Remove ${escapeHtml(item.label)} context">${icon('close', 12)}</button></span>
   `).join('');
   const contextMenu = state.contextMenuOpen ? `
     <div class="context-menu">
@@ -317,32 +561,33 @@ function renderComposer(): string {
     </div>` : '';
   return `
     <footer class="composer-wrap">
-      <div class="mode-switch" role="tablist" aria-label="Chat mode">
-        <button data-action="setMode" data-mode="ask" class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
-        <button data-action="setMode" data-mode="agent" class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
-        <span>${state.mode === 'agent' ? (state.workspaceRegistered ? 'Can inspect and propose changes' : 'Needs an open workspace') : 'Chat with attached context'}</span>
+      ${renderTaskStatus()}
+      <div class="mode-switch" role="group" aria-label="Chat mode">
+        <button data-action="setMode" data-mode="ask" aria-pressed="${state.mode === 'ask'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
+        <button data-action="setMode" data-mode="agent" aria-pressed="${state.mode === 'agent'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
+        <span>${state.mode === 'agent' ? (state.checkingModelCapabilities ? 'Checking tool support…' : state.modelCapabilities?.agent_ready === false ? 'Choose a tool-capable model' : state.modelCapabilities?.tool_support === 'unknown' ? 'Tool support unverified · try a focused task' : state.workspaceRegistered ? 'Inspect · propose · review · verify' : state.workspace ? 'Register to inspect local files' : 'Open one workspace folder') : 'Chat with attached context'}</span>
       </div>
       ${attachments ? `<div class="attachment-list">${attachments}</div>` : ''}
       <div class="composer ${state.streaming ? 'streaming' : ''}">
-        <textarea id="prompt" rows="1" placeholder="Ask Codeme about your code…" ${state.streaming ? 'disabled' : ''}>${escapeHtml(state.composer)}</textarea>
+        <textarea id="prompt" rows="1" aria-label="Message Codeme" maxlength="100000" placeholder="${state.streaming ? 'Draft your next request…' : state.mode === 'agent' ? 'Describe a task for this workspace…' : 'Ask about your code…'}">${escapeHtml(state.composer)}</textarea>
         <div class="composer-toolbar">
           <div class="composer-left">
-            <button class="tool-button ${state.contextMenuOpen ? 'active' : ''}" data-action="toggleContext" title="Add context">${icon('paperclip', 15)}<span>Context</span></button>
-            <select id="model-select" title="Model" ${state.streaming ? 'disabled' : ''}>${state.models.map((model) => `<option value="${escapeHtml(model)}" ${model === state.selectedModel ? 'selected' : ''}>${escapeHtml(shortModelName(model))}</option>`).join('')}</select>
+            <button class="tool-button ${state.contextMenuOpen ? 'active' : ''}" data-action="toggleContext" title="Add context" aria-expanded="${state.contextMenuOpen}">${icon('paperclip', 15)}<span>Context</span></button>
+            <select id="model-select" title="Local model" aria-label="Local model" ${state.streaming || !state.models.length ? 'disabled' : ''}>${!state.models.length ? '<option value="">No local models installed</option>' : ''}${state.models.map((model) => `<option value="${escapeHtml(model)}" ${model === state.selectedModel ? 'selected' : ''}>${escapeHtml(shortModelName(model))}</option>`).join('')}</select>
           </div>
           ${state.streaming
-            ? `<button class="send-button stop" data-action="stop" title="Stop generation">${icon('stop', 16)}</button>`
-            : `<button class="send-button" data-action="send" title="Send message" ${!state.online || !state.composer.trim() ? 'disabled' : ''}>${icon('send', 16)}</button>`}
+            ? `<button class="send-button stop" data-action="stop" title="Stop generation (Esc)" aria-label="Stop generation">${icon('stop', 16)}</button>`
+            : `<button class="send-button" data-action="send" title="Send message" aria-label="Send message" ${!state.online || !state.ollama || !state.selectedModel || !state.composer.trim() || state.mode === 'agent' && (state.checkingModelCapabilities || state.modelCapabilities?.agent_ready === false) ? 'disabled' : ''}>${icon('send', 16)}</button>`}
         </div>
         ${contextMenu}
       </div>
-      <div class="composer-hint"><span>Enter to send · Shift+Enter for new line</span><span>Local · private</span></div>
+      <div class="composer-hint"><span>Enter to send · Shift+Enter for new line</span><span>${state.attachments.length ? `${Math.ceil(state.attachments.reduce((size, item) => size + item.content.length, 0) / 1024)} KB context · ` : ''}Local only</span></div>
     </footer>
   `;
 }
 
-function renderMarkdown(text: string): string {
-  const html = marked.parse(text || '', { gfm: true, breaks: true });
+function renderMarkdown(text: string, codeActions = true): string {
+  const html = safeMarkdown(text);
   const template = document.createElement('template');
   template.innerHTML = html;
   template.content.querySelectorAll('script, style, iframe, object, embed, link, meta, form').forEach((node) => node.remove());
@@ -358,7 +603,10 @@ function renderMarkdown(text: string): string {
       element.setAttribute('rel', 'noreferrer noopener');
     }
   });
+  const codeTargets = inferCodeBlockTargets(text);
+  let codeBlockIndex = 0;
   template.content.querySelectorAll('pre code').forEach((code) => {
+    const targetPath = codeTargets[codeBlockIndex++];
     const languageClass = Array.from(code.classList).find((name) => name.startsWith('language-'));
     const language = languageClass?.slice('language-'.length) || 'code';
     const grammar = Prism.languages[language];
@@ -368,9 +616,11 @@ function renderMarkdown(text: string): string {
     }
     const pre = code.closest('pre');
     if (pre) {
+      if (targetPath) pre.dataset.targetPath = targetPath;
+      if (!codeActions) return;
       const toolbar = document.createElement('div');
       toolbar.className = 'code-toolbar';
-      toolbar.innerHTML = `<span>${escapeHtml(language)}</span><div><button class="code-apply" title="Apply at selection or cursor">${icon('apply', 13)} Apply</button><button class="code-open" title="Open in editor">${icon('external', 13)} Open</button><button class="code-copy" title="Copy code">${icon('copy', 13)} Copy</button></div>`;
+      toolbar.innerHTML = `<span title="${escapeHtml(targetPath || language)}">${escapeHtml(targetPath || language)}</span><div><button class="code-apply" title="${targetPath ? `Replace ${escapeHtml(targetPath)}` : 'Choose where to apply'}">${icon('apply', 13)} Apply</button><button class="code-open" title="${targetPath ? 'Open proposed diff' : 'Open generated code'}">${icon('external', 13)} Open</button><button class="code-copy" title="Copy code">${icon('copy', 13)} Copy</button></div>`;
       pre.prepend(toolbar);
     }
   });
@@ -403,14 +653,19 @@ function formatRelativeDate(value: string): string {
 function persistState(): void {
   vscode.setState?.({
     messages: state.messages,
+    attachments: state.attachments,
     conversations: state.conversations,
     currentConversationId: state.currentConversationId,
     composer: state.composer,
     selectedModel: state.selectedModel,
+    pendingCatalogId: state.pendingCatalogId,
     models: state.models,
     workspace: state.workspace,
     rootPath: state.rootPath,
     mode: state.mode,
+    verifications: state.verifications,
+    agentRuns: state.agentRuns,
+    provider: state.provider,
   });
 }
 
@@ -423,6 +678,7 @@ function scrollToBottom(): void {
   const scroller = document.getElementById('chat-scroll');
   if (scroller) {
     scroller.scrollTop = scroller.scrollHeight;
+    scroller.classList.remove('is-scrolled-up');
   }
 }
 
@@ -455,11 +711,20 @@ function submitPrompt(): void {
   if (!prompt || state.streaming) {
     return;
   }
-  if (!state.online) {
-    showToast('Start the backend before sending a message.');
+  if (!state.online || !state.ollama) {
+    showToast(!state.online ? 'Start the backend before sending a message.' : 'Your local model is being prepared. Check setup progress above.');
     return;
   }
+  if (!state.selectedModel || !state.models.includes(state.selectedModel)) { showToast('Set up and select a local coding model before sending.'); return; }
+  if (state.mode === 'agent' && (state.checkingModelCapabilities || state.modelCapabilities?.agent_ready === false)) {
+    showToast(state.checkingModelCapabilities ? 'Checking this model’s tool support.' : 'Choose Ask mode or a tool-capable model for Agent tasks.');
+    return;
+  }
+  if (prompt.length > 100_000) { showToast('Keep your request below 100,000 characters.'); return; }
   const attachments = [...state.attachments];
+  activeRequestId = `${Date.now()}-${++requestSequence}`;
+  state.taskStatus = 'working';
+  state.lastError = null;
   state.messages.push({ role: 'user', content: prompt, attachments });
   state.composer = '';
   state.attachments = [];
@@ -470,6 +735,7 @@ function submitPrompt(): void {
     command: 'startChat',
     args: {
       prompt,
+      requestId: activeRequestId,
       conversationId: state.currentConversationId,
       model: state.selectedModel,
       context: attachments,
@@ -479,11 +745,16 @@ function submitPrompt(): void {
 }
 
 function newChat(): void {
+  activeRequestId = null;
+  vscode.postMessage({ command: 'abandonChat' });
+  state.taskStatus = 'idle';
+  state.lastError = null;
   state.currentConversationId = null;
   state.messages = [];
   state.composer = '';
   state.attachments = [];
   state.streaming = false;
+  state.loadingConversation = false;
   state.historyOpen = false;
   render();
   focusComposer();
@@ -492,6 +763,10 @@ function newChat(): void {
 function addAttachment(attachment: Attachment): void {
   const duplicate = state.attachments.some((item) => item.kind === attachment.kind && item.detail === attachment.detail && item.label === attachment.label);
   if (!duplicate) {
+    if (state.attachments.reduce((size, item) => size + item.content.length, attachment.content.length) > 175_000) {
+      showToast('Context is too large. Attach a smaller selection or remove a file.');
+      return;
+    }
     state.attachments.push(attachment);
   }
   state.contextMenuOpen = false;
@@ -529,7 +804,7 @@ if (app) {
       const pre = (codeOpen || codeApply)?.closest('pre');
       const code = pre?.querySelector('code');
       const language = Array.from(code?.classList || []).find((name) => name.startsWith('language-'))?.slice(9) || 'plaintext';
-      vscode.postMessage({ command: codeApply ? 'applyCode' : 'openCode', args: { text: code?.textContent || '', language } });
+      vscode.postMessage({ command: codeApply ? 'applyCode' : 'openCode', args: { text: code?.textContent || '', language, path: pre?.dataset.targetPath } });
       if (codeApply) showToast('Review the apply confirmation in VS Code');
       return;
     }
@@ -542,7 +817,29 @@ if (app) {
     if (!button) return;
     const action = button.dataset.action;
     if (action === 'newChat') newChat();
-    if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); }
+    if (action === 'scrollLatest') scrollToBottom();
+    if (action === 'reviewPending') {
+      app.querySelector('[data-action="applyChangeSet"], [data-action="runCommandProposal"]')?.closest('section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
+    }
+    if (action === 'registerWorkspace') vscode.postMessage({ command: 'registerWorkspace' });
+    if (action === 'setupModel' || action === 'cancelModelSetup') vscode.postMessage({ command: action });
+    if (action === 'toggleModelCatalog') {
+      state.catalogOpen = !state.catalogOpen;
+      if (state.catalogOpen) requestModelCatalog();
+      render();
+      document.getElementById(state.catalogOpen ? 'coding-models-title' : 'model-catalog-toggle')?.focus();
+    }
+    if (action === 'refreshModelCatalog') { requestModelCatalog(); render(); }
+    if (action === 'chooseCatalogModel' && !state.catalogPending && !state.streaming) {
+      const entry = state.modelCatalog?.models.find(model => model.id === button.dataset.catalogId);
+      if (!entry || !state.modelCatalog?.download_supported || state.modelSetup && (setupActive(state.modelSetup.state) || !state.modelSetup.can_retry)) return;
+      state.pendingCatalogId = entry.id;
+      state.catalogPending = true;
+      state.catalogError = '';
+      render();
+      vscode.postMessage({ command: 'chooseCatalogModel', args: { catalogId: entry.id } });
+    }
+    if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); if (state.historyOpen) document.getElementById('history-search')?.focus(); else focusComposer(); }
     if (action === 'settings') vscode.postMessage({ command: 'openSettings' });
     if (action === 'health') vscode.postMessage({ command: 'healthCheck' });
     if (action === 'startBackend') vscode.postMessage({ command: 'startBackend' });
@@ -550,8 +847,18 @@ if (app) {
     if (action === 'requestContext') vscode.postMessage({ command: 'requestContext', args: { kind: button.dataset.kind } });
     if (action === 'removeAttachment') { state.attachments.splice(Number(button.dataset.index), 1); render(); focusComposer(); }
     if (action === 'send') submitPrompt();
-    if (action === 'setMode') { state.mode = button.dataset.mode === 'ask' ? 'ask' : 'agent'; render(); focusComposer(); }
+    if (action === 'setMode' && !state.streaming) { state.mode = button.dataset.mode === 'ask' ? 'ask' : 'agent'; render(); focusComposer(); }
     if (action === 'stop') vscode.postMessage({ command: 'cancelStream' });
+    if (action === 'resumeAgentRun' && !state.streaming) {
+      activeRequestId = 'resume-' + Date.now() + '-' + (++requestSequence);
+      state.streaming = true;
+      state.taskStatus = 'working';
+      state.lastError = null;
+      state.messages.push({ role: 'assistant', model: state.selectedModel, content: '', activities: [], proposals: [] });
+      render();
+      vscode.postMessage({ command: action, args: { runId: button.dataset.runId, requestId: activeRequestId } });
+    }
+    if (action === 'cancelAgentRun') vscode.postMessage({ command: action, args: { runId: button.dataset.runId } });
     if (action === 'quickPrompt') {
       state.composer = button.dataset.prompt || '';
       state.contextMenuOpen = false;
@@ -563,6 +870,10 @@ if (app) {
     }
     if (action === 'loadConversation') {
       const conversationId = Number(button.dataset.id);
+      activeRequestId = null;
+      state.streaming = false;
+      state.taskStatus = 'idle';
+      state.lastError = null;
       state.loadingConversation = true;
       state.historyOpen = false;
       render();
@@ -597,13 +908,62 @@ if (app) {
         focusComposer();
       }
     }
-    if (action === 'applyProposal' || action === 'runProposal') {
+    if (action === 'applyProposal' || action === 'runProposal' || action === 'openProposal' || action === 'copyProposal') {
       const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
       if (!item) return;
+      if (action === 'copyProposal') {
+        vscode.postMessage({ command: 'copyText', args: { text: item.kind === 'file_change' ? item.content || '' : item.command || '' } });
+        showToast(item.kind === 'file_change' ? 'Proposed file copied' : 'Command copied');
+        return;
+      }
+      if (action === 'openProposal') {
+        vscode.postMessage({ command: 'previewFileChange', args: { path: item.path, content: item.content } });
+        return;
+      }
       vscode.postMessage({
         command: action === 'applyProposal' ? 'applyFileChange' : 'runProposedCommand',
         args: { path: item.path, content: item.content, command: item.command, explanation: item.explanation },
       });
+    }
+    if (action === 'previewChangeSet' || action === 'applyChangeSet' || action === 'rejectChangeSet' || action === 'restoreChangeSet') {
+      const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
+      if (!item?.changeSet) return;
+      vscode.postMessage({ command: action, args: { changeSet: item.changeSet } });
+    }
+    if (action === 'startVerification') {
+      const messageIndex = Number(button.dataset.messageIndex);
+      const item = state.messages[messageIndex]?.proposals?.[Number(button.dataset.proposalIndex)];
+      const request = [...state.messages.slice(0, messageIndex)].reverse().find((message) => message.role === 'user')?.content
+        || 'Verify the applied change set';
+      if (item?.changeSet && state.currentConversationId) {
+        vscode.postMessage({
+          command: 'startVerification',
+          args: { conversationId: state.currentConversationId, sourceChangeSetId: item.changeSet.id, originalRequest: request, mode: 'quick' },
+        });
+      }
+    }
+    if (['approveVerification', 'rejectVerification', 'cancelVerification', 'applyVerificationRepair', 'rejectVerificationRepair', 'restoreVerificationRepair'].includes(action || '')) {
+      vscode.postMessage({ command: action, args: { sessionId: button.dataset.sessionId } });
+    }
+    if (action === 'previewVerificationRepair') {
+      vscode.postMessage({ command: action, args: { sessionId: button.dataset.sessionId, changeSetId: button.dataset.changeSetId } });
+    }
+    if (action === 'runCommandProposal' || action === 'rejectCommandProposal' || action === 'cancelCommandRun' || action === 'copyCommandOutput') {
+      const item = state.messages[Number(button.dataset.messageIndex)]?.proposals?.[Number(button.dataset.proposalIndex)];
+      if (!item?.commandRun) return;
+      if (action === 'copyCommandOutput') {
+        vscode.postMessage({ command: 'copyText', args: { text: [item.stdout || '', item.stderr || ''].filter(Boolean).join('\n') } });
+        showToast('Command output copied');
+        return;
+      }
+      vscode.postMessage({
+        command: action,
+        args: action === 'cancelCommandRun' ? { commandRunId: item.commandRun.id } : { commandRun: item.commandRun },
+      });
+    }
+    if (action === 'copyCommandDetails') {
+      vscode.postMessage({ command: 'copyText', args: { text: button.dataset.details || '' } });
+      showToast('Command details copied');
     }
   });
 
@@ -613,12 +973,14 @@ if (app) {
       state.composer = input.value;
       resizeComposer(input as HTMLTextAreaElement);
       const sendButton = app.querySelector<HTMLButtonElement>('[data-action="send"]');
-      if (sendButton) sendButton.disabled = !state.online || !state.composer.trim();
+      if (sendButton) sendButton.disabled = !state.online || !state.ollama || !state.composer.trim();
       persistState();
     }
     if (input.id === 'history-search') {
       state.conversationSearch = input.value;
-      vscode.postMessage({ command: 'searchConversations', args: { query: input.value.trim() } });
+      const query = input.value.trim();
+      window.clearTimeout(historySearchTimer);
+      historySearchTimer = window.setTimeout(() => vscode.postMessage({ command: 'searchConversations', args: { query } }), 180);
     }
   });
 
@@ -626,6 +988,9 @@ if (app) {
     const select = event.target as HTMLSelectElement;
     if (select.id === 'model-select') {
       state.selectedModel = select.value;
+      state.pendingCatalogId = null;
+      checkSelectedModel();
+      render();
       persistState();
     }
   });
@@ -637,22 +1002,100 @@ if (app) {
       keyboardEvent.preventDefault();
       submitPrompt();
     }
+    if (keyboardEvent.key === 'Tab' && state.historyOpen) {
+      const controls = Array.from(app.querySelectorAll<HTMLElement>('.history-drawer button, .history-drawer input'));
+      const first = controls[0];
+      const last = controls.at(-1);
+      if (keyboardEvent.shiftKey && target === first) { keyboardEvent.preventDefault(); last?.focus(); }
+      else if (!keyboardEvent.shiftKey && target === last) { keyboardEvent.preventDefault(); first?.focus(); }
+    }
     if (keyboardEvent.key === 'Escape' && (state.historyOpen || state.contextMenuOpen)) {
       state.historyOpen = false;
       state.contextMenuOpen = false;
       render();
+      focusComposer();
+    } else if (keyboardEvent.key === 'Escape' && state.streaming) {
+      vscode.postMessage({ command: 'cancelStream' });
     }
   });
+  app.addEventListener('scroll', (event) => {
+    const scroller = event.target as HTMLElement;
+    if (scroller.id === 'chat-scroll') scroller.classList.toggle('is-scrolled-up', !isNearBottom());
+  }, true);
 }
 
 window.addEventListener('message', (event) => {
   const message = event.data as { command?: string; payload?: any };
+  const requestEvents = ['conversationCreated', 'streamStarted', 'streamChunk', 'agentEvent', 'streamComplete', 'streamStopped', 'streamError'];
+  if (requestEvents.includes(message.command || '') && message.payload?.requestId && message.payload.requestId !== activeRequestId) return;
+  if (requestEvents.includes(message.command || '') && !message.payload?.requestId && message.payload?.conversationId && message.payload.conversationId !== state.currentConversationId) return;
   switch (message.command) {
+    case 'modelCatalog':
+      if (message.payload?.requestId !== catalogRequestId) break;
+      state.modelCatalog = message.payload.catalog as ModelCatalog;
+      state.catalogLoading = false;
+      state.catalogError = '';
+      render();
+      break;
+    case 'modelCatalogError':
+      if (message.payload?.requestId !== catalogRequestId) break;
+      state.catalogLoading = false;
+      state.catalogError = message.payload.message || 'Could not load coding models. Try Refresh models.';
+      render();
+      break;
+    case 'modelCatalogActionDone':
+      state.catalogPending = false;
+      state.catalogError = message.payload?.error || '';
+      if (state.catalogError) state.pendingCatalogId = null;
+      render();
+      break;
+    case 'modelSetupStatus':
+      state.modelSetup = message.payload as ModelSetupStatus;
+      state.online = true;
+      state.ollama = state.modelSetup.state === 'ready';
+      state.provider = state.modelSetup.provider === 'ollama' ? 'Ollama' : 'Local compatible server';
+      state.models = state.modelSetup.available_models;
+      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel
+        : state.models.includes(state.modelSetup.model || '') ? state.modelSetup.model! : state.models[0] || '';
+      const preparedCatalogModel = readyCatalogModel(state.pendingCatalogId, state.modelSetup);
+      if (preparedCatalogModel) {
+        state.selectedModel = preparedCatalogModel;
+        state.pendingCatalogId = null;
+        if (state.catalogOpen) requestModelCatalog();
+      }
+      if (state.taskStatus !== 'error') state.lastError = null;
+      if (state.modelSetup.state === 'ready' && state.selectedModel) {
+        if (state.selectedModel === state.modelSetup.model) {
+          modelCapabilityRequest++;
+          state.checkingModelCapabilities = false;
+          state.modelCapabilities = { model: state.selectedModel, provider: state.modelSetup.provider,
+            agent_ready: state.modelSetup.agent_ready ?? null, tool_support: state.modelSetup.tool_support || 'unknown',
+            model_capabilities: state.modelSetup.model_capabilities || [] };
+        } else checkSelectedModel();
+      }
+      render();
+      break;
+    case 'modelCapabilities':
+      if (message.payload?.requestId !== modelCapabilityRequest || message.payload?.model !== state.selectedModel || !state.online) break;
+      state.modelCapabilities = message.payload as ModelCapabilities;
+      state.checkingModelCapabilities = false;
+      render();
+      break;
+    case 'modelCapabilityError':
+      if (message.payload?.requestId !== modelCapabilityRequest || message.payload?.model !== state.selectedModel || !state.online) break;
+      state.modelCapabilities = null;
+      state.checkingModelCapabilities = false;
+      render();
+      showToast('Tool support could not be checked. Agent mode will validate the model before starting.');
+      break;
     case 'backendStatus':
       state.online = Boolean(message.payload?.online);
       state.ollama = Boolean(message.payload?.ollama);
-      state.models = message.payload?.models?.length ? message.payload.models : state.models;
-      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel : (message.payload?.model || state.models[0]);
+      state.provider = String(message.payload?.provider || 'Ollama');
+      if (!state.online && message.payload?.error) state.lastError = String(message.payload.error);
+      else if (state.online && state.taskStatus !== 'error') state.lastError = null;
+      state.models = Array.isArray(message.payload?.models) ? message.payload.models : state.models;
+      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel : state.models.includes(message.payload?.model) ? message.payload.model : (state.models[0] || '');
       render();
       if (!state.online && message.payload?.error) showToast('Backend unavailable');
       break;
@@ -660,6 +1103,7 @@ window.addEventListener('message', (event) => {
       state.workspace = message.payload?.workspace || null;
       state.rootPath = message.payload?.rootPath || null;
       state.workspaceRegistered = Boolean(message.payload?.registered);
+      state.workspaceFolders = Number(message.payload?.folders || 0);
       render();
       break;
     case 'conversationsUpdated':
@@ -671,18 +1115,21 @@ window.addEventListener('message', (event) => {
       if (message.payload) state.conversations = [message.payload, ...state.conversations.filter((item) => item.id !== message.payload.id)];
       render();
       break;
-    case 'conversationLoaded':
+    case 'conversationLoaded': {
+      const cached = state.currentConversationId === message.payload?.conversationId ? state.messages : [];
       state.currentConversationId = message.payload?.conversationId || null;
-      state.messages = (message.payload?.messages || []).map((item: ChatMessage) => ({
-        id: item.id,
-        role: item.role,
-        content: item.role === 'user' ? item.content.split('\n\nContext:')[0] : item.content,
-      }));
+      state.messages = (message.payload?.messages || []).map((item: ChatMessage) => {
+        const previous = cached.find((saved) => saved.role === item.role && saved.content === item.content);
+        return { ...previous, id: item.id, role: item.role, content: item.content };
+      });
       state.loadingConversation = false;
       state.streaming = false;
+      state.taskStatus = 'idle';
+      state.lastError = null;
       render();
       requestAnimationFrame(scrollToBottom);
       break;
+    }
     case 'conversationDeleted':
       if (state.currentConversationId === message.payload?.conversationId) newChat();
       break;
@@ -696,6 +1143,8 @@ window.addEventListener('message', (event) => {
       applyContextAction(message.payload as { action: string; context: Attachment });
       break;
     case 'streamStarted':
+      state.taskStatus = 'working';
+      state.lastError = null;
       state.currentConversationId = message.payload?.conversationId || state.currentConversationId;
       state.streaming = true;
       render();
@@ -704,16 +1153,61 @@ window.addEventListener('message', (event) => {
       const chunk = typeof message.payload?.chunk === 'string' ? message.payload.chunk : '';
       const last = state.messages[state.messages.length - 1];
       if (last?.role === 'assistant') last.content += chunk;
-      else state.messages.push({ role: 'assistant', content: chunk });
+      else state.messages.push({ role: 'assistant', model: state.selectedModel, content: chunk });
       state.streaming = true;
+      scheduleRender();
+      break;
+    }
+    case 'agentRunUpdated': {
+      updateAgentRun(message.payload as AgentRun);
+      render();
+      break;
+    }
+    case 'taskNotice':
+      if (message.payload?.conversationId === state.currentConversationId) {
+        state.streaming = false;
+        render();
+        showToast(message.payload?.message || 'Review saved actions before resuming.');
+      }
+      break;
+    case 'agentProposalRecovered': {
+      if (message.payload?.conversationId !== state.currentConversationId) break;
+      const changeSet = message.payload?.changeSet as ChangeSet | undefined;
+      const commandRun = message.payload?.commandRun as CommandRun | undefined;
+      const exists = state.messages.some((item) => item.proposals?.some((proposal) =>
+        changeSet ? proposal.changeSet?.id === changeSet.id : proposal.commandRun?.id === commandRun?.id));
+      if (!exists) {
+        let assistant = [...state.messages].reverse().find((item) => item.role === 'assistant');
+        if (!assistant) { assistant = { role: 'assistant', content: '' }; state.messages.push(assistant); }
+        assistant.proposals ||= [];
+        if (changeSet) assistant.proposals.push({ kind: 'change_set', changeSet });
+        if (commandRun) assistant.proposals.push({ kind: 'command_proposal', commandRun });
+      }
       render();
       break;
     }
     case 'agentEvent': {
       const agentEvent = message.payload?.event;
+      if (agentEvent?.type === 'task') {
+        updateAgentRun(agentEvent.run);
+        scheduleRender();
+        break;
+      }
+      if (agentEvent?.type === 'plan') {
+        const run = currentAgentRun();
+        if (run) run.plan = agentEvent.steps || [];
+        scheduleRender();
+        break;
+      }
+      if (agentEvent?.type === 'outcome') {
+        const run = currentAgentRun();
+        if (run) { run.status = agentEvent.status; run.summary = agentEvent.summary; }
+        scheduleRender();
+        break;
+      }
       let assistant = state.messages[state.messages.length - 1];
       if (assistant?.role !== 'assistant') {
-        assistant = { role: 'assistant', content: '', activities: [], proposals: [] };
+        assistant = { role: 'assistant', model: state.selectedModel, content: '', activities: [], proposals: [] };
         state.messages.push(assistant);
       }
       if (agentEvent?.type === 'status') {
@@ -722,41 +1216,60 @@ window.addEventListener('message', (event) => {
       } else if (agentEvent?.type === 'tool') {
         assistant.activities ||= [];
         const running = [...assistant.activities].reverse().find((item) => item.name === agentEvent.name && item.summary === agentEvent.summary && item.status === 'running');
-        if (agentEvent.status === 'complete' && running) running.status = 'complete';
+        if (agentEvent.status !== 'running' && running) running.status = agentEvent.status;
         else assistant.activities.push({ name: agentEvent.name, summary: agentEvent.summary, status: agentEvent.status });
       } else if (agentEvent?.type === 'proposal') {
         assistant.proposals ||= [];
-        assistant.proposals.push(agentEvent as AgentProposal);
+        if (agentEvent.command_run) {
+          const duplicate = assistant.proposals.some((proposal) => proposal.commandRun?.id === agentEvent.command_run.id);
+          if (!duplicate) assistant.proposals.push({ kind: 'command_proposal', commandRun: agentEvent.command_run });
+        } else if (agentEvent.change_set) {
+          const duplicate = assistant.proposals.some((proposal) => proposal.changeSet?.id === agentEvent.change_set.id);
+          if (!duplicate) assistant.proposals.push({ kind: 'change_set', explanation: agentEvent.change_set.summary, changeSet: agentEvent.change_set });
+        } else {
+          assistant.proposals.push(agentEvent as AgentProposal);
+        }
       } else if (agentEvent?.type === 'message') {
         assistant.content = agentEvent.content || '';
-        assistant.activities?.forEach((item) => { item.status = 'complete'; });
+        assistant.activities?.forEach((item) => { if (item.status === 'running') item.status = 'complete'; });
       }
       state.streaming = true;
-      render();
+      scheduleRender();
       break;
     }
     case 'streamComplete':
+    case 'streamStopped':
       state.streaming = false;
+      state.taskStatus = message.command === 'streamStopped' ? 'stopped' : 'complete';
+      state.messages.at(-1)?.activities?.forEach((item) => { if (item.status === 'running') item.status = message.command === 'streamStopped' ? 'stopped' : 'complete'; });
       render();
+      focusComposer();
       break;
     case 'streamError': {
       state.streaming = false;
       const errorMessage = message.payload?.message || 'Unable to generate a response.';
+      state.taskStatus = 'error';
+      state.lastError = errorMessage;
+      state.messages.at(-1)?.activities?.forEach((item) => { if (item.status === 'running') item.status = 'error'; });
       const last = state.messages[state.messages.length - 1];
       if (!last || last.role !== 'assistant' || !last.content) {
         state.messages.push({ role: 'assistant', content: errorMessage, error: true });
       }
       render();
       showToast(errorMessage);
+      focusComposer();
       break;
     }
     case 'operationError':
       state.loadingConversation = false;
+      state.lastError = message.payload?.message || 'Operation failed';
+      state.taskStatus = 'error';
       render();
       showToast(message.payload?.message || 'Operation failed');
       break;
     case 'workspaceRegistered':
       state.workspaceRegistered = true;
+      render();
       showToast('Workspace registered');
       break;
     case 'proposalApplied': {
@@ -769,6 +1282,62 @@ window.addEventListener('message', (event) => {
       showToast(kind === 'command' ? 'Command started in terminal' : 'File change applied');
       break;
     }
+    case 'changeSetUpdated': {
+      const updated = message.payload as ChangeSet;
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.changeSet?.id === updated.id);
+        if (proposal) proposal.changeSet = updated;
+      }
+      render();
+      showToast(`Change set ${updated.status}`);
+      break;
+    }
+    case 'commandRunUpdated': {
+      const updated = message.payload as CommandRun;
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.commandRun?.id === updated.id);
+        if (proposal) proposal.commandRun = { ...proposal.commandRun, ...updated };
+      }
+      render();
+      showToast(`Command ${updated.status}`);
+      break;
+    }
+    case 'commandRunOutput': {
+      const output = message.payload as { commandRunId: string; stream: 'stdout' | 'stderr' | 'status'; text: string };
+      for (const chatMessage of state.messages) {
+        const proposal = chatMessage.proposals?.find((item) => item.commandRun?.id === output.commandRunId);
+        if (!proposal) continue;
+        if (output.stream === 'stdout') proposal.stdout = (proposal.stdout || '') + output.text;
+        else if (output.stream === 'stderr') proposal.stderr = (proposal.stderr || '') + output.text;
+      }
+      scheduleRender();
+      break;
+    }
+    case 'verificationSessionUpdated': {
+      const updated = message.payload as VerificationSession;
+      const index = state.verifications.findIndex((item) => item.id === updated.id);
+      if (index >= 0) {
+        const outputs = new Map(state.verifications[index].steps.map((step) => [step.step_id, step.output]));
+        updated.steps.forEach((step) => { step.output = outputs.get(step.step_id); });
+        state.verifications[index] = updated;
+      } else {
+        state.verifications.push(updated);
+      }
+      render();
+      break;
+    }
+    case 'verificationStepOutput': {
+      const session = state.verifications.find((item) => item.id === message.payload?.sessionId);
+      const step = session?.steps.find((item) => item.step_id === message.payload?.stepId);
+      if (step && ['stdout', 'stderr'].includes(message.payload?.stream)) {
+        step.output = ((step.output || '') + String(message.payload?.text || '')).slice(-65_536);
+      }
+      scheduleRender();
+      break;
+    }
+    case 'verificationRepairStarted':
+      showToast('Preparing a bounded repair proposal with the local model');
+      break;
   }
 });
 

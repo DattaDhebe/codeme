@@ -1,15 +1,23 @@
 {
   "name": "personal-codeme",
-  "displayName": "Personal Codeme",
+  "displayName": "CodeMe",
   "publisher": "personal-codex-local",
-  "description": "A local-first Copilot-style coding assistant powered by Ollama.",
-  "repository": "https://github.com/personal-codex-local/personal-codex",
+  "description": "CodeMe by DHEBE Studios: local coding models, reviewable edits, durable tasks and approved checks in VS Code.",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DattaDhebe/codeme.git",
+    "directory": "vscode-extension"
+  },
   "license": "MIT",
-  "version": "0.3.0",
+  "version": "0.7.0",
   "engines": {
     "vscode": "^1.90.0"
   },
-  "categories": ["Other"],
+  "categories": [
+    "Programming Languages",
+    "Machine Learning",
+    "Other"
+  ],
   "activationEvents": [
     "onCommand:personalCodeme.openChat",
     "onCommand:personalCodex.newChat",
@@ -28,20 +36,25 @@
   "scripts": {
     "build:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --sourcemap",
     "build:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --sourcemap --minify",
-    "build": "npm run build:extension && npm run build:webview",
+    "build": "npm run build:notices && npm run build:extension && npm run build:webview",
     "watch:extension": "esbuild src/extension.ts --bundle --platform=node --target=node18 --outfile=dist/extension.js --external:vscode --watch",
     "watch:webview": "esbuild src/webview/webview.ts --bundle --platform=browser --target=es2020 --outfile=dist/webview.js --watch",
     "watch": "npm-run-all --parallel watch:extension watch:webview",
     "lint": "npm run typecheck",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "test:integration": "node ./dist/test/runTest.js",
-    "package": "vsce package --out personal-codeme-0.3.0.vsix"
+    "test:integration": "node ./scripts/native-test-runner.cjs",
+    "package": "vsce package --out personal-codeme-0.7.0.vsix --baseContentUrl https://github.com/DattaDhebe/codeme/blob/main/vscode-extension/ --baseImagesUrl https://raw.githubusercontent.com/DattaDhebe/codeme/main/vscode-extension/",
+    "prepackage": "npm run build:notices",
+    "build:notices": "node ./scripts/build-notices.cjs"
   },
   "files": [
     "dist/**",
     "media/**",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md",
+    "NOTICE",
+    "THIRD_PARTY_NOTICES.txt"
   ],
   "devDependencies": {
     "@types/node": "^20.11.0",
@@ -62,32 +75,111 @@
   },
   "contributes": {
     "configuration": {
-      "title": "Personal Codeme",
+      "title": "CodeMe",
       "properties": {
         "personalCodex.backendUrl": {
           "type": "string",
           "default": "http://127.0.0.1:8000",
-          "description": "Local Personal Codeme backend URL."
+          "description": "Local CodeMe backend URL."
         },
         "personalCodex.defaultModel": {
           "type": "string",
           "default": "qwen2.5-coder:7b",
-          "description": "Default Ollama model requested by Personal Codeme."
+          "description": "Default local model requested by CodeMe."
         },
         "personalCodex.autoRegisterWorkspace": {
           "type": "boolean",
           "default": false,
-          "description": "Ask before registering an opened workspace folder with Personal Codeme."
+          "description": "Ask before registering an opened workspace folder with CodeMe."
         },
         "personalCodex.requireWriteApproval": {
           "type": "boolean",
           "default": true,
           "description": "Require user approval for write or tool-execution actions."
         },
+        "personalCodex.enableUnsafeCommandExecution": {
+          "type": "boolean",
+          "default": false,
+          "description": "Deprecated compatibility setting. Raw command proposals are display-only and cannot bypass the controlled runner.",
+          "deprecationMessage": "Deprecated: raw command proposals are display-only. Use structured controlled command profiles."
+        },
+        "personalCodex.pythonExecutable": {
+          "type": "string",
+          "default": "python",
+          "description": "User-controlled trusted Python executable name for pytest and python_module profiles."
+        },
+        "personalCodex.npmExecutable": {
+          "type": "string",
+          "default": "npm",
+          "description": "User-controlled trusted npm wrapper for controlled npm profiles."
+        },
+        "personalCodex.dotnetExecutable": {
+          "type": "string",
+          "default": "dotnet",
+          "description": "User-controlled trusted dotnet executable for controlled .NET profiles."
+        },
+        "personalCodex.mavenExecutable": {
+          "type": "string",
+          "default": "mvn",
+          "description": "User-controlled trusted Maven wrapper for controlled Maven profiles."
+        },
+        "personalCodex.gradleExecutable": {
+          "type": "string",
+          "default": "gradle",
+          "description": "User-controlled trusted Gradle wrapper for controlled Gradle profiles."
+        },
+        "personalCodex.gitExecutable": {
+          "type": "string",
+          "default": "git",
+          "description": "User-controlled trusted Git executable for read-only status and diff profiles."
+        },
+        "personalCodex.customExecutableAllowlist": {
+          "type": "object",
+          "default": {},
+          "additionalProperties": {
+            "type": "string"
+          },
+          "description": "Explicit user-owned alias-to-executable allowlist. Repository content cannot modify it."
+        },
+        "personalCodex.commandOutputLimitBytes": {
+          "type": "number",
+          "default": 1048576,
+          "minimum": 16384,
+          "maximum": 4194304,
+          "description": "Maximum command output streamed into the sidebar; pipes continue to be drained after this cap."
+        },
+        "personalCodex.commandTailLimitBytes": {
+          "type": "number",
+          "default": 65536,
+          "minimum": 8192,
+          "maximum": 65536,
+          "description": "Maximum bounded stdout and stderr tail retained for durable results."
+        },
+        "personalCodex.verificationMaximumRepairAttempts": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Maximum proposed repair attempts in one approved bounded verification session."
+        },
+        "personalCodex.verificationMaximumReruns": {
+          "type": "number",
+          "default": 2,
+          "minimum": 0,
+          "maximum": 2,
+          "description": "Maximum exact-plan reruns after approved repairs."
+        },
+        "personalCodex.verificationTimeBudgetSeconds": {
+          "type": "number",
+          "default": 600,
+          "minimum": 30,
+          "maximum": 1200,
+          "description": "Total wall-clock budget for one verification and repair session."
+        },
         "personalCodex.showNotifications": {
           "type": "boolean",
           "default": true,
-          "description": "Show Personal Codeme notifications for backend status and workspace actions."
+          "description": "Show CodeMe notifications for backend status and workspace actions."
         }
       }
     },
@@ -95,8 +187,8 @@
       "activitybar": [
         {
           "id": "personalCodeme",
-          "title": "Personal Codeme",
-          "icon": "media/personal-codex.svg"
+          "title": "CodeMe",
+          "icon": "media/codeme-activity.svg"
         }
       ]
     },
@@ -104,7 +196,7 @@
       "personalCodeme": [
         {
           "id": "personalCodemeSidebar",
-          "name": "Personal Codeme",
+          "name": "CodeMe",
           "type": "webview"
         }
       ]
@@ -112,62 +204,84 @@
     "commands": [
       {
         "command": "personalCodeme.openChat",
-        "title": "Personal Codeme: Open Chat"
+        "title": "CodeMe: Open Chat"
       },
       {
         "command": "personalCodex.newChat",
-        "title": "Personal Codeme: New Chat"
+        "title": "CodeMe: New Chat"
       },
       {
         "command": "personalCodex.explainSelection",
-        "title": "Personal Codeme: Explain Selected Code"
+        "title": "CodeMe: Explain Selected Code"
       },
       {
         "command": "personalCodex.fixSelection",
-        "title": "Personal Codeme: Fix Selected Code"
+        "title": "CodeMe: Fix Selected Code"
       },
       {
         "command": "personalCodex.refactorSelection",
-        "title": "Personal Codeme: Refactor Selected Code"
+        "title": "CodeMe: Refactor Selected Code"
       },
       {
         "command": "personalCodex.generateTests",
-        "title": "Personal Codeme: Generate Tests"
+        "title": "CodeMe: Generate Tests"
       },
       {
         "command": "personalCodex.askCurrentFile",
-        "title": "Personal Codeme: Ask About Current File"
+        "title": "CodeMe: Ask About Current File"
       },
       {
         "command": "personalCodex.reviewChanges",
-        "title": "Personal Codeme: Review Current Changes"
+        "title": "CodeMe: Review Current Changes"
       },
       {
         "command": "personalCodex.registerWorkspace",
-        "title": "Personal Codeme: Register Workspace"
+        "title": "CodeMe: Register Workspace"
       },
       {
         "command": "personalCodex.checkBackend",
-        "title": "Personal Codeme: Check Backend Connection"
+        "title": "CodeMe: Check Backend Connection"
       },
       {
         "command": "personalCodex.startBackend",
-        "title": "Personal Codeme: Start Local Backend"
+        "title": "CodeMe: Start Local Backend"
       }
     ],
     "menus": {
       "commandPalette": [
-        { "command": "personalCodeme.openChat" },
-        { "command": "personalCodex.newChat" },
-        { "command": "personalCodex.explainSelection" },
-        { "command": "personalCodex.fixSelection" },
-        { "command": "personalCodex.refactorSelection" },
-        { "command": "personalCodex.generateTests" },
-        { "command": "personalCodex.askCurrentFile" },
-        { "command": "personalCodex.reviewChanges" },
-        { "command": "personalCodex.registerWorkspace" },
-        { "command": "personalCodex.checkBackend" },
-        { "command": "personalCodex.startBackend" }
+        {
+          "command": "personalCodeme.openChat"
+        },
+        {
+          "command": "personalCodex.newChat"
+        },
+        {
+          "command": "personalCodex.explainSelection"
+        },
+        {
+          "command": "personalCodex.fixSelection"
+        },
+        {
+          "command": "personalCodex.refactorSelection"
+        },
+        {
+          "command": "personalCodex.generateTests"
+        },
+        {
+          "command": "personalCodex.askCurrentFile"
+        },
+        {
+          "command": "personalCodex.reviewChanges"
+        },
+        {
+          "command": "personalCodex.registerWorkspace"
+        },
+        {
+          "command": "personalCodex.checkBackend"
+        },
+        {
+          "command": "personalCodex.startBackend"
+        }
       ],
       "editor/context": [
         {
@@ -192,5 +306,26 @@
         }
       ]
     }
+  },
+  "homepage": "https://www.dhebe.com/",
+  "bugs": {
+    "url": "https://github.com/DattaDhebe/codeme/issues"
+  },
+  "author": {
+    "name": "DattaDhebe",
+    "url": "https://github.com/DattaDhebe"
+  },
+  "icon": "media/codeme.png",
+  "keywords": [
+    "codeme",
+    "local-ai",
+    "ollama",
+    "coding-agent",
+    "code-review",
+    "local-models"
+  ],
+  "galleryBanner": {
+    "color": "#111D32",
+    "theme": "dark"
   }
 }

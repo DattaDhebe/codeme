@@ -1,0 +1,17 @@
+    <section class="model-setup-panel" aria-labelledby="setup-title" [attr.aria-busy]="busy">
+      <div class="setup-heading"><span class="setup-icon" aria-hidden="true">{{ busy ? '◌' : '⌘' }}</span><div role="status"><span class="eyebrow">FIRST-RUN SETUP</span><h2 id="setup-title">{{ title }}</h2><p>{{ error || status?.message || 'Looking for a model already installed on your machine.' }}</p></div></div>
+      <ng-container *ngIf="status as setup">
+        <p class="setup-model" *ngIf="setup.model"><span>Local model</span><strong>{{ setup.model }}</strong></p>
+        <div class="setup-download" *ngIf="setup.state === 'downloading'">
+          <progress max="100" [attr.value]="percent" [attr.aria-label]="setup.progress_scope === 'layer' ? 'Current model layer download progress' : 'Model download progress'"></progress>
+          <div class="download-detail"><span><ng-container *ngIf="setup.progress_scope === 'layer'">Current layer: </ng-container>{{ formatBytes(setup.completed_bytes) }}<ng-container *ngIf="setup.total_bytes > 0"> of {{ formatBytes(setup.total_bytes) }}</ng-container></span><strong *ngIf="percent !== null">{{ percent | number:'1.0-0' }}%</strong><span *ngIf="percent === null">Waiting for download size</span></div>
+        </div>
+        <p class="setup-hint" *ngIf="setup.state === 'downloading'">The first download needs internet and may take a few minutes. Your conversations and code stay on this machine.</p>
+        <p class="setup-hint" *ngIf="setup.state === 'loading'">The model is downloaded. We are checking that it can start before you send your first message.</p>
+        <div class="setup-recovery" *ngIf="setup.state === 'runtime_missing'"><p>Run the CodeMe installer from your repository folder, then try again:</p><code>python install.py</code><p>It installs Ollama when needed. Already installed it? Start Ollama and choose Retry setup.</p></div>
+        <p class="setup-hint" *ngIf="setup.state === 'idle' && !setup.auto_setup_enabled">Automatic setup is turned off. Choose Set up model to let CodeMe reuse an installed model or download the default one.</p>
+        <p class="setup-error" *ngIf="setup.error && setup.error !== setup.message" role="alert">{{ setup.error }}</p>
+        <div class="setup-actions"><button class="button primary" *ngIf="!busy && (setup.can_retry || setup.state === 'idle')" (click)="retry.emit()">{{ setup.state === 'idle' ? 'Set up model' : 'Retry setup' }}</button><button class="button subtle" *ngIf="canCancel" (click)="cancel.emit()">Cancel setup</button><button class="button subtle" *ngIf="!busy" (click)="reconnect.emit()">Check again</button></div>
+      </ng-container>
+      <button class="button" *ngIf="error" (click)="reconnect.emit()" [disabled]="requestPending">Reconnect</button>
+    </section>

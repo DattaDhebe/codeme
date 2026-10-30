@@ -5,7 +5,10 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 
 from codeme_agent.config import settings
-from codeme_agent.db import Base, engine
+from codeme_agent.db import engine, initialize_database
+from codeme_agent.local_access import LocalAccessMiddleware
+from codeme_agent.model_client import create_model_client
+from codeme_agent.model_setup import model_setup
 from codeme_agent.ollama import OllamaClient, OllamaError
 from codeme_agent.routers import router
 from codeme_agent.schemas import GenerateRequest, GenerateResponse
@@ -15,8 +18,13 @@ from codeme_agent.workspace import WorkspaceError
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
+    initialize_database(engine)
+    if settings.auto_model_setup:
+        model_setup.start()
+    try:
+        yield
+    finally:
+        model_setup.shutdown()
 
 
 app = FastAPI(
@@ -32,6 +40,8 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+app.add_middleware(LocalAccessMiddleware, allowed_origins=settings.cors_origins)
 
 app.include_router(router)
 
@@ -49,34 +59,44 @@ def health():
 @app.get("/api/health")
 def api_health():
     try:
-        models = OllamaClient().list_models()
+        models = create_model_client().list_models()
     except OllamaError as exc:
         return JSONResponse(
             status_code=503,
-            content={"status": "error", "ollama": "unavailable", "detail": str(exc)},
+            content={"status": "error", "ollama": "unavailable", "provider": settings.model_provider, "detail": str(exc)},
         )
 
-    if settings.default_model not in models:
+    configured = settings.default_model
+    available = (configured in models or (settings.model_provider == "ollama"
+                 and OllamaClient._model_key(configured) in {OllamaClient._model_key(item) for item in models}))
+    if not available:
         return JSONResponse(
             status_code=503,
             content={
                 "status": "error",
                 "ollama": "ok",
+                "provider": settings.model_provider,
                 "model": settings.default_model,
                 "models": models,
-                "detail": "Configured Ollama model is not installed",
+                "detail": "Configured local model is not available in the selected server",
             },
         )
 
     return {
         "status": "ok",
         "ollama": "ok",
+        "provider": settings.model_provider,
         "model": settings.default_model,
         "models": models,
     }
 
 
-@app.post("/generate", response_model=GenerateResponse)
+@app.post(
+    "/generate",
+    response_model=GenerateResponse,
+    deprecated=True,
+    summary="Legacy placeholder code-generation endpoint",
+)
 def generate(request: GenerateRequest):
     prompt = build_prompt(request)
     code = generate_code(prompt)

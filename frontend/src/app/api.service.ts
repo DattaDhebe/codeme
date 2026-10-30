@@ -1,14 +1,18 @@
 import { HttpClient, HttpHeaders } from '@angular/common/http';
 import { Injectable } from '@angular/core';
 import { Observable } from 'rxjs';
+import { RuntimeConfigService } from './runtime-config.service';
 
 import {
   ChatRequest,
+  HealthRead,
   ConversationSummary,
   FileEntry,
   FileRead,
   GitStatusResponse,
   MessageRead,
+  ModelSetupStatus,
+  ModelCatalog,
   SearchResult,
   WorkspaceRead,
 } from './models';
@@ -17,9 +21,46 @@ import {
   providedIn: 'root'
 })
 export class ApiService {
-  private readonly baseUrl = 'http://127.0.0.1:8000/api';
+  constructor(
+    private readonly http: HttpClient,
+    private readonly config: RuntimeConfigService,
+  ) {}
 
-  constructor(private readonly http: HttpClient) {}
+  private get baseUrl(): string {
+    return this.config.apiBaseUrl;
+  }
+
+  get defaultModel(): string {
+    return this.config.defaultModel;
+  }
+
+  get isBrowser(): boolean {
+    return this.config.isBrowser;
+  }
+
+  chatStreamUrl(conversationId: number): string {
+    return `${this.baseUrl}/conversations/${conversationId}/chat`;
+  }
+
+  getHealth(): Observable<HealthRead> {
+    return this.http.get<HealthRead>(`${this.baseUrl}/health`);
+  }
+
+  getModelSetup(): Observable<ModelSetupStatus> {
+    return this.http.get<ModelSetupStatus>(`${this.baseUrl}/model-setup`);
+  }
+
+  startModelSetup(catalogId?: string): Observable<ModelSetupStatus> {
+    return this.http.post<ModelSetupStatus>(`${this.baseUrl}/model-setup`, catalogId ? { catalog_id: catalogId } : {});
+  }
+
+  getModelCatalog(): Observable<ModelCatalog> {
+    return this.http.get<ModelCatalog>(`${this.baseUrl}/model-catalog`);
+  }
+
+  cancelModelSetup(): Observable<ModelSetupStatus> {
+    return this.http.delete<ModelSetupStatus>(`${this.baseUrl}/model-setup`);
+  }
 
   listConversations(query?: string): Observable<ConversationSummary[]> {
     return this.http.get<ConversationSummary[]>(`${this.baseUrl}/conversations`, {

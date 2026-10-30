@@ -1,27 +1,50 @@
-# Frontend
+# CodeMe browser app
 
-This project was generated with [Angular CLI](https://github.com/angular/angular-cli) version 18.2.21.
+This Angular 21 app provides local chat, automatic model setup with progress, conversation management, and a read-only workspace explorer. It uses the same FastAPI backend as the VS Code extension. Use Node.js 24 LTS for installation and development.
 
-## Development server
+For normal installation and launch, use `python install.py` and `python start.py` from the repository root. See [Getting started](../docs/getting-started.md).
 
-Run `ng serve` for a dev server. Navigate to `http://localhost:4200/`. The application will automatically reload if you change any of the source files.
+## First launch
 
-## Code scaffolding
+The app shows the backend's model setup state while CodeMe checks installed models, downloads missing Ollama weights when needed, and loads the chosen model. Download percentages describe the current layer; stages with no known byte total show a status instead. Ready models become available for chat without a manual integration step. Errors explain the next action and provide retry controls.
 
-Run `ng generate component component-name` to generate a new component. You can also use `ng generate directive|pipe|service|class|guard|interface|enum|module`.
+Automatic preparation can be disabled in the backend with `AUTO_MODEL_SETUP=false`. An explicit setup action remains available. Compatible local servers must have a model loaded through their own application; their common chat API does not define model installation.
 
-## Build
+## Development
 
-Run `ng build` to build the project. The build artifacts will be stored in the `dist/` directory.
+From this folder:
 
-## Running unit tests
+```console
+npm ci
+npm start
+```
 
-Run `ng test` to execute the unit tests via [Karma](https://karma-runner.github.io).
+The development app uses `http://127.0.0.1:4200`. Start the backend separately with one worker; see [Development](../docs/development.md).
 
-## Running end-to-end tests
+```console
+npm test -- --watch=false
+npm run build
+```
 
-Run `ng e2e` to execute the end-to-end tests via a platform of your choice. To use this command, you need to first add a package that implements end-to-end testing capabilities.
+Tests need a headless Chrome-compatible browser. On Windows, Karma checks Chrome and Edge; set `CHROME_BIN` if needed. The production browser output is under `dist/frontend/browser/`. `start.py` serves the built browser app locally with a single-page application fallback. The unused Node SSR server has been removed; there is no separate server-rendering command or public-interface listener.
 
-## Further help
+## Runtime configuration
 
-To get more help on the Angular CLI use `ng help` or go check out the [Angular CLI Overview and Command Reference](https://angular.dev/tools/cli) page.
+`public/runtime-config.json` is loaded before browser startup:
+
+```json
+{
+  "backendUrl": "http://127.0.0.1:8000",
+  "defaultModel": "qwen2.5-coder:7b"
+}
+```
+
+The backend URL must be HTTP(S) on a loopback host and contain no embedded credentials. `start.py` supplies the configured backend URL when serving its production browser app. For a separately served build, update the runtime file and approve that local browser origin in the backend's `CORS_ORIGINS`.
+
+The legacy `allowRemoteBackend` key does not enable network access. The prepared backend model takes precedence over an unavailable default; an available explicit selection can still be used.
+
+## Responsibilities
+
+The browser streams Markdown replies, manages conversations, displays model readiness, and lets users register and inspect local workspaces. Generated Markdown passes through Angular sanitization and additional URL/element checks. SSE parsing handles fragmented frames and JSON payloads, and each stream owns its UI updates so stale responses do not appear in another conversation.
+
+Repository tools here are read-only. Agent task review, transactional file application, checkpoints, controlled commands, and verification/repair are provided by the [VS Code extension](../vscode-extension/README.md).

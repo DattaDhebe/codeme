@@ -1,55 +1,52 @@
-<mat-sidenav-container class="chat-shell">
-  <mat-sidenav mode="side" opened class="sidebar">
-    <div class="sidebar-header">
-      <h2>Conversations</h2>
-      <button mat-mini-fab color="primary" (click)="createConversation()">
-        <mat-icon>add</mat-icon>
-      </button>
-    </div>
-
-    <mat-nav-list>
-      <button
-        mat-list-item
-        *ngFor="let conversation of conversations"
-        [class.active]="conversation.id === activeConversation?.id"
-        (click)="selectConversation(conversation)"
-      >
-        {{ conversation.title }}
-      </button>
-    </mat-nav-list>
-  </mat-sidenav>
-
-  <mat-sidenav-content>
-    <mat-toolbar color="primary" class="chat-toolbar">
-      <div>
-        <button mat-icon-button routerLink="/settings" aria-label="Settings">
-          <mat-icon>settings</mat-icon>
-        </button>
-        <span>{{ activeConversation?.title || 'Select a conversation' }}</span>
-      </div>
-    </mat-toolbar>
-
-    <div class="chat-body">
-      <div *ngIf="error" class="error-banner">{{ error }}</div>
-
-      <div class="message-list">
-        <ng-container *ngFor="let message of messages">
-          <mat-card [class.user-message]="message.role === 'user'" [class.assistant-message]="message.role === 'assistant'">
-            <div class="message-role">{{ message.role }}</div>
-            <div class="message-content" [innerHTML]="message.content | markdown"></div>
-          </mat-card>
+<div class="workspace-shell" [class.sidebar-open]="sidebarOpen">
+  <button *ngIf="sidebarOpen" class="sidebar-backdrop" aria-label="Close conversation navigation" (click)="sidebarOpen = false"></button>
+  <aside class="sidebar" aria-label="Conversation navigation">
+    <a class="brand" routerLink="/" aria-label="CodeMe home" (click)="sidebarOpen = false"><img class="brand-mark" src="codeme-logo.svg" width="36" height="36" alt="" /><span>CodeMe<span class="brand-subtitle">BY DHEBE STUDIOS</span></span></a>
+    <button class="button primary new-chat" (click)="createConversation()" [disabled]="creating"><span aria-hidden="true">＋</span> New conversation <span class="new-chat-mark" aria-hidden="true">↗</span></button>
+    <label class="search-field"><span aria-hidden="true">⌕</span><input type="search" aria-label="Search conversations" placeholder="Search conversations" [(ngModel)]="searchQuery" /></label>
+    <div class="section-label">YOUR CONVERSATIONS <span>{{ conversations.length }}</span></div>
+    <div class="conversation-list">
+      <p class="muted small" *ngIf="loadingConversations && !conversations.length" role="status">Loading your history…</p>
+      <p class="muted empty-history" *ngIf="!loadingConversations && !conversations.length">A fresh start.<br />Your conversations will appear here.</p>
+      <p class="muted small" *ngIf="conversations.length && !filteredConversations.length">No matching conversations.</p>
+      <div class="conversation-row" *ngFor="let conversation of filteredConversations" [class.active]="conversation.id === activeConversation?.id">
+        <ng-container *ngIf="renameId !== conversation.id; else renameForm">
+          <button class="conversation-select" [attr.aria-current]="conversation.id === activeConversation?.id ? 'page' : null" (click)="selectConversation(conversation)" [disabled]="creating"><span class="conversation-symbol" aria-hidden="true">◷</span><span class="truncate">{{ conversation.title }}</span></button>
+          <div class="conversation-tools"><button class="icon-button small-icon" (click)="startRename(conversation)" [attr.aria-label]="'Rename ' + conversation.title" title="Rename conversation">✎</button><button class="icon-button small-icon" (click)="deleteId = deleteId === conversation.id ? null : conversation.id; renameId = null" [disabled]="creating || (streaming && conversation.id === activeConversation?.id)" [attr.aria-label]="'Delete ' + conversation.title" title="Delete conversation">×</button></div>
+          <div *ngIf="deleteId === conversation.id" class="inline-confirm"><span>Delete this conversation and its messages?</span><button class="button danger" (click)="deleteConversation(conversation)" [disabled]="conversationBusy">Delete</button><button class="button subtle" (click)="deleteId = null">Keep</button></div>
         </ng-container>
-      </div>
-
-      <div class="chat-footer">
-        <textarea matInput placeholder="Type a message..." [(ngModel)]="inputText" rows="3"></textarea>
-        <div class="footer-actions">
-          <button mat-flat-button color="primary" (click)="sendMessage()" [disabled]="streaming || !inputText.trim()">
-            Send
-          </button>
-          <button mat-stroked-button color="warn" (click)="stopGeneration()" [disabled]="!streaming">Stop</button>
-        </div>
+        <ng-template #renameForm><form class="rename-form" (ngSubmit)="renameConversation(conversation)"><input name="title" aria-label="Conversation title" maxlength="200" [(ngModel)]="renameTitle" /><button class="icon-button" type="submit" aria-label="Save conversation title" [disabled]="!renameTitle.trim() || conversationBusy">✓</button><button class="icon-button" type="button" (click)="renameId = null" aria-label="Cancel rename">×</button></form></ng-template>
       </div>
     </div>
-  </mat-sidenav-content>
-</mat-sidenav-container>
+    <div class="sidebar-bottom"><a class="workspace-link" routerLink="/settings"><span aria-hidden="true">▧</span><span>Workspace explorer<small>Browse your local repositories</small></span><span aria-hidden="true">↗</span></a><div class="local-note"><span class="status-dot ready"></span> Inference on this machine</div></div>
+  </aside>
+
+  <main class="main-panel">
+    <header class="chat-header"><div class="header-title"><button class="icon-button mobile-menu" (click)="sidebarOpen = !sidebarOpen" [attr.aria-expanded]="sidebarOpen" aria-label="Toggle conversation navigation">☰</button><div class="truncate"><span class="eyebrow">PERSONAL CODING ASSISTANT</span><h1 class="truncate">{{ activeConversation?.title || 'New conversation' }}</h1></div></div><div class="header-actions"><button class="button catalog-toggle" (click)="toggleModelCatalog()" [attr.aria-expanded]="catalogOpen" aria-controls="model-catalog">Coding models</button><button class="connection-badge" (click)="reconnect()" [disabled]="healthChecking" [title]="connectionDetail + ' Click to check connection.'"><span class="status-dot" [class.ready]="connection === 'ready'" [class.offline]="connection === 'offline' || connection === 'model-missing'"></span><span>{{ healthChecking ? 'Checking connection' : connectionLabel }}</span><span aria-hidden="true">↻</span></button></div></header>
+
+    <app-model-setup *ngIf="showModelSetup" [status]="modelSetup" [busy]="setupBusy" [requestPending]="setupRequestPending" [canCancel]="canCancelSetup" [error]="setupError" (retry)="startModelSetup()" (cancel)="cancelModelSetup()" (reconnect)="reconnect()" />
+    <app-model-catalog id="model-catalog" *ngIf="catalogOpen" [catalog]="modelCatalog" [status]="modelSetup" [loading]="catalogLoading" [busy]="setupBusy" [streaming]="streaming" [currentModel]="model" [provider]="provider" [error]="catalogError" (selectModel)="chooseCatalogModel($event)" (refresh)="loadModelCatalog()" (close)="catalogOpen = false" />
+    <div class="connection-panel" *ngIf="!showModelSetup && (connection === 'offline' || connection === 'model-missing')" role="status"><div><strong>{{ connectionLabel }}</strong><p>{{ connectionDetail }}</p></div><button class="button" (click)="reconnect()" [disabled]="healthChecking">{{ healthChecking ? 'Checking…' : 'Reconnect' }}</button></div>
+    <div class="alert error-alert" *ngIf="error" role="alert"><span>{{ error }}</span><button class="icon-button" (click)="error = null" aria-label="Dismiss error">×</button></div>
+
+    <div #messageList class="message-list" (scroll)="onMessagesScroll()" [attr.aria-busy]="loadingMessages">
+      <div *ngIf="loadingMessages" class="loading-state" role="status"><span class="loading-indicator"></span> Loading conversation…</div>
+      <section class="welcome" *ngIf="!messages.length && !loadingMessages">
+        <div class="welcome-kicker"><span class="status-dot ready"></span> YOUR MACHINE. YOUR WORKSPACE.</div>
+        <h2>Build your next<br /><span>good idea.</span></h2>
+        <p>Think through a problem, understand code, or plan your next change with a model running locally.</p>
+        <div class="prompt-grid"><button class="prompt-card" (click)="usePrompt('Help me understand this code. Explain its purpose, the main flow, and anything I should watch for.
+
+')"><span class="prompt-icon" aria-hidden="true">⌘</span><strong>Understand code</strong><span>Turn unfamiliar code into a clear explanation</span><b aria-hidden="true">↗</b></button><button class="prompt-card" (click)="usePrompt('Help me debug this issue. Ask for any missing context, identify likely causes, and suggest a focused fix.
+
+')"><span class="prompt-icon" aria-hidden="true">◎</span><strong>Work through a bug</strong><span>Find the cause and a practical next step</span><b aria-hidden="true">↗</b></button><button class="prompt-card" (click)="usePrompt('Help me plan a small, maintainable implementation for this feature. Include edge cases and how to verify it.
+
+')"><span class="prompt-icon" aria-hidden="true">✧</span><strong>Plan a feature</strong><span>From a rough idea to a concrete approach</span><b aria-hidden="true">↗</b></button></div>
+        <a class="welcome-link" routerLink="/settings">Explore a local repository <span aria-hidden="true">→</span></a>
+      </section>
+      <div class="messages" role="log" aria-label="Conversation messages" aria-live="off" *ngIf="messages.length"><article class="message" *ngFor="let message of messages; let last = last" [class.user-message]="message.role === 'user'"><div class="message-avatar" [class.assistant-avatar]="message.role === 'assistant'" aria-hidden="true">{{ message.role === 'user' ? 'Y' : '⌘' }}</div><div class="message-main"><div class="message-meta"><strong>{{ message.role === 'user' ? 'You' : 'CodeMe' }}</strong><span *ngIf="message.role === 'assistant'">Local assistant</span><time [attr.datetime]="message.created_at">{{ message.created_at | date:'shortTime' }}</time><button class="copy-button" *ngIf="message.role === 'assistant' && message.content && !(streaming && last)" (click)="copyMessage(message)" aria-label="Copy response">Copy</button></div><div class="message-content user-content" *ngIf="message.role === 'user'">{{ message.content }}</div><div class="message-content" *ngIf="message.role === 'assistant'" [innerHTML]="message.content | markdown"></div><div class="thinking" *ngIf="message.role === 'assistant' && !message.content && streaming && last" role="status"><span class="loading-indicator"></span> Thinking locally…</div><span class="stream-caret" *ngIf="message.role === 'assistant' && message.content && streaming && last" aria-label="Generating response"></span></div></article></div>
+    </div>
+
+    <div class="composer-area"><button class="jump-button button" *ngIf="showJumpToLatest" (click)="jumpToLatest()">↓ Latest message</button><div class="composer-card" [class.is-streaming]="streaming"><label class="sr-only" for="message-input">Message CodeMe</label><textarea #composer id="message-input" placeholder="Ask anything about your code…" [(ngModel)]="inputText" (ngModelChange)="rememberDraft()" (keydown)="onComposerKeydown($event)" [disabled]="creating || loadingMessages" rows="3" maxlength="100000"></textarea><div class="composer-controls"><label class="model-control"><span aria-hidden="true">◈</span><span class="sr-only">Local model</span><select [(ngModel)]="model" [disabled]="streaming || creating || !models.length"><option *ngIf="!models.length" [value]="model">{{ model }}</option><option *ngFor="let availableModel of models" [value]="availableModel">{{ availableModel }}</option></select></label><div class="send-controls"><span class="composer-shortcut">Enter to send</span><button *ngIf="streaming; else sendButton" class="button stop-button" (click)="stopGeneration()"><span aria-hidden="true">■</span> Stop</button><ng-template #sendButton><button class="send-button" (click)="sendMessage()" [disabled]="!canSend" [attr.aria-label]="creating ? 'Starting conversation' : 'Send message'">{{ creating ? '…' : '↑' }}</button></ng-template></div></div></div><p class="notice" *ngIf="modelCapabilityNotice">{{ modelCapabilityNotice }}</p><div class="composer-caption"><span>{{ streaming ? 'Generating on your machine…' : 'Local chat · Changes and commands are reviewed in the VS Code extension' }}</span><span class="keyboard-hint">Shift + Enter for a new line</span></div><div class="sr-only" role="status">{{ notice }}</div><p class="notice" *ngIf="notice">{{ notice }}</p></div>
+  </main>
+</div>

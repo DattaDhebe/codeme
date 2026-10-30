@@ -1,8 +1,9 @@
 import json
+import hashlib
 import shutil
 import subprocess
+import threading
 from pathlib import Path, PureWindowsPath
-from typing import Iterable
 
 from codeme_agent.config import settings
 
@@ -17,6 +18,18 @@ EXCLUDED_DIR_NAMES = {
     ".venv",
     "venv",
     "__pycache__",
+    ".pytest_cache",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".angular",
+    ".next",
+    ".nuxt",
+    ".cache",
+    ".runtime",
+    ".aws",
+    ".ssh",
+    ".azure",
+    ".gnupg",
 }
 
 SECRET_FILE_NAMES = {
@@ -47,6 +60,9 @@ SECRET_SUFFIXES = {
 DEFAULT_FILE_READ_LIMIT = 1_500_000
 DEFAULT_SEARCH_PAGE_SIZE = 50
 DEFAULT_SEARCH_TIMEOUT = 5
+MAX_COMMAND_OUTPUT = 2_000_000
+MAX_SEARCH_PAGES = 100
+MAX_INSTRUCTION_TEXT = 12_000
 
 
 class WorkspaceError(Exception):
@@ -69,11 +85,32 @@ def is_unc_path(path: Path) -> bool:
     return False
 
 
+def normalize_action_path(path: str, *, allow_root: bool = False) -> str:
+    """Normalize a relative edit/command path consistently on every host OS.
+
+    Native Path on POSIX treats Windows drives and backslashes as literal
+    filenames. Action paths cross the backend/editor boundary, so Windows
+    absolute, drive-relative, UNC and rooted syntax must never become a
+    seemingly safe relative filename on another operating system.
+    """
+    if not isinstance(path, str) or not path or "\x00" in path:
+        raise WorkspaceSecurityError("A workspace-relative action path is required")
+    windows = PureWindowsPath(path)
+    if windows.drive or windows.root or Path(path).is_absolute():
+        raise WorkspaceSecurityError("Absolute, drive-qualified and UNC action paths are not allowed")
+    candidate = Path(path.replace("\\", "/"))
+    if ".." in candidate.parts:
+        raise WorkspaceSecurityError("Parent traversal is not allowed in action paths")
+    if not allow_root and not candidate.parts:
+        raise WorkspaceSecurityError("A workspace-relative file path is required")
+    return candidate.as_posix()
+
+
 def _resolve_path(path: Path, strict: bool = True) -> Path:
     try:
         return path.resolve(strict=strict)
-    except FileNotFoundError as exc:
-        raise WorkspaceSecurityError(f"Path does not exist: {path}") from exc
+    except (OSError, RuntimeError) as exc:
+        raise WorkspaceSecurityError("Path cannot be resolved inside the workspace") from exc
 
 
 def normalize_workspace_root(path: str | None = None) -> Path:
@@ -121,7 +158,7 @@ def is_excluded_path(path: Path, root: Path) -> bool:
         return True
 
     for part in relative.parts:
-        if part in EXCLUDED_DIR_NAMES:
+        if part.lower() in EXCLUDED_DIR_NAMES:
             return True
         if part.startswith(".") and part.lower().startswith(".env"):
             return True
@@ -167,7 +204,14 @@ def list_directory(root: Path, path: str | None = None, page: int = 1, page_size
     for entry in sorted(directory.iterdir(), key=lambda item: (not item.is_dir(), item.name.lower())):
         if is_excluded_path(entry, root):
             continue
-        stat = entry.stat()
+        try:
+            resolved = _resolve_path(entry)
+            assert_within_workspace(root, resolved)
+            if is_excluded_path(resolved, root):
+                continue
+            stat = entry.stat()
+        except (WorkspaceError, OSError):
+            continue
         entries.append(
             {
                 "path": str(entry.relative_to(root).as_posix()),
@@ -205,7 +249,11 @@ def get_file_metadata(root: Path, path: str | None = None) -> dict:
     }
 
 
-def read_file(root: Path, path: str) -> dict:
+def read_file(root: Path, path: str, start_line: int | None = None, end_line: int | None = None) -> dict:
+    if start_line is not None and (type(start_line) is not int or start_line < 1):
+        raise WorkspaceSecurityError("start_line must be a positive integer")
+    if end_line is not None and (type(end_line) is not int or end_line < (start_line or 1)):
+        raise WorkspaceSecurityError("end_line must be at least start_line")
     target = canonicalize_workspace_path(root, path)
     if target.is_dir():
         raise WorkspaceSecurityError("Requested path is a directory")
@@ -216,25 +264,73 @@ def read_file(root: Path, path: str) -> dict:
     if target.stat().st_size > settings.max_file_size:
         raise WorkspaceSecurityError("File size exceeds the configured limit")
 
-    with target.open("r", encoding="utf-8", errors="replace") as handle:
+    # Search/replace proposals bind to exact UTF-8 bytes. Universal-newline
+    # translation would make an observed CRLF excerpt fail against its base.
+    with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         content = handle.read(settings.max_file_size + 1)
-
+    if len(content) > settings.max_file_size:
+        raise WorkspaceSecurityError("File size exceeds the configured limit")
     metadata = get_file_metadata(root, path)
-    return {"path": metadata["path"], "content": content, "metadata": metadata}
+    result = {"path": metadata["path"], "content": content, "metadata": metadata,
+              "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
+    if start_line is not None or end_line is not None:
+        lines = content.splitlines(keepends=True)
+        first = start_line or 1
+        last = min(end_line or len(lines), len(lines))
+        result.update(content="".join(lines[first - 1:last]), start_line=first,
+                      end_line=last, total_lines=len(lines), has_more=last < len(lines))
+    return result
 
+
+def _bounded_command(root: Path, command: list[str], timeout: int = 5) -> tuple[subprocess.CompletedProcess, bool]:
+    """Cap subprocess output while it is produced, including on large repositories."""
+    chunks: list[bytes] = []
+    truncated = False
+    try:
+        process = subprocess.Popen(command, cwd=root, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
+    except OSError as exc:
+        raise WorkspaceError("Repository tool could not be started") from exc
+
+    def consume() -> None:
+        nonlocal truncated
+        remaining = MAX_COMMAND_OUTPUT
+        while process.stdout is not None:
+            chunk = process.stdout.read(min(65_536, remaining + 1))
+            if not chunk:
+                break
+            chunks.append(chunk[:remaining])
+            remaining -= len(chunk)
+            if remaining < 0:
+                truncated = True
+                try:
+                    process.kill()
+                except OSError:
+                    pass
+                break
+
+    reader = threading.Thread(target=consume, daemon=True)
+    reader.start()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired as exc:
+        process.kill()
+        process.wait()
+        reader.join(timeout=1)
+        raise WorkspaceError("Repository tool timed out; narrow the request and retry") from exc
+    finally:
+        reader.join(timeout=1)
+        if process.stdout is not None:
+            process.stdout.close()
+    output = b"".join(chunks).decode("utf-8", errors="replace")
+    return subprocess.CompletedProcess(command, process.returncode, output, ""), truncated
 
 def _git_command(root: Path, args: list[str], timeout: int = 5) -> subprocess.CompletedProcess:
     if shutil.which("git") is None:
         raise WorkspaceError("Git is not installed")
-
-    return subprocess.run(
-        ["git", *args],
-        cwd=root,
-        capture_output=True,
-        text=True,
-        timeout=timeout,
-        check=False,
-    )
+    result, truncated = _bounded_command(root, ["git", "-c", "core.fsmonitor=false", "--no-optional-locks", *args], timeout)
+    if truncated:
+        raise WorkspaceError("Git output exceeded the limit; request one relevant file")
+    return result
 
 
 def get_git_status(root: Path) -> dict:
@@ -244,142 +340,132 @@ def get_git_status(root: Path) -> dict:
         return {"is_git": False, "status": []}
     if result.returncode != 0 or result.stdout.strip() != "true":
         return {"is_git": False, "status": []}
-
-    status_result = _git_command(root, ["status", "--porcelain"])
+    status_result = _git_command(root, ["status", "--porcelain=v1", "-z", "--", "."])
     if status_result.returncode != 0:
-        return {"is_git": True, "status": []}
-
-    status_entries = []
-    for line in status_result.stdout.splitlines():
-        if not line.strip():
+        raise WorkspaceError("Git status failed")
+    prefix_result = _git_command(root, ["rev-parse", "--show-prefix"])
+    prefix = prefix_result.stdout.strip().replace("\\", "/") if prefix_result.returncode == 0 else ""
+    entries = []
+    records = iter(status_result.stdout.split("\0"))
+    for record in records:
+        if len(record) < 4:
             continue
-        status_text = line[:2].strip()
-        path_text = line[3:].strip() if len(line) > 3 else line[2:].strip()
-        status_entries.append({"path": path_text, "status": status_text})
+        status_text, path_text = record[:2], record[3:]
+        if "R" in status_text or "C" in status_text:
+            next(records, None)  # Porcelain -z includes the original path after a rename.
+        if prefix:
+            if not path_text.startswith(prefix):
+                continue
+            path_text = path_text[len(prefix):]
+        if not is_excluded_path(root / path_text, root):
+            entries.append({"path": Path(path_text).as_posix(), "status": status_text.strip()})
+    return {"is_git": True, "status": entries}
 
-    return {"is_git": True, "status": status_entries}
+
+def _diff_pathspecs() -> list[str]:
+    exclusions = [f":(glob,icase,exclude)**/{name}/**" for name in sorted(EXCLUDED_DIR_NAMES)]
+    exclusions.extend(f":(glob,icase,exclude)**/{name}" for name in sorted(SECRET_FILE_NAMES))
+    exclusions.append(":(glob,icase,exclude)**/.env*")
+    exclusions.extend(f":(glob,icase,exclude)**/*{suffix}" for suffix in sorted(SECRET_SUFFIXES))
+    return [".", *exclusions]
 
 
 def get_git_diff(root: Path, path: str | None = None) -> dict:
     status = get_git_status(root)
     if not status["is_git"]:
         return {"path": path, "diff": ""}
-
-    if path is None:
-        working = _git_command(root, ["diff", "--no-ext-diff", "--relative"])
-        staged = _git_command(root, ["diff", "--cached", "--no-ext-diff", "--relative"])
-        if working.returncode not in (0, 1) or staged.returncode not in (0, 1):
+    relative = None
+    if path:
+        # Deleted files still have a useful diff; resolve existing ancestors safely.
+        target = (root / path).resolve(strict=False)
+        assert_within_workspace(root, target)
+        if is_excluded_path(target, root):
+            raise WorkspaceSecurityError("Requested file is excluded")
+        relative = target.relative_to(root).as_posix()
+    pathspecs = [relative, *_diff_pathspecs()[1:]] if relative else _diff_pathspecs()
+    sections = []
+    for label, extra in (("Working tree", []), ("Staged changes", ["--cached"])):
+        result = _git_command(root, ["diff", *extra, "--no-ext-diff", "--no-textconv", "--no-renames", "--relative", "--", *pathspecs])
+        if result.returncode not in (0, 1):
             raise WorkspaceError("Git diff failed")
-        sections = []
-        if working.stdout:
-            sections.append("# Working tree\n" + working.stdout)
-        if staged.stdout:
-            sections.append("# Staged changes\n" + staged.stdout)
-        return {"path": None, "diff": "\n".join(sections)}
+        if result.stdout:
+            sections.append(f"# {label}\n" + result.stdout)
+    return {"path": relative, "diff": "\n".join(sections)}
 
-    target = canonicalize_workspace_path(root, path)
-    if is_excluded_path(target, root):
-        raise WorkspaceSecurityError("Requested file is excluded")
-
-    rel_path = str(target.relative_to(root))
-    diff_result = _git_command(root, ["diff", "--no-ext-diff", "--relative", "--", rel_path])
-    if diff_result.returncode not in (0, 1):
-        raise WorkspaceError("Git diff failed")
-    return {"path": rel_path, "diff": diff_result.stdout}
-
-
-def search_code(root: Path, query: str, page: int = 1, page_size: int = DEFAULT_SEARCH_PAGE_SIZE) -> dict:
+def search_code(root: Path, query: str, page: int = 1, page_size: int = DEFAULT_SEARCH_PAGE_SIZE, path: str | None = None) -> dict:
+    if type(page) is not int or type(page_size) is not int or page < 1 or page > MAX_SEARCH_PAGES or page_size < 1 or page_size > 200:
+        raise WorkspaceSecurityError("Invalid search pagination")
+    if not isinstance(query, str) or len(query) > 2_000:
+        raise WorkspaceSecurityError("Search expression must be bounded text")
     if not query.strip():
         return {"results": [], "page": page, "page_size": page_size, "has_more": False}
-    if page < 1 or page_size < 1 or page_size > 200:
-        raise WorkspaceSecurityError("Invalid search pagination")
     if shutil.which("rg") is None:
         raise WorkspaceError("ripgrep (rg) is required for search")
-
-    max_matches = page * page_size + 1
-    cmd = [
-        "rg",
-        "--json",
-        "--no-config",
-        "--no-ignore",
-        "--hidden",
-        "--max-filesize",
-        "4M",
-        "--max-count",
-        str(max_matches),
-        query,
-        str(root),
-    ]
-
-    for excluded in EXCLUDED_DIR_NAMES:
-        cmd.extend(["--glob", f"!{excluded}/**"])
-    for env_name in [".env", ".env.*"]:
-        cmd.extend(["--glob", f"!{env_name}"])
-
-    result = subprocess.run(cmd, cwd=root, capture_output=True, text=True, timeout=DEFAULT_SEARCH_TIMEOUT)
-    if result.returncode not in (0, 1):
-        raise WorkspaceError("ripgrep search failed")
-
+    target = canonicalize_workspace_path(root, path)
+    if is_excluded_path(target, root):
+        raise WorkspaceSecurityError("Requested search path is excluded")
+    cmd = ["rg", "--json", "--no-config", "--hidden", "--max-filesize", "4M", "--max-count", str(page * page_size + 1)]
+    for excluded in sorted(EXCLUDED_DIR_NAMES):
+        cmd.extend(["--glob", f"!**/{excluded}/**"])
+    for name in sorted(SECRET_FILE_NAMES | {".env*"}):
+        cmd.extend(["--glob", f"!**/{name}"])
+    for suffix in sorted(SECRET_SUFFIXES):
+        cmd.extend(["--glob", f"!**/*{suffix}"])
+    # -e and -- keep an expression beginning with '-' from becoming an rg option.
+    cmd.extend(["-e", query, "--", target.relative_to(root).as_posix() or "."])
+    result, truncated = _bounded_command(root, cmd, DEFAULT_SEARCH_TIMEOUT)
+    if not truncated and result.returncode not in (0, 1):
+        raise WorkspaceError("ripgrep search failed; check the expression")
     results = []
     for raw in result.stdout.splitlines():
-        if not raw.strip():
-            continue
         try:
             payload = json.loads(raw)
         except json.JSONDecodeError:
             continue
-        if payload.get("type") != "match":
+        if not isinstance(payload, dict) or payload.get("type") != "match":
             continue
         data = payload.get("data", {})
         path_text = data.get("path", {}).get("text")
         if not path_text:
             continue
-        candidate = root.joinpath(path_text)
+        try:
+            candidate = canonicalize_workspace_path(root, path_text)
+        except WorkspaceError:
+            continue
         if is_excluded_path(candidate, root):
             continue
-        line_number = data.get("line_number", 0)
-        submatches = data.get("submatches", [])
-        text = submatches[0].get("match", {}).get("text", "") if submatches else ""
-        column = submatches[0].get("start", 0) + 1 if submatches else 0
-        results.append(
-            {
-                "path": str(Path(path_text).as_posix()),
-                "line": line_number,
-                "column": column,
-                "text": text,
-            }
-        )
-
-    has_more = len(results) > page_size
-    return {
-        "results": results[(page - 1) * page_size : page * page_size],
-        "page": page,
-        "page_size": page_size,
-        "has_more": has_more,
-    }
+        matches = data.get("submatches", [])
+        text = data.get("lines", {}).get("text", "").rstrip("\r\n")
+        results.append({"path": candidate.relative_to(root).as_posix(), "line": data.get("line_number", 0),
+                        "column": matches[0].get("start", 0) + 1 if matches else 0, "text": text[:2_000]})
+    end = page * page_size
+    return {"results": results[(page - 1) * page_size:end], "page": page, "page_size": page_size,
+            "has_more": len(results) > end or truncated, "truncated": truncated}
 
 
 def find_agent_instructions(root: Path, path: str | None = None) -> dict:
-    current = canonicalize_workspace_path(root, path)
-    if current.is_file():
+    current = (root / path).resolve(strict=False) if path else root
+    assert_within_workspace(root, current)
+    if is_excluded_path(current, root):
+        raise WorkspaceSecurityError("Requested instruction path is excluded")
+    if current.is_file() or not current.exists():
         current = current.parent
-
-    while True:
-        agent_file = current / "AGENTS.md"
-        if agent_file.exists() and agent_file.is_file() and not is_excluded_path(agent_file, root):
-            if is_binary_file(agent_file):
-                break
-            with agent_file.open("r", encoding="utf-8", errors="replace") as handle:
-                return {
-                    "instructions": [
-                        {
-                            "path": str(agent_file.relative_to(root).as_posix()),
-                            "content": handle.read(),
-                        }
-                    ]
-                }
-        if current == root:
+    directories = [current, *current.parents]
+    applicable = []
+    for directory in directories:
+        applicable.append(directory)
+        if directory == root:
             break
-        current = current.parent
-
-    return {"instructions": []}
+    instructions = []
+    remaining = MAX_INSTRUCTION_TEXT
+    for directory in reversed(applicable):
+        agent_file = directory / "AGENTS.md"
+        if not agent_file.is_file():
+            continue
+        # Reuse normal file validation so symlinks, secrets and large files are guarded.
+        item = read_file(root, agent_file.relative_to(root).as_posix())
+        if len(item["content"]) > remaining:
+            raise WorkspaceSecurityError("Applicable AGENTS.md instructions exceed the context limit")
+        instructions.append({"path": agent_file.relative_to(root).as_posix(), "content": item["content"]})
+        remaining -= len(item["content"])
+    return {"instructions": instructions}

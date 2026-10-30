@@ -1,0 +1,45 @@
+CodeMe Proprietary License
+License identifier: LicenseRef-CodeMe-Proprietary
+
+Copyright (c) 2026 DattaDhebe. CodeMe is a DHEBE Studios product.
+All rights reserved except as expressly stated below.
+
+1. Main application
+
+This license covers original CodeMe application code, documentation and brand
+assets unless a file or component expressly carries a different license.
+It is not an open-source license. Publishing source for inspection does not
+grant a general right to use, copy, redistribute, sublicense or sell CodeMe.
+Rights provided by the hosting platform's terms for viewing and forking a
+public repository are not removed by this notice.
+
+2. Authorized purchasers
+
+A customer with a valid CodeMe purchase from DHEBE Studios is granted a
+non-exclusive right to install, configure and use the purchased application
+for that customer's own personal or internal business coding work. The
+customer may keep backup copies and make private modifications for that use.
+This permission does not authorize redistribution, sublicensing or resale of
+CodeMe, its installers, modified application copies or brand assets. Other
+uses require prior written permission from the copyright holder.
+
+This license makes no ownership claim over the customer's code, documents or
+inputs. Separately licensed models and dependencies retain their own terms.
+
+3. Existing and third-party licenses
+
+The existing MIT license in vscode-extension/LICENSE continues to govern the
+extension code covered by that license. Third-party code, dependencies, model
+weights and separately licensed files remain under their respective licenses.
+Nothing here withdraws permissions already granted under those licenses or
+changes their required notices. See NOTICE for component information.
+
+4. Warranty
+
+To the extent permitted by applicable law, the software is provided "as is",
+without warranties of merchantability, fitness for a particular purpose or
+non-infringement. No particular model output, coding result, compatibility or
+availability is guaranteed. Nothing in this license excludes rights or
+liabilities that applicable law does not permit to be excluded.
+
+Permissions and licensing inquiries: support@dhebe.com

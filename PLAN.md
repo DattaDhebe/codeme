@@ -1,168 +1,58 @@
-# Personal Codex Implementation Plan
+# CodeMe development plan
 
-## Overview
-Personal Codex is a local-first coding assistant with a ChatGPT-style web UI and Ollama-powered model execution. This plan covers Phase 1 only, targeting the minimal viable backend and frontend foundations required to support local Ollama chat streaming and persisted conversations.
+CodeMe is a local coding assistant with a FastAPI/SQLite backend, an Angular browser app, and a VS Code extension. The current implementation is the starting point for this plan. Detailed usage is in the [README](README.md); contributor commands are in [Development](docs/development.md).
 
-## Goals for Phase 1
-- Establish backend architecture with FastAPI, SQLite, SQLAlchemy 2, Alembic, Pydantic v2, and Ollama client integration.
-- Build conversation persistence and streaming chat API.
-- Create a basic Angular 18+ frontend with a chat UI, conversation sidebar, settings placeholder, dark/light themes, markdown rendering, syntax-highlighted code blocks, and streaming assistant output.
-- Ensure backend and frontend can run locally without cloud services.
-- Produce documentation and setup artifacts for Phase 1.
+## Delivered foundations
 
-## Phase 1 Scope
-### Backend
-1. Backend project structure
-   - `backend/` with Python 3.12 target support
-   - `backend/app/` package container
-   - `backend/app/main.py` FastAPI app
-   - `backend/app/config.py` configuration management
-   - `backend/app/db/` SQLAlchemy models, session, migrations setup
-   - `backend/app/schemas/` Pydantic request/response models
-   - `backend/app/routers/` conversation and chat endpoints
-   - `backend/app/ollama.py` Ollama HTTP client integration
-   - `backend/app/services/` conversation service layer
-   - `backend/app/tests/` pytest tests
-2. Database and persistence
-   - SQLite database bound to backend root
-   - SQLAlchemy 2 ORM models for Conversation, Message
-   - Alembic migration skeleton and initial migration
-3. Ollama local client
-   - Use the local Ollama HTTP API endpoint at `http://127.0.0.1:11434` by default
-   - Default model `qwen2.5-coder:7b`
-   - Chat flow integration using streaming via SSE or chunked response
-   - Validate responses and handle offline/unavailable Ollama gracefully
-4. Conversation API
-   - `/api/conversations` list/create/rename/delete/search
-   - `/api/conversations/{id}/messages` retrieval
-   - `/api/conversations/{id}/chat` streaming endpoint for assistant generation
-   - Backend SSE channel for incremental assistant chunks
-5. Security and config
-   - Bind backend to `127.0.0.1` only by default
-   - Strict CORS allowing only Angular origin from `.env` or default localhost frontend
-   - No shell invocation for Ollama or subprocesses in Phase 1
-   - Store config in `backend/.env.example`
-6. Tests
-   - Pytest backend tests for models, conversation CRUD, Ollama offline fallback, streaming endpoint structure, and path/security core behavior.
+| Area | Current behavior |
+| --- | --- |
+| Local inference | Native Ollama and trusted loopback OpenAI-compatible servers; cloud aliases and remote endpoints are rejected. |
+| First-run setup | Installation and launch scripts, automatic model discovery, installed-model reuse, Ollama downloads with progress, and model loading. |
+| Browser | Conversation management, safe Markdown, streaming, model readiness, responsive chat, and a read-only workspace explorer. |
+| Repository tools | Registered local roots, bounded reads/search/Git output, path protections, and root-to-folder `AGENTS.md` instructions. |
+| Repository navigation | Fresh task-ranked file selection, heuristic symbols/import links, selection reasons, strict scan/output limits, and no edit permission from metadata. |
+| Model evaluations | Opt-in installed-model matrix with deterministic task oracles, separate quality/recovery/policy results, bounded inference, and JSON reports. |
+| Installation checks | Fresh-copy installer/build/launch/upgrade harness, controlled model-protocol failures, offline relaunch, and a manual Windows/macOS/Linux CI matrix. |
+| Task controller | Durable goals, public plans, read-before-edit checks, review pauses, observed-result continuation, explicit resume/cancel, and bounded recovery. |
+| Transactional editing | Versioned create/modify sets, complete-set review, base hashes, conflict checks, checkpoints, rollback, and guarded restore in VS Code. |
+| Controlled commands | Typed profiles, independent policy validation, one-time approval, workspace-bound execution, output caps, timeout, and process cleanup. |
+| Verification and repair | Immutable approved plans, required checks, current-file receipts, bounded failure feedback, reviewed repairs, and exact-plan reruns. |
+| Persistence | Conversations and audit records in SQLite, foreign keys, automatic Alembic upgrades, and pre-upgrade backups. |
 
-### Frontend
-1. Angular 18+ app scaffold
-   - Standalone components only
-   - Strict TypeScript configuration
-   - Angular Material for UI controls and theming
-2. Core UI screens/components
-   - `ConversationShellComponent` with sidebar and chat panel
-   - `ConversationListComponent` for conversation management
-   - `ChatMessageComponent` for markdown and code rendering
-   - `SettingsComponent` stub with theme/model selector
-   - `AppComponent` minimal routing and layout
-3. Features for Phase 1
-   - Collapsible conversation sidebar
-   - New conversation button
-   - Rename and delete conversation actions
-   - Responsive chat window with streaming assistant output
-   - Markdown rendering and syntax-highlighted code blocks
-   - Copy-code button on code blocks
-   - Stop-generation button during streaming
-   - Dark/light theme toggle
-   - Model selector stub wired to settings and API config
-   - Error state when backend/Ollama unavailable
-4. Testing
-   - Vitest or Angular supported test runner for core components and services
-   - Basic UI snapshot/behavior test for chat stream rendering
+The [30 October 2026 application review](docs/review-2026-10-30.md) adds model suitability checks, source-read evidence, context budgeting for tools, disk-backed file application, nested creates, bounded UI waits, and stronger recovery tests. Remaining work below is still distinct from the delivered behavior.
 
-### Documentation and artifacts
-- `README.md` updated for local development and Phase 1 startup instructions
-- `AGENTS.md` placeholder with high-level agent guidance and phase boundaries
-- `.env.example` for backend/frontend local config
-- `architecture.md` describing the backend/frontend architecture, Ollama integration, and security boundaries
-- `PLAN.md` (this file)
+Historical implementation names remain in source and tests: **Phase 4** means transactional editing, **Phase 5** means controlled command execution, and **Phase 6** means bounded verification/repair. They are delivered layers, not unfinished prerequisites.
 
-## Phase 1 Deliverables
-- Backend application skeleton and conversation API
-- Basic frontend chat UI with streaming demo
-- Tests for backend and frontend foundations
-- Documentation files: README, AGENTS, .env.example, architecture notes
-- Exact commands to start backend and frontend
+## Boundaries to preserve
 
-## Out of scope for Phase 1
-- Full tool execution system and typed agent tools
-- Workspace filesystem tools and path enforcement beyond future design
-- Approval workflow and change management UI
-- Git diff viewer and tool execution cards
-- Multi-model orchestration beyond default model selection
-- Docker Compose production stack beyond placeholder compose files
+- Model inference and repository work stay on the same machine. Initial software/model downloads may use the network.
+- Backend workspace tools read source files. The extension owns reviewed source edits and approved project commands.
+- Model/runtime setup is a separate installation path. It must not let repository content choose an executable, endpoint, arbitrary download, or shell command.
+- Model prose, plan checkboxes, and client-claimed success cannot replace canonical approval, command, and file-verification records.
+- A changed verification plan requires new approval. Each repair requires its own edit review.
+- Rejected, interrupted, exhausted, cancelled, and failed work must remain visible; reload does not silently restart it.
+- Existing databases, checkpoints, settings, and unrelated user edits must survive upgrades.
+- Run one backend worker while task ownership and setup coordination use process-local registries.
 
-## Phase 3 Scope
-### Workspace registration and browsing
-- Register local workspace roots securely with canonical path normalization.
-- Block UNC paths when disabled and prevent traversal outside the registered project.
-- Hide excluded directories and sensitive files from listings and content previews.
-- Provide read-only file browsing and file content preview.
+## Next improvements
 
-### Repository tools
-- Search code using ripgrep and return paginated matches.
-- Expose Git status and diff details for tracked repositories.
-- Read AGENTS.md instructions from workspace roots in a secure read-only manner.
+| Priority | Work | Completion evidence |
+| --- | --- | --- |
+| 1 | Improve model suitability and hardware guidance | Clear support checks and actionable low-memory errors across supported local servers, without invented download percentages. |
+| 1 | Expand real-model evidence | Run the evaluation suite across more installed local models and hardware; investigate task failures separately from policy-control results. |
+| 1 | Complete clean-OS installation evidence | Run the configured OS matrix and representative VMs, including actual runtime installation, missing prerequisites, and real download interruption. Fresh-copy tests on an existing host cover a narrower boundary. |
+| 2 | Improve context precision and continuity | Add tokenizer-aware budgets and durable conversation compaction; measure navigation quality on representative large repositories. |
+| 2 | Extend repository intelligence | Evaluate incremental local indexing beyond the current bounded fresh symbol/import hints, while preserving scoped guidance and excluded paths. |
+| 2 | Extend editor integration | VS Code diagnostics and explicit multi-root ownership without weakening path or approval rules. |
+| 3 | Add browser task review | Agent views and diff/approval interfaces backed by the same durable contracts and an explicit execution design. |
+| 3 | Improve local operations | Clearer structured logs, request/body limits, backup management, checkpoint retention, and reproducible distributions. |
 
-### Security guarantees
-- All workspace requests are confined to the registered root.
-- Binary files, excluded directories, and secret files are not exposed.
-- File reads are capped by configured file size limits.
+These are planned improvements, not promises of existing functionality. Cloud inference, remote machine execution, unattended approval, deployment/publishing, and model-controlled commits/pushes are outside the current product scope.
 
-## Phase 3.5 Scope
-### Personal Codex VS Code extension
-- Build a thin local VS Code client only.
-- Do not duplicate AI model execution or conversation storage.
-- Reuse the existing FastAPI backend for all chat, workspace, and code tooling.
-- Maintain strictly local-only connectivity and no cloud APIs.
+Use [Model evaluations](docs/model-evaluations.md), [Installation testing](docs/installation-testing.md), and [Repository context](docs/repository-context.md) for the implemented commands, evidence boundaries, and remaining limits.
 
-### User interface and integration
-- Add a Personal Codex Activity Bar pane using `WebviewViewProvider`.
-- Provide a sidebar with conversation list, new-chat action, chat UI, model selector, backend status, workspace status, approval controls, and tool execution cards.
-- Render markdown securely and highlight code using bundled syntax highlighting.
-- Use VS Code theme variables for native appearance.
-- Enforce a strict CSP with nonces; block remote resources and unsafe inline execution.
+## Validation expectations
 
-### Backend connectivity
-- Add VS Code settings for backend URL, default model, auto-register workspace, write approval, and notifications.
-- Check backend health with timeout, retry/backoff, and friendly offline messages.
-- Stream assistant output from `/api/conversations/{id}/chat` and support cancellation.
-- Use a typed client for all backend API calls.
+Changes to shared contracts should exercise the backend and both clients. Use temporary databases and workspaces; do not test migration or mutation behavior on a user's project. Test model setup with controlled HTTP/process fixtures rather than downloading large weights during unit tests. A live local model smoke test is useful when available and must be reported separately from mocked tests.
 
-### Workspace integration
-- Detect open `vscode.workspace.workspaceFolders` and support multi-root workspaces.
-- Ask the user before registering folders with the backend; do not silently register.
-- Send canonical workspace paths and let the backend authorize final access.
-- Show active registered workspace state in the sidebar.
-
-### Editor commands and context
-- Contribute commands for chat, new chat, explain selected code, fix selected code, refactor selected code, generate tests, ask about current file, review current changes, register workspace, check connection, and start the local backend.
-- Add editor context menu entries for selected-code actions.
-- Send selected text, relative path, language ID, selection range, and workspace ID to the backend.
-- Support references such as `@currentFile`, `@selection`, `@workspace`, `@problems`, and `@gitDiff` by resolving them in the extension before sending.
-- Enforce explicit selection for large context and apply client-side size limits.
-
-### Diagnostics and Git integration
-- Use `vscode.languages.getDiagnostics` to collect diagnostics for current files.
-- Allow commands to explain diagnostics, suggest fixes, and send selected diagnostics to chat without editing.
-- Use VS Code/Git APIs to show current branch, modified files, staged files, and untracked files.
-- Send only diff metadata and relevant file information to the backend.
-
-### Security and boundaries
-- Default to localhost backend connection only; warn on non-local URLs.
-- Do not read outside opened workspace folders.
-- Do not read excluded or secret files from the extension.
-- Do not execute shell commands or perform file writes during Phase 3.5.
-- Treat webview messages as untrusted and validate all message payloads at runtime.
-- Escape rendered markdown and disable raw HTML in the UI.
-
-### Testing and packaging
-- Add unit tests with Vitest and integration tests with `@vscode/test-electron`.
-- Add scripts for build, watch, lint, test, test:integration, and package.
-- Package a local `.vsix` file for manual installation.
-
-## Next steps
-1. Review PLAN.md and approve Phase 3.5 extension design.
-2. Implement the `vscode-extension/` folder and build the local VS Code client.
-3. Run unit and integration tests, then package `personal-codex-0.1.0.vsix`.
+Release checks include backend tests, browser tests and production build, extension type checks/tests/build/package, and a diff review for runtime data or credentials. See [Development](docs/development.md) for commands.

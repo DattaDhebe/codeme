@@ -1,0 +1,4 @@
+{
+  "backendUrl": "http://127.0.0.1:8000",
+  "defaultModel": "qwen2.5-coder:7b"
+}
