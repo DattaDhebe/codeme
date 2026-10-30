@@ -2,7 +2,7 @@ name: Validate CodeMe
 
 on:
   push:
-    branches: [main, 'checkpoint/**', 'feature/**']
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
