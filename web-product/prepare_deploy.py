@@ -17,7 +17,7 @@ ARCHIVE_BYTES = 644172
 
 def main() -> None:
     public_files = [
-        "index.html", "styles.css", "checkout.mjs",
+        ".htaccess", "index.html", "styles.css", "checkout.mjs",
         "assets/codeme-logo.svg", "assets/codeme-wordmark-light.svg",
         "assets/codeme-512.png", "api/_bootstrap.php", "api/payments.php", "api/download.php",
     ]
