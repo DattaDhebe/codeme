@@ -16,6 +16,8 @@ This file records notable development changes. **Unreleased** means changes in t
 
 ### Changed
 
+- Updated compatible Python settings and browser test-reporter dependencies; grouped related dependency updates and documented runtime migration limits.
+- Moved extension build/test tools to maintained releases with separate development Node requirements and npm advisory checks in CI.
 - Browser stack to Angular 21 with static serving; removed the unused SSR/Express path.
 - Local model readiness now distinguishes advertised tool support from successful chat setup.
 - Browser and extension connection/stream handling uses bounded waits and clearer request ownership.
@@ -23,6 +25,8 @@ This file records notable development changes. **Unreleased** means changes in t
 
 ### Fixed
 
+- Adapted extension Markdown rendering to Marked 18 token callbacks while preserving escaping, safe links, disabled images and synchronous output.
+- Aligned the installed VS Code API types with the advertised 1.90 compatibility floor and retained Python 3.10 support when updating Pydantic Settings.
 - Source-read evidence must actually reach a model turn before it can justify an edit; partial reads cannot authorize whole-file replacement.
 - Transactional editor saves verify on-disk content, preserve supported line endings, handle nested creates, and guard rollback/restore against newer changes.
 - Original tasks remain intact when context is compacted; oversized tasks fail explicitly rather than silently losing requirements.

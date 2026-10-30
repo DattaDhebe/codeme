@@ -15,6 +15,8 @@ python start.py --backend-only
 
 In another terminal, build the extension:
 
+Use **Node.js 24 LTS** for development and packaging. The development tools require Node `^22.12.0 || ^24.0.0 || >=26.0.0`. This build requirement does not change the installed extension's VS Code 1.90 compatibility floor; its host bundle still targets Node 18, and the Markdown library is bundled into the webview.
+
 ```console
 cd vscode-extension
 npm ci

@@ -100,8 +100,7 @@ function validateChangeSet(changeSet) {
   for (const operation of changeSet.operations) {
     const relativePath = validateRelativePath(operation.relative_path);
     const key = relativePath.toLocaleLowerCase();
-    if (paths.has(key))
-      throw new Error(`Duplicate change-set path: ${relativePath}`);
+    if (paths.has(key)) throw new Error(`Duplicate change-set path: ${relativePath}`);
     paths.add(key);
     if (!["create", "modify"].includes(operation.type) || !isSha256(operation.proposed_sha256)) {
       throw new Error(`Invalid operation for ${relativePath}`);
@@ -142,8 +141,7 @@ var ChangeSetManager = class {
         throw new ChangeSetConflictError(`Unsaved changes block preview for ${operation.relative_path}.`);
       }
       if (operation.type === "create") {
-        if (await this.exists(target))
-          throw new ChangeSetConflictError(`Create target now exists: ${operation.relative_path}`);
+        if (await this.exists(target)) throw new ChangeSetConflictError(`Create target now exists: ${operation.relative_path}`);
       } else {
         const document = openDocument || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
         if (sha256Text(document.getText()) !== operation.base_sha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== operation.base_sha256) {
@@ -173,8 +171,7 @@ var ChangeSetManager = class {
         throw new ChangeSetConflictError(`Unsaved changes block ${operation.relative_path}. Save or revert them before applying.`);
       }
       if (operation.type === "create") {
-        if (await this.exists(target))
-          throw new ChangeSetConflictError(`Create target now exists: ${operation.relative_path}`);
+        if (await this.exists(target)) throw new ChangeSetConflictError(`Create target now exists: ${operation.relative_path}`);
         checkpoint.files.push({
           relativePath: operation.relative_path,
           existed: false,
@@ -209,8 +206,7 @@ var ChangeSetManager = class {
     let completeEditApplied = false;
     try {
       for (const operation of changeSet.operations) {
-        if (operation.type === "create")
-          await this.createParents(root, operation.relative_path, checkpoint);
+        if (operation.type === "create") await this.createParents(root, operation.relative_path, checkpoint);
       }
       await this.writeCheckpoint(checkpoint);
       const edit = new vscode2.WorkspaceEdit();
@@ -232,8 +228,7 @@ var ChangeSetManager = class {
       editStarted = true;
       const applied = await vscode2.workspace.applyEdit(edit);
       completeEditApplied = applied;
-      if (!applied)
-        throw new Error("VS Code rejected the complete WorkspaceEdit.");
+      if (!applied) throw new Error("VS Code rejected the complete WorkspaceEdit.");
       await this.saveFiles(changeSet.operations.map((operation) => ({
         relativePath: operation.relative_path,
         expectedHash: operation.proposed_sha256
@@ -242,8 +237,7 @@ var ChangeSetManager = class {
       return { checkpointReference, resultHashes };
     } catch (error) {
       try {
-        if (editStarted)
-          await this.rollbackCheckpoint(checkpoint, completeEditApplied);
+        if (editStarted) await this.rollbackCheckpoint(checkpoint, completeEditApplied);
       } catch (rollbackError) {
         throw new Error(`${error.message} Automatic rollback stopped: ${rollbackError.message} Recovery checkpoint: ${checkpointReference}`);
       } finally {
@@ -254,8 +248,7 @@ var ChangeSetManager = class {
   }
   async restore(changeSet, folder) {
     const checkpointReference = changeSet.checkpoint_reference;
-    if (!checkpointReference)
-      throw new ChangeSetConflictError("This change set has no checkpoint.");
+    if (!checkpointReference) throw new ChangeSetConflictError("This change set has no checkpoint.");
     const checkpoint = await this.readCheckpoint(checkpointReference);
     const root = await import_fs.promises.realpath(folder.uri.fsPath);
     if (!samePath(checkpoint.workspaceRoot, root)) {
@@ -263,11 +256,9 @@ var ChangeSetManager = class {
     }
     for (const file of checkpoint.files) {
       const operation = changeSet.operations.find((item) => item.relative_path === file.relativePath);
-      if (!operation)
-        throw new ChangeSetConflictError(`Checkpoint operation is missing: ${file.relativePath}`);
+      if (!operation) throw new ChangeSetConflictError(`Checkpoint operation is missing: ${file.relativePath}`);
       const target = await this.resolveTarget(root, operation, true);
-      if (!await this.exists(target))
-        throw new ChangeSetConflictError(`Applied file is missing: ${file.relativePath}`);
+      if (!await this.exists(target)) throw new ChangeSetConflictError(`Applied file is missing: ${file.relativePath}`);
       const document = this.findOpenDocument(vscode2.Uri.file(target)) || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
       if (document.isDirty || sha256Text(document.getText()) !== file.appliedSha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== file.appliedSha256) {
         throw new ChangeSetConflictError(`Restore conflict: ${file.relativePath} changed after application.`);
@@ -286,8 +277,7 @@ var ChangeSetManager = class {
         this.setReviewedEndOfLine(edit, uri, original);
       }
     }
-    if (!await vscode2.workspace.applyEdit(edit))
-      throw new Error("VS Code rejected the restore WorkspaceEdit.");
+    if (!await vscode2.workspace.applyEdit(edit)) throw new Error("VS Code rejected the restore WorkspaceEdit.");
     await this.saveFiles(checkpoint.files.filter((file) => file.existed).map((file) => ({
       relativePath: file.relativePath,
       expectedHash: file.originalSha256
@@ -295,12 +285,10 @@ var ChangeSetManager = class {
     for (const file of checkpoint.files) {
       const target = path.join(root, validateRelativePath(file.relativePath));
       if (!file.existed) {
-        if (await this.exists(target))
-          throw new Error(`Restore verification failed for ${file.relativePath}`);
+        if (await this.exists(target)) throw new Error(`Restore verification failed for ${file.relativePath}`);
       } else {
         const document = this.findOpenDocument(vscode2.Uri.file(target)) || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
-        if (sha256Text(document.getText()) !== file.originalSha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== file.originalSha256)
-          throw new Error(`Restore verification failed for ${file.relativePath}`);
+        if (sha256Text(document.getText()) !== file.originalSha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== file.originalSha256) throw new Error(`Restore verification failed for ${file.relativePath}`);
       }
     }
     await this.removeCreatedDirectories(checkpoint);
@@ -310,10 +298,8 @@ var ChangeSetManager = class {
       const uri = vscode2.Uri.file(path.join(root, validateRelativePath(file.relativePath)));
       this.assertInside(root, await import_fs.promises.realpath(uri.fsPath), file.relativePath);
       const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
-      if (sha256Text(document.getText()) !== file.expectedHash)
-        throw new ChangeSetConflictError(`Editor content changed before saving: ${file.relativePath}`);
-      if (!await document.save())
-        throw new Error(`Could not save ${file.relativePath}. The change cannot be reported as applied.`);
+      if (sha256Text(document.getText()) !== file.expectedHash) throw new ChangeSetConflictError(`Editor content changed before saving: ${file.relativePath}`);
+      if (!await document.save()) throw new Error(`Could not save ${file.relativePath}. The change cannot be reported as applied.`);
       if (document.isDirty || sha256Text(document.getText()) !== file.expectedHash || sha256Bytes(await import_fs.promises.readFile(uri.fsPath)) !== file.expectedHash) {
         throw new ChangeSetConflictError(`Saved content differs from the reviewed change: ${file.relativePath}`);
       }
@@ -327,8 +313,7 @@ var ChangeSetManager = class {
   }
   setReviewedEndOfLine(edit, uri, content) {
     const eol = this.reviewedEndOfLine(content);
-    if (eol !== void 0)
-      edit.set(uri, [vscode2.TextEdit.setEndOfLine(eol)]);
+    if (eol !== void 0) edit.set(uri, [vscode2.TextEdit.setEndOfLine(eol)]);
   }
   async verifyApplied(changeSet, root) {
     const hashes = {};
@@ -337,10 +322,8 @@ var ChangeSetManager = class {
       const uri = vscode2.Uri.file(path.join(root, validateRelativePath(operation.relative_path)));
       const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
       const hash = sha256Text(document.getText());
-      if (hash !== operation.proposed_sha256)
-        throw new Error(`Application verification failed for ${operation.relative_path}`);
-      if (sha256Bytes(await import_fs.promises.readFile(uri.fsPath)) !== operation.proposed_sha256)
-        throw new Error(`Disk verification failed for ${operation.relative_path}`);
+      if (hash !== operation.proposed_sha256) throw new Error(`Application verification failed for ${operation.relative_path}`);
+      if (sha256Bytes(await import_fs.promises.readFile(uri.fsPath)) !== operation.proposed_sha256) throw new Error(`Disk verification failed for ${operation.relative_path}`);
       hashes[operation.relative_path] = hash;
     }
     return hashes;
@@ -352,8 +335,7 @@ var ChangeSetManager = class {
         type: file.existed ? "modify" : "create"
       }, true);
       if (!await this.exists(target)) {
-        if (file.existed)
-          throw new ChangeSetConflictError(`Rollback conflict: ${file.relativePath} was removed.`);
+        if (file.existed) throw new ChangeSetConflictError(`Rollback conflict: ${file.relativePath} was removed.`);
         continue;
       }
       const allowed = /* @__PURE__ */ new Set([file.appliedSha256, file.originalSha256 || sha256Text("")]);
@@ -384,8 +366,7 @@ var ChangeSetManager = class {
         edit.insert(uri, new vscode2.Position(0, 0), Buffer.from(file.originalBase64, "base64").toString("utf8"));
       }
     }
-    if (!await vscode2.workspace.applyEdit(edit))
-      throw new Error("Rollback failed. The saved checkpoint is available for recovery.");
+    if (!await vscode2.workspace.applyEdit(edit)) throw new Error("Rollback failed. The saved checkpoint is available for recovery.");
     await this.saveFiles(checkpoint.files.filter((file) => file.existed).map((file) => ({
       relativePath: file.relativePath,
       expectedHash: file.originalSha256
@@ -408,8 +389,7 @@ var ChangeSetManager = class {
       let parent = path.dirname(target);
       while (!await this.exists(parent)) {
         const next = path.dirname(parent);
-        if (next === parent)
-          throw new ChangeSetConflictError(`No safe parent exists for ${relativePath}`);
+        if (next === parent) throw new ChangeSetConflictError(`No safe parent exists for ${relativePath}`);
         parent = next;
       }
       const realParent = await import_fs.promises.realpath(parent);
@@ -433,12 +413,10 @@ var ChangeSetManager = class {
         await import_fs.promises.mkdir(parent);
         checkpoint.createdDirectories.push(path.relative(root, parent).split(path.sep).join("/"));
       } catch (error) {
-        if (error.code !== "EEXIST")
-          throw error;
+        if (error.code !== "EEXIST") throw error;
       }
       this.assertInside(root, await import_fs.promises.realpath(parent), relativePath);
-      if (!(await import_fs.promises.stat(parent)).isDirectory())
-        throw new ChangeSetConflictError(`Create parent is not a directory: ${relativePath}`);
+      if (!(await import_fs.promises.stat(parent)).isDirectory()) throw new ChangeSetConflictError(`Create parent is not a directory: ${relativePath}`);
     }
   }
   async removeCreatedDirectories(checkpoint) {
@@ -446,13 +424,11 @@ var ChangeSetManager = class {
       const target = path.resolve(checkpoint.workspaceRoot, validateRelativePath(relativePath));
       this.assertInside(checkpoint.workspaceRoot, target, relativePath);
       try {
-        if ((await import_fs.promises.lstat(target)).isSymbolicLink())
-          continue;
+        if ((await import_fs.promises.lstat(target)).isSymbolicLink()) continue;
         this.assertInside(checkpoint.workspaceRoot, await import_fs.promises.realpath(target), relativePath);
         await import_fs.promises.rmdir(target);
       } catch (error) {
-        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code || ""))
-          throw error;
+        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code || "")) throw error;
       }
     }
   }
@@ -470,8 +446,7 @@ var ChangeSetManager = class {
       await import_fs.promises.lstat(target);
       return true;
     } catch (error) {
-      if (error.code === "ENOENT")
-        return false;
+      if (error.code === "ENOENT") return false;
       throw error;
     }
   }
@@ -486,12 +461,10 @@ var ChangeSetManager = class {
     return reference;
   }
   async readCheckpoint(reference) {
-    if (!/^[a-zA-Z0-9._-]+\.json$/.test(reference))
-      throw new ChangeSetConflictError("Invalid checkpoint reference.");
+    if (!/^[a-zA-Z0-9._-]+\.json$/.test(reference)) throw new ChangeSetConflictError("Invalid checkpoint reference.");
     const bytes = await vscode2.workspace.fs.readFile(this.checkpointUri(reference));
     const checkpoint = JSON.parse(Buffer.from(bytes).toString("utf8"));
-    if (checkpoint.schemaVersion !== 1)
-      throw new ChangeSetConflictError("Unsupported checkpoint version.");
+    if (checkpoint.schemaVersion !== 1) throw new ChangeSetConflictError("Unsupported checkpoint version.");
     return checkpoint;
   }
 };
@@ -605,29 +578,23 @@ var CommandPolicyError = class extends Error {
 };
 function filteredEnvironment(profile, source = process.env) {
   const baseKeys = ["PATH", "Path", "PATHEXT", "SystemRoot", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "USERPROFILE", "HOME", "LANG", "LC_ALL"];
-  if (profile.startsWith("dotnet"))
-    baseKeys.push("DOTNET_ROOT", "DOTNET_CLI_HOME");
-  if (profile.startsWith("maven") || profile.startsWith("gradle"))
-    baseKeys.push("JAVA_HOME");
+  if (profile.startsWith("dotnet")) baseKeys.push("DOTNET_ROOT", "DOTNET_CLI_HOME");
+  if (profile.startsWith("maven") || profile.startsWith("gradle")) baseKeys.push("JAVA_HOME");
   const environment = {};
   for (const key of baseKeys) {
-    if (SECRET_ENV.test(key))
-      continue;
+    if (SECRET_ENV.test(key)) continue;
     const actualKey = Object.keys(source).find((item) => item.toLowerCase() === key.toLowerCase());
-    if (actualKey && source[actualKey] !== void 0)
-      environment[actualKey] = source[actualKey];
+    if (actualKey && source[actualKey] !== void 0) environment[actualKey] = source[actualKey];
   }
   return environment;
 }
 function validateArguments(arguments_) {
-  if (arguments_.length > 50)
-    throw new CommandPolicyError("Too many command arguments.");
+  if (arguments_.length > 50) throw new CommandPolicyError("Too many command arguments.");
   for (const argument of arguments_) {
     if (typeof argument !== "string" || argument.length > 500 || argument.includes("\0")) {
       throw new CommandPolicyError("Command arguments must be bounded literal strings.");
     }
-    if (SHELL_META.test(argument))
-      throw new CommandPolicyError("Shell metacharacters are not allowed.");
+    if (SHELL_META.test(argument)) throw new CommandPolicyError("Shell metacharacters are not allowed.");
     const normalized = argument.replace(/\\/g, "/");
     if (path2.isAbsolute(argument) || /^[\\/]{2}/.test(argument) || /^[A-Za-z]:/.test(argument) || normalized.split("/").includes("..")) {
       throw new CommandPolicyError("Absolute, UNC, and traversal argument paths are not allowed.");
@@ -682,8 +649,7 @@ function profileCommand(profile, arguments_, config) {
         throw new CommandPolicyError("Custom executable aliases are disabled unless explicitly allowlisted by the user.");
       }
       const executable = allowlist[alias];
-      if (!executable || typeof executable !== "string")
-        throw new CommandPolicyError("The custom executable alias is invalid.");
+      if (!executable || typeof executable !== "string") throw new CommandPolicyError("The custom executable alias is invalid.");
       return { executable, args: rest };
     }
   }
@@ -737,8 +703,7 @@ function inside(root, candidate) {
   return relative4 === "" || !relative4.startsWith("..") && !path2.isAbsolute(relative4);
 }
 async function evaluateCommandPolicy(commandRun, registeredRoot, activeFolderRoot, config, sourceEnvironment = process.env) {
-  if (commandRun.schema_version !== 1 || !PROFILES.has(commandRun.profile))
-    throw new CommandPolicyError("Unsupported command proposal.");
+  if (commandRun.schema_version !== 1 || !PROFILES.has(commandRun.profile)) throw new CommandPolicyError("Unsupported command proposal.");
   validateArguments(commandRun.arguments);
   if (/^[\\/]{2}/.test(registeredRoot) || /^[\\/]{2}/.test(activeFolderRoot)) {
     throw new CommandPolicyError("UNC workspaces are not supported for controlled execution.");
@@ -758,15 +723,12 @@ async function evaluateCommandPolicy(commandRun, registeredRoot, activeFolderRoo
     throw new CommandPolicyError("The command workspace does not match the active registered workspace.");
   }
   const cwd = await import_node_fs.promises.realpath(path2.resolve(registeredReal, commandRun.cwd_relative));
-  if (!inside(registeredReal, cwd))
-    throw new CommandPolicyError("The working directory escapes through traversal, symlink, or junction.");
-  if (!(await import_node_fs.promises.stat(cwd)).isDirectory())
-    throw new CommandPolicyError("The command working directory does not exist.");
+  if (!inside(registeredReal, cwd)) throw new CommandPolicyError("The working directory escapes through traversal, symlink, or junction.");
+  if (!(await import_node_fs.promises.stat(cwd)).isDirectory()) throw new CommandPolicyError("The command working directory does not exist.");
   const timeoutSeconds = Math.max(1, Math.min(commandRun.requested_timeout_seconds || 120, 900));
   const resolved = profileCommand(commandRun.profile, commandRun.arguments, config);
   const baseName = path2.basename(resolved.executable).toLowerCase();
-  if (BLOCKED_EXECUTABLES.has(baseName))
-    throw new CommandPolicyError("Shell and system executables cannot be used by a controlled profile.");
+  if (BLOCKED_EXECUTABLES.has(baseName)) throw new CommandPolicyError("Shell and system executables cannot be used by a controlled profile.");
   const windowsWrapper = process.platform === "win32" && /\.(cmd|bat)$/i.test(resolved.executable);
   if (windowsWrapper && resolved.args.some((argument) => WINDOWS_WRAPPER_META.test(argument))) {
     throw new CommandPolicyError("A Windows wrapper argument contains expansion or shell metacharacters.");
@@ -793,8 +755,7 @@ async function evaluateCommandPolicy(commandRun, registeredRoot, activeFolderRoo
   };
 }
 function quoteWindowsWrapperArgument(value) {
-  if (WINDOWS_WRAPPER_META.test(value))
-    throw new CommandPolicyError("Unsafe Windows wrapper argument.");
+  if (WINDOWS_WRAPPER_META.test(value)) throw new CommandPolicyError("Unsafe Windows wrapper argument.");
   return `"${value.replace(/\\*(?=")/g, (slashes) => `${slashes}${slashes}`)}"`;
 }
 
@@ -822,8 +783,7 @@ var ControlledProcessRunner = class {
     if (decision.blocked || decision.risk === "BLOCKED") {
       throw new Error("A blocked command cannot start.");
     }
-    if (this.active.has(commandRun.id))
-      throw new Error("This command run is already active.");
+    if (this.active.has(commandRun.id)) throw new Error("This command run is already active.");
     const started = /* @__PURE__ */ new Date();
     let executable = decision.executable;
     let args = [...decision.args];
@@ -860,20 +820,16 @@ var ControlledProcessRunner = class {
       const stderrDecoder = new import_node_string_decoder.StringDecoder("utf8");
       const emit = (stream, raw) => {
         const value = cleanOutput(raw);
-        if (stream === "stdout")
-          stdoutTail = appendTail(stdoutTail, value, this.tailLimit);
-        else
-          stderrTail = appendTail(stderrTail, value, this.tailLimit);
+        if (stream === "stdout") stdoutTail = appendTail(stdoutTail, value, this.tailLimit);
+        else stderrTail = appendTail(stderrTail, value, this.tailLimit);
         const size = Buffer.byteLength(value, "utf8");
         const remaining = Math.max(0, this.displayLimit - displayed);
         if (displayed < this.displayLimit) {
           const visible = size <= remaining ? value : Buffer.from(value, "utf8").subarray(0, remaining).toString("utf8");
-          if (visible)
-            onOutput({ commandRunId: commandRun.id, stream, text: visible });
+          if (visible) onOutput({ commandRunId: commandRun.id, stream, text: visible });
           displayed += Math.min(size, remaining);
         }
-        if (size > remaining)
-          outputTruncated = true;
+        if (size > remaining) outputTruncated = true;
       };
       child.stdout?.on("data", (chunk) => emit("stdout", stdoutDecoder.write(chunk)));
       child.stderr?.on("data", (chunk) => emit("stderr", stderrDecoder.write(chunk)));
@@ -882,15 +838,13 @@ var ControlledProcessRunner = class {
       });
       const timeout = setTimeout(() => {
         const current = this.active.get(commandRun.id);
-        if (!current || settled)
-          return;
+        if (!current || settled) return;
         current.cancellation = "timed_out";
         onOutput({ commandRunId: commandRun.id, stream: "status", text: "Timed out; terminating process tree" });
         void this.terminateTree(current.child);
       }, decision.timeoutSeconds * 1e3);
       child.on("close", (code, signal) => {
-        if (settled)
-          return;
+        if (settled) return;
         settled = true;
         clearTimeout(timeout);
         emit("stdout", stdoutDecoder.end());
@@ -919,16 +873,13 @@ var ControlledProcessRunner = class {
   }
   async cancel(commandRunId) {
     const active = this.active.get(commandRunId);
-    if (!active)
-      return false;
-    if (!active.cancellation)
-      active.cancellation = "cancelled";
+    if (!active) return false;
+    if (!active.cancellation) active.cancellation = "cancelled";
     await this.terminateTree(active.child);
     return true;
   }
   dispose() {
-    for (const [id] of this.active)
-      void this.cancel(id);
+    for (const [id] of this.active) void this.cancel(id);
   }
   spawnFailure(started, error) {
     const completed = /* @__PURE__ */ new Date();
@@ -948,8 +899,7 @@ var ControlledProcessRunner = class {
     };
   }
   async terminateTree(child) {
-    if (!child.pid)
-      return;
+    if (!child.pid) return;
     if (process.platform === "win32") {
       await new Promise((resolve4) => {
         const systemRoot = process.env.SystemRoot || process.env.SYSTEMROOT || "C:\\Windows";
@@ -1016,8 +966,7 @@ var ModelSetupMonitor = class {
   }
   stop() {
     this.generation++;
-    if (this.timer)
-      clearTimeout(this.timer);
+    if (this.timer) clearTimeout(this.timer);
     this.timer = void 0;
   }
   async refresh(action = "check") {
@@ -1027,13 +976,11 @@ var ModelSetupMonitor = class {
   async poll(generation, action) {
     try {
       let status = action === "start" ? await this.backend.startModelSetup() : action === "cancel" ? await this.backend.cancelModelSetup() : await this.backend.getModelSetup();
-      if (generation !== this.generation)
-        return;
+      if (generation !== this.generation) return;
       if (action === "check" && status.state === "idle" && status.auto_setup_enabled) {
         status = await this.backend.startModelSetup();
       }
-      if (generation !== this.generation)
-        return;
+      if (generation !== this.generation) return;
       await this.update(status);
       if (generation === this.generation && (setupActive(status.state) || !status.can_retry || status.state === "ready")) {
         this.timer = setTimeout(() => {
@@ -1122,11 +1069,9 @@ var PersonalCodexSidebarProvider = class {
     this.backend.cancel();
     if (cancelTask && active) {
       active.cancelled = true;
-      if (active.runId)
-        void this.cancelTask(active.runId);
+      if (active.runId) void this.cancelTask(active.runId);
     }
-    if (notify && active)
-      void this.send({ command: "streamStopped", payload: active });
+    if (notify && active) void this.send({ command: "streamStopped", payload: active });
   }
   async workspaceChanged() {
     this.cancelActiveChat(true);
@@ -1308,8 +1253,7 @@ var PersonalCodexSidebarProvider = class {
   }
   async requestWorkspaceRegistration() {
     const folder = this.getActiveWorkspaceFolder();
-    if (!folder)
-      return false;
+    if (!folder) return false;
     const rememberedConsent = this.context.workspaceState.get(this.workspaceConsentKey(folder), false);
     if (!rememberedConsent) {
       const choice = await vscode3.window.showInformationMessage(
@@ -1317,8 +1261,7 @@ var PersonalCodexSidebarProvider = class {
         { modal: true },
         "Register workspace"
       );
-      if (choice !== "Register workspace")
-        return false;
+      if (choice !== "Register workspace") return false;
       await this.context.workspaceState.update(this.workspaceConsentKey(folder), true);
     }
     try {
@@ -1335,27 +1278,24 @@ var PersonalCodexSidebarProvider = class {
     await this.setupMonitor().refresh();
   }
   setupMonitor() {
-    if (!this.modelSetupMonitor)
-      this.modelSetupMonitor = new ModelSetupMonitor(this.backend, async (status) => {
-        await this.send({ command: "modelSetupStatus", payload: status });
-      }, async (error) => {
-        await this.send({ command: "backendStatus", payload: {
-          online: false,
-          models: [],
-          ollama: false,
-          error: error.message
-        } });
-      });
+    if (!this.modelSetupMonitor) this.modelSetupMonitor = new ModelSetupMonitor(this.backend, async (status) => {
+      await this.send({ command: "modelSetupStatus", payload: status });
+    }, async (error) => {
+      await this.send({ command: "backendStatus", payload: {
+        online: false,
+        models: [],
+        ollama: false,
+        error: error.message
+      } });
+    });
     return this.modelSetupMonitor;
   }
   async refreshConversations(query) {
     const generation = ++this.historyGeneration;
-    if (query !== void 0)
-      this.conversationQuery = query;
+    if (query !== void 0) this.conversationQuery = query;
     try {
       const conversations = await this.backend.listConversations(this.conversationQuery);
-      if (generation !== this.historyGeneration)
-        return;
+      if (generation !== this.historyGeneration) return;
       await this.send({ command: "conversationsUpdated", payload: conversations });
     } catch (error) {
       console.warn("Unable to load CodeMe conversations.", error);
@@ -1369,44 +1309,35 @@ var PersonalCodexSidebarProvider = class {
         this.backend.getConversationMessages(conversationId),
         this.backend.listAgentRuns?.(conversationId).catch(() => []) || Promise.resolve([])
       ]);
-      if (generation !== this.conversationLoadGeneration)
-        return;
+      if (generation !== this.conversationLoadGeneration) return;
       const run = runs.sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
-      if (run)
-        this.agentRuns.set(conversationId, run);
+      if (run) this.agentRuns.set(conversationId, run);
       await this.send({ command: "conversationLoaded", payload: { conversationId, messages } });
       if (run) {
         await this.send({ command: "agentRunUpdated", payload: run });
         await this.restoreTaskProposals(run, generation);
       }
     } catch (error) {
-      if (generation !== this.conversationLoadGeneration)
-        return;
+      if (generation !== this.conversationLoadGeneration) return;
       await this.send({ command: "operationError", payload: { message: error.message } });
     }
   }
   async restoreTaskProposals(run, generation) {
     const changes = await Promise.allSettled(run.pending_change_set_ids.map((id) => this.backend.getChangeSet(id)));
     const commands3 = await Promise.allSettled(run.pending_command_run_ids.map((id) => this.backend.getCommandRun(id)));
-    if (generation !== this.conversationLoadGeneration || this.selectedConversationId !== run.conversation_id)
-      return;
-    for (const result of changes)
-      if (result.status === "fulfilled") {
-        await this.send({ command: "agentProposalRecovered", payload: { conversationId: run.conversation_id, changeSet: result.value } });
-      }
-    for (const result of commands3)
-      if (result.status === "fulfilled") {
-        await this.prepareCommandProposalEvent(run.conversation_id, result.value, void 0, this.chatGeneration, true);
-      }
+    if (generation !== this.conversationLoadGeneration || this.selectedConversationId !== run.conversation_id) return;
+    for (const result of changes) if (result.status === "fulfilled") {
+      await this.send({ command: "agentProposalRecovered", payload: { conversationId: run.conversation_id, changeSet: result.value } });
+    }
+    for (const result of commands3) if (result.status === "fulfilled") {
+      await this.prepareCommandProposalEvent(run.conversation_id, result.value, void 0, this.chatGeneration, true);
+    }
   }
   taskForAction(conversationId, actionId) {
     const run = this.agentRuns.get(conversationId);
-    if (!run || run.workspace_id !== this.currentWorkspaceId || this.selectedConversationId !== conversationId)
-      return void 0;
-    if (["completed", "cancelled", "exhausted"].includes(run.status))
-      return void 0;
-    if (actionId && !run.pending_change_set_ids.includes(actionId) && !run.pending_command_run_ids.includes(actionId))
-      return void 0;
+    if (!run || run.workspace_id !== this.currentWorkspaceId || this.selectedConversationId !== conversationId) return void 0;
+    if (["completed", "cancelled", "exhausted"].includes(run.status)) return void 0;
+    if (actionId && !run.pending_change_set_ids.includes(actionId) && !run.pending_command_run_ids.includes(actionId)) return void 0;
     return run;
   }
   ownsTask(runId, conversationId, generation) {
@@ -1414,29 +1345,23 @@ var PersonalCodexSidebarProvider = class {
   }
   acceptAgentEvent(event, conversationId, requestId, generation, active = this.activeChat) {
     if (event.type === "task") {
-      if (active)
-        active.runId = event.run.id;
+      if (active) active.runId = event.run.id;
       if (active?.cancelled) {
         void this.cancelTask(event.run.id);
         return;
       }
     }
-    if (generation !== this.chatGeneration)
-      return;
-    if (event.type === "task")
-      this.agentRuns.set(conversationId, event.run);
+    if (generation !== this.chatGeneration) return;
+    if (event.type === "task") this.agentRuns.set(conversationId, event.run);
     if (event.type === "proposal" && event.kind === "verification_plan") {
       const runId = active?.runId || this.agentRuns.get(conversationId)?.id;
-      if (runId)
-        this.taskVerificationOwners.set(event.verification_session.id, { runId, generation });
+      if (runId) this.taskVerificationOwners.set(event.verification_session.id, { runId, generation });
       void this.publishVerification(event.verification_session).catch((error) => {
-        if (generation === this.chatGeneration)
-          void this.send({ command: "operationError", payload: { message: error.message } });
+        if (generation === this.chatGeneration) void this.send({ command: "operationError", payload: { message: error.message } });
       });
       return;
     }
-    if (event.type === "proposal" && event.kind === "file_change" && event.change_set)
-      this.legacyChangeSets.set(event.path, event.change_set);
+    if (event.type === "proposal" && event.kind === "file_change" && event.change_set) this.legacyChangeSets.set(event.path, event.change_set);
     if (event.type === "proposal" && event.kind === "command_proposal") {
       void this.prepareCommandProposalEvent(conversationId, event.command_run, requestId, generation);
       return;
@@ -1444,16 +1369,14 @@ var PersonalCodexSidebarProvider = class {
     void this.send({ command: "agentEvent", payload: { conversationId, requestId, event } });
   }
   async cancelTask(runId) {
-    if (this.cancellingAgentRuns.has(runId))
-      return;
+    if (this.cancellingAgentRuns.has(runId)) return;
     this.cancellingAgentRuns.add(runId);
     this.cancelledAgentRuns.add(runId);
     this.pendingTaskContinuations.delete(runId);
     const known = [...this.agentRuns.values()].find((item) => item.id === runId);
     try {
       for (const [commandId, owner] of this.taskActiveCommands) {
-        if (owner.runId === runId && (!known || owner.conversationId === known.conversation_id))
-          await this.processRunner.cancel(commandId);
+        if (owner.runId === runId && (!known || owner.conversationId === known.conversation_id)) await this.processRunner.cancel(commandId);
       }
       if (known && this.backend.listVerificationSessions) {
         const sessions = await this.backend.listVerificationSessions(known.workspace_id, true).catch(() => []);
@@ -1464,15 +1387,13 @@ var PersonalCodexSidebarProvider = class {
         }
       }
       for (const [sessionId, owner] of this.taskVerificationOwners) {
-        if (owner.runId !== runId)
-          continue;
+        if (owner.runId !== runId) continue;
         this.taskVerificationOwners.delete(sessionId);
         await this.cancelVerification(sessionId);
       }
       const run = await this.backend.cancelAgentRun(runId);
       const current = this.agentRuns.get(run.conversation_id);
-      if (!current || current.id === runId)
-        this.agentRuns.set(run.conversation_id, run);
+      if (!current || current.id === runId) this.agentRuns.set(run.conversation_id, run);
       await this.send({ command: "agentRunUpdated", payload: run });
     } catch (error) {
       await this.send({ command: "operationError", payload: { message: `Unable to cancel task: ${error.message}` } });
@@ -1482,21 +1403,17 @@ var PersonalCodexSidebarProvider = class {
   }
   async continueTask(runId, requestId, automatic = false, ownerGeneration = this.chatGeneration) {
     const stopResume = async (message, conversationId = this.selectedConversationId) => {
-      if (automatic)
-        return;
-      if (requestId)
-        await this.send({ command: "streamStopped", payload: { conversationId, requestId } });
+      if (automatic) return;
+      if (requestId) await this.send({ command: "streamStopped", payload: { conversationId, requestId } });
       await this.send({ command: "taskNotice", payload: { conversationId, message } });
     };
     if (this.continuingAgentRuns.has(runId) || this.activeChat) {
-      if (automatic && this.activeChat?.runId === runId)
-        this.pendingTaskContinuations.set(runId, ownerGeneration);
+      if (automatic && this.activeChat?.runId === runId) this.pendingTaskContinuations.set(runId, ownerGeneration);
       await stopResume("A local request is already running. Wait for it to finish before resuming.");
       return;
     }
     const known = [...this.agentRuns.values()].find((item) => item.id === runId);
-    if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration)
-      this.cancelledAgentRuns.delete(runId);
+    if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration) this.cancelledAgentRuns.delete(runId);
     if (!known || !this.ownsTask(runId, known.conversation_id, ownerGeneration) || known.workspace_id !== this.currentWorkspaceId) {
       await stopResume("Reload this conversation and register its workspace before resuming the saved task.");
       return;
@@ -1504,20 +1421,17 @@ var PersonalCodexSidebarProvider = class {
     this.continuingAgentRuns.add(runId);
     try {
       const run = await this.backend.getAgentRun(runId);
-      if (!this.ownsTask(runId, run.conversation_id, ownerGeneration))
-        return;
+      if (!this.ownsTask(runId, run.conversation_id, ownerGeneration)) return;
       this.agentRuns.set(run.conversation_id, run);
       await this.send({ command: "agentRunUpdated", payload: run });
       if (["completed", "cancelled", "exhausted"].includes(run.status)) {
         await stopResume(run.summary || `Task is ${run.status}.`, run.conversation_id);
         return;
       }
-      if (automatic && ["interrupted", "blocked"].includes(run.status))
-        return;
+      if (automatic && ["interrupted", "blocked"].includes(run.status)) return;
       if (run.model && this.backend.getModelCapabilities) {
         const capabilities = await this.backend.getModelCapabilities(run.model);
-        if (!this.ownsTask(runId, run.conversation_id, ownerGeneration))
-          return;
+        if (!this.ownsTask(runId, run.conversation_id, ownerGeneration)) return;
         if (capabilities.agent_ready === false) {
           await stopResume("This task model does not support Agent tools. Start a new task with a tool-capable local model.", run.conversation_id);
           return;
@@ -1531,21 +1445,17 @@ var PersonalCodexSidebarProvider = class {
         runId,
         (event) => this.acceptAgentEvent(event, run.conversation_id, requestId, generation, active),
         () => {
-          if (generation === this.chatGeneration)
-            void this.send({ command: "streamComplete", payload: active });
+          if (generation === this.chatGeneration) void this.send({ command: "streamComplete", payload: active });
         },
         (error) => {
-          if (generation !== this.chatGeneration)
-            return;
+          if (generation !== this.chatGeneration) return;
           if (error.message.includes("409")) {
             void this.send({ command: "streamStopped", payload: active });
             void this.send({ command: "taskNotice", payload: { conversationId: run.conversation_id, message: "Review pending changes, commands, or the verification plan before resuming." } });
-          } else
-            void this.send({ command: error.name === "AbortError" ? "streamStopped" : "streamError", payload: { ...active, message: error.message } });
+          } else void this.send({ command: error.name === "AbortError" ? "streamStopped" : "streamError", payload: { ...active, message: error.message } });
         }
       );
-      if (generation === this.chatGeneration)
-        this.activeChat = void 0;
+      if (generation === this.chatGeneration) this.activeChat = void 0;
     } catch (error) {
       if (this.ownsTask(runId, known.conversation_id, ownerGeneration)) {
         this.activeChat = void 0;
@@ -1557,11 +1467,9 @@ var PersonalCodexSidebarProvider = class {
     }
   }
   async drainTaskContinuation() {
-    if (this.activeChat)
-      return;
+    if (this.activeChat) return;
     const pending = this.pendingTaskContinuations?.entries().next().value;
-    if (!pending)
-      return;
+    if (!pending) return;
     this.pendingTaskContinuations.delete(pending[0]);
     await this.continueTask(pending[0], void 0, true, pending[1]);
   }
@@ -1630,16 +1538,13 @@ var PersonalCodexSidebarProvider = class {
       case "checkModelCapabilities": {
         const model = message.args?.model;
         const requestId = message.args?.requestId;
-        if (typeof model !== "string" || model.length > 250)
-          break;
+        if (typeof model !== "string" || model.length > 250) break;
         const generation = ++this.modelCapabilityGeneration;
         try {
           const capabilities = await this.backend.getModelCapabilities(model);
-          if (generation === this.modelCapabilityGeneration)
-            await this.send({ command: "modelCapabilities", payload: { ...capabilities, requestId } });
+          if (generation === this.modelCapabilityGeneration) await this.send({ command: "modelCapabilities", payload: { ...capabilities, requestId } });
         } catch (error) {
-          if (generation === this.modelCapabilityGeneration)
-            await this.send({ command: "modelCapabilityError", payload: { model, requestId, message: error.message } });
+          if (generation === this.modelCapabilityGeneration) await this.send({ command: "modelCapabilityError", payload: { model, requestId, message: error.message } });
         }
         break;
       }
@@ -1654,13 +1559,11 @@ var PersonalCodexSidebarProvider = class {
         this.selectedConversationId = void 0;
         break;
       case "resumeAgentRun":
-        if (typeof message.args?.runId === "string")
-          await this.continueTask(message.args.runId, typeof message.args.requestId === "string" ? message.args.requestId : void 0);
+        if (typeof message.args?.runId === "string") await this.continueTask(message.args.runId, typeof message.args.requestId === "string" ? message.args.requestId : void 0);
         break;
       case "cancelAgentRun":
         if (typeof message.args?.runId === "string") {
-          if (this.activeChat?.runId === message.args.runId)
-            this.cancelActiveChat(true);
+          if (this.activeChat?.runId === message.args.runId) this.cancelActiveChat(true);
           await this.cancelTask(message.args.runId);
         }
         break;
@@ -1675,8 +1578,7 @@ var PersonalCodexSidebarProvider = class {
         break;
       case "deleteConversation":
         if (typeof message.args?.conversationId === "number") {
-          if (this.activeChat?.conversationId === message.args.conversationId)
-            this.cancelActiveChat(true);
+          if (this.activeChat?.conversationId === message.args.conversationId) this.cancelActiveChat(true);
           await this.backend.deleteConversation(message.args.conversationId);
           await this.send({ command: "conversationDeleted", payload: { conversationId: message.args.conversationId } });
           await this.refreshConversations();
@@ -1771,32 +1673,25 @@ var PersonalCodexSidebarProvider = class {
         }
         break;
       case "approveVerification":
-        if (typeof message.args?.sessionId === "string")
-          await this.approveVerification(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.approveVerification(message.args.sessionId);
         break;
       case "rejectVerification":
-        if (typeof message.args?.sessionId === "string")
-          await this.rejectVerification(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.rejectVerification(message.args.sessionId);
         break;
       case "cancelVerification":
-        if (typeof message.args?.sessionId === "string")
-          await this.cancelVerification(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.cancelVerification(message.args.sessionId);
         break;
       case "previewVerificationRepair":
-        if (typeof message.args?.changeSetId === "string")
-          await this.previewChangeSet(await this.backend.getChangeSet(message.args.changeSetId));
+        if (typeof message.args?.changeSetId === "string") await this.previewChangeSet(await this.backend.getChangeSet(message.args.changeSetId));
         break;
       case "applyVerificationRepair":
-        if (typeof message.args?.sessionId === "string")
-          await this.applyVerificationRepair(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.applyVerificationRepair(message.args.sessionId);
         break;
       case "rejectVerificationRepair":
-        if (typeof message.args?.sessionId === "string")
-          await this.rejectVerificationRepair(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.rejectVerificationRepair(message.args.sessionId);
         break;
       case "restoreVerificationRepair":
-        if (typeof message.args?.sessionId === "string")
-          await this.restoreVerificationRepair(message.args.sessionId);
+        if (typeof message.args?.sessionId === "string") await this.restoreVerificationRepair(message.args.sessionId);
         break;
       case "openSettings":
         await vscode3.commands.executeCommand("workbench.action.openSettings", "@ext:personal-codex-local.personal-codeme");
@@ -1868,8 +1763,7 @@ var PersonalCodexSidebarProvider = class {
   }
   async handleChatRequest(args) {
     const prompt = typeof args.prompt === "string" ? args.prompt.trim() : "";
-    if (!prompt)
-      return;
+    if (!prompt) return;
     this.cancelActiveChat();
     const generation = this.chatGeneration;
     let conversationId = args.conversationId || null;
@@ -1877,31 +1771,24 @@ var PersonalCodexSidebarProvider = class {
     this.selectedConversationId = conversationId || void 0;
     const active = this.activeChat;
     const sendCurrent = (command, detail = {}) => {
-      if (generation !== this.chatGeneration)
-        return;
+      if (generation !== this.chatGeneration) return;
       void this.send({ command, payload: { conversationId, requestId: args.requestId, ...detail } });
     };
     try {
-      if (prompt.length > 1e5)
-        throw new Error("Keep the request below 100,000 characters. Attach a focused selection for context.");
+      if (prompt.length > 1e5) throw new Error("Keep the request below 100,000 characters. Attach a focused selection for context.");
       const contextText = (args.context || []).map((item) => {
-        if (typeof item.content !== "string")
-          throw new Error("The attached context is invalid.");
+        if (typeof item.content !== "string") throw new Error("The attached context is invalid.");
         return "Context: " + item.label + " (" + item.kind + ")\n```" + (item.language || "text") + "\n" + item.content + "\n```";
       }).join("\n\n");
-      if (contextText.length > 18e4)
-        throw new Error("Attached context is too large. Remove a file or attach a smaller selection.");
+      if (contextText.length > 18e4) throw new Error("Attached context is too large. Remove a file or attach a smaller selection.");
       if (args.mode === "agent" && args.model && this.backend.getModelCapabilities) {
         const capabilities = await this.backend.getModelCapabilities(args.model);
-        if (generation !== this.chatGeneration)
-          return;
-        if (capabilities.agent_ready === false)
-          throw new Error("This model supports chat but not Agent tools. Choose Ask mode or select a tool-capable local model.");
+        if (generation !== this.chatGeneration) return;
+        if (capabilities.agent_ready === false) throw new Error("This model supports chat but not Agent tools. Choose Ask mode or select a tool-capable local model.");
       }
       if (!conversationId) {
         const conversation = await this.backend.createConversation(this.createTitle(prompt));
-        if (generation !== this.chatGeneration)
-          return;
+        if (generation !== this.chatGeneration) return;
         conversationId = conversation.id;
         active.conversationId = conversationId;
         this.selectedConversationId = conversationId;
@@ -1913,14 +1800,10 @@ var PersonalCodexSidebarProvider = class {
           throw new Error("Open one workspace folder to use Agent mode. Ask mode works with explicitly attached context.");
         }
         await this.syncActiveWorkspaceRegistration();
-        if (generation !== this.chatGeneration)
-          return;
-        if (!this.currentWorkspaceId)
-          await this.requestWorkspaceRegistration();
-        if (generation !== this.chatGeneration)
-          return;
-        if (!this.currentWorkspaceId)
-          throw new Error("Register the workspace to let Agent mode inspect your local files.");
+        if (generation !== this.chatGeneration) return;
+        if (!this.currentWorkspaceId) await this.requestWorkspaceRegistration();
+        if (generation !== this.chatGeneration) return;
+        if (!this.currentWorkspaceId) throw new Error("Register the workspace to let Agent mode inspect your local files.");
         await this.backend.streamAgent(
           conversationId,
           prompt,
@@ -1957,8 +1840,7 @@ var PersonalCodexSidebarProvider = class {
     } catch (error) {
       sendCurrent("streamError", { message: error instanceof Error ? error.message : String(error) });
     } finally {
-      if (generation === this.chatGeneration)
-        this.activeChat = void 0;
+      if (generation === this.chatGeneration) this.activeChat = void 0;
       void this.drainTaskContinuation();
     }
   }
@@ -2008,15 +1890,13 @@ var PersonalCodexSidebarProvider = class {
         "Replace entire file",
         "Insert at cursor"
       );
-      if (!choice)
-        return;
+      if (!choice) return;
       replaceWholeDocument = choice === "Replace entire file";
     } else {
       const requireApproval = vscode3.workspace.getConfiguration("personalCodex").get("requireWriteApproval", true);
       if (requireApproval) {
         const choice = await vscode3.window.showWarningMessage("Replace the selected code with the generated block?", { modal: true }, "Apply");
-        if (choice !== "Apply")
-          return;
+        if (choice !== "Apply") return;
       }
     }
     const applied = await editor.edit((builder) => {
@@ -2034,13 +1914,11 @@ var PersonalCodexSidebarProvider = class {
   }
   resolveWorkspaceFile(relativePath) {
     const folder = this.getActiveWorkspaceFolder();
-    if (!folder || !relativePath || path3.isAbsolute(relativePath) || relativePath.includes("\0"))
-      return void 0;
+    if (!folder || !relativePath || path3.isAbsolute(relativePath) || relativePath.includes("\0")) return void 0;
     const root = path3.resolve(folder.uri.fsPath);
     const target = path3.resolve(root, relativePath);
     const relative4 = path3.relative(root, target);
-    if (!relative4 || relative4.startsWith("..") || path3.isAbsolute(relative4))
-      return void 0;
+    if (!relative4 || relative4.startsWith("..") || path3.isAbsolute(relative4)) return void 0;
     return vscode3.Uri.file(target);
   }
   async applyFileChange(relativePath, content, explanation) {
@@ -2093,8 +1971,7 @@ ${files}`,
       { modal: true },
       "Apply complete change set"
     );
-    if (choice !== "Apply complete change set")
-      return void 0;
+    if (choice !== "Apply complete change set") return void 0;
     let approved;
     let localResult;
     try {
@@ -2145,15 +2022,13 @@ ${files}`,
   }
   async restoreChangeSet(changeSet) {
     const folder = this.getActiveWorkspaceFolder();
-    if (!folder)
-      return void 0;
+    if (!folder) return void 0;
     const choice = await vscode3.window.showWarningMessage(
       `Restore only the files changed by '${changeSet.summary}'? Newer user changes will cause a conflict.`,
       { modal: true },
       "Restore change set"
     );
-    if (choice !== "Restore change set")
-      return void 0;
+    if (choice !== "Restore change set") return void 0;
     try {
       await this.changeSetManager.restore(changeSet, folder);
       const restored = await this.backend.reportChangeSetRestore(changeSet.id, "restored");
@@ -2204,8 +2079,7 @@ ${files}`,
       throw new CommandPolicyError("The command proposal does not belong to the active registered workspace.");
     }
     const registered = (await this.backend.listWorkspaces()).find((item) => item.id === commandRun.workspace_id);
-    if (!registered?.root_path)
-      throw new CommandPolicyError("The backend workspace registration is unavailable.");
+    if (!registered?.root_path) throw new CommandPolicyError("The backend workspace registration is unavailable.");
     return evaluateCommandPolicy(
       commandRun,
       registered.root_path,
@@ -2228,8 +2102,7 @@ ${files}`,
   }
   async prepareCommandProposalEvent(conversationId, commandRun, requestId, generation = this.chatGeneration, recovered = false) {
     const sendProposal = (run) => {
-      if (generation !== this.chatGeneration)
-        return Promise.resolve();
+      if (generation !== this.chatGeneration) return Promise.resolve();
       return recovered ? this.send({ command: "agentProposalRecovered", payload: { conversationId, commandRun: run } }) : this.send({ command: "agentEvent", payload: { conversationId, requestId, event: { type: "proposal", kind: "command_proposal", command_run: run } } });
     };
     try {
@@ -2303,8 +2176,7 @@ ${files}`,
       { modal: true },
       "Run once"
     );
-    if (choice !== "Run once")
-      return;
+    if (choice !== "Run once") return;
     fresh = await this.backend.decideCommandRun(
       fresh.id,
       "approve",
@@ -2318,8 +2190,7 @@ ${files}`,
     await this.send({ command: "commandRunUpdated", payload: this.withPolicy(fresh, policy) });
     try {
       policy = await this.evaluateCommand(fresh);
-      if (owner)
-        this.taskActiveCommands.set(fresh.id, { runId: owner.id, conversationId: owner.conversation_id });
+      if (owner) this.taskActiveCommands.set(fresh.id, { runId: owner.id, conversationId: owner.conversation_id });
       const resultPromise = this.processRunner.run(fresh, policy, (event) => {
         void this.send({ command: "commandRunOutput", payload: event });
       });
@@ -2352,8 +2223,7 @@ ${files}`,
     } finally {
       this.taskActiveCommands.delete(commandRun.id);
     }
-    if (owner && this.ownsTask(owner.id, owner.conversation_id, ownerGeneration))
-      await this.continueTask(owner.id, void 0, true, ownerGeneration);
+    if (owner && this.ownsTask(owner.id, owner.conversation_id, ownerGeneration)) await this.continueTask(owner.id, void 0, true, ownerGeneration);
   }
   async rejectControlledCommand(commandRun) {
     try {
@@ -2412,8 +2282,7 @@ ${files}`,
     }
   }
   async recoverVerificationSessions() {
-    if (!this.currentWorkspaceId)
-      return;
+    if (!this.currentWorkspaceId) return;
     try {
       const active = await this.backend.listVerificationSessions(this.currentWorkspaceId, true);
       for (let session of active) {
@@ -2442,8 +2311,7 @@ ${files}`,
         sourceChangeSetId,
         ...this.verificationSettings()
       });
-      if (ownerRunId || owner?.id)
-        this.taskVerificationOwners.set(session.id, { runId: ownerRunId || owner.id, generation: ownerGeneration });
+      if (ownerRunId || owner?.id) this.taskVerificationOwners.set(session.id, { runId: ownerRunId || owner.id, generation: ownerGeneration });
       await this.publishVerification(session);
     } catch (error) {
       void vscode3.window.showErrorMessage(`Unable to create verification plan: ${error.message}`);
@@ -2451,11 +2319,9 @@ ${files}`,
   }
   async approveVerification(sessionId) {
     const session = await this.backend.getVerificationSession(sessionId);
-    if (session.state !== "AWAITING_PLAN_APPROVAL")
-      return;
+    if (session.state !== "AWAITING_PLAN_APPROVAL") return;
     const owner = this.taskForAction(session.conversation_id, session.source_change_set_id || void 0);
-    if (owner)
-      this.taskVerificationOwners.set(session.id, { runId: owner.id, generation: this.chatGeneration });
+    if (owner) this.taskVerificationOwners.set(session.id, { runId: owner.id, generation: this.chatGeneration });
     await this.publishVerification(session);
     const plan = session.steps.map((step, index) => [
       `${index + 1}. ${step.purpose}${step.required ? " (required)" : " (optional)"}`,
@@ -2470,8 +2336,7 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
       { modal: true },
       "Approve complete plan"
     );
-    if (choice !== "Approve complete plan")
-      return;
+    if (choice !== "Approve complete plan") return;
     const approved = await this.backend.decideVerificationPlan(session.id, "approve", session.plan_fingerprint);
     await this.publishVerification(approved);
     await this.executeVerification(approved);
@@ -2483,21 +2348,18 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
   }
   async cancelVerification(sessionId) {
     const commandId = this.activeVerificationCommands.get(sessionId);
-    if (commandId)
-      await this.processRunner.cancel(commandId);
+    if (commandId) await this.processRunner.cancel(commandId);
     const cancelled = await this.backend.cancelVerification(sessionId, "Cancelled by user");
     await this.publishVerification(cancelled);
   }
   async executeVerification(initial) {
-    if (this.executingVerifications.has(initial.id))
-      return;
+    if (this.executingVerifications.has(initial.id)) return;
     this.executingVerifications.add(initial.id);
     let session = initial;
     try {
       while (session.state === "RUNNING") {
         const step = session.steps.find((item) => item.status === "PENDING");
-        if (!step)
-          break;
+        if (!step) break;
         const started = await this.backend.startVerificationStep(session.id, step.step_id, session.plan_fingerprint);
         session = started.session;
         let command = started.command_run;
@@ -2543,8 +2405,7 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
       }
     } catch (error) {
       const commandId = this.activeVerificationCommands.get(session.id);
-      if (commandId)
-        await this.processRunner.cancel(commandId);
+      if (commandId) await this.processRunner.cancel(commandId);
       this.activeVerificationCommands.delete(session.id);
       await this.send({ command: "operationError", payload: { message: `Verification stopped safely: ${error.message}` } });
       try {
@@ -2559,12 +2420,10 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
   async applyVerificationRepair(sessionId) {
     let session = await this.backend.getVerificationSession(sessionId);
     const attempt = session.repair_attempts.at(-1);
-    if (!attempt?.repair_change_set_id || session.state !== "AWAITING_REPAIR_APPROVAL")
-      return;
+    if (!attempt?.repair_change_set_id || session.state !== "AWAITING_REPAIR_APPROVAL") return;
     const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
     const applied = await this.applyChangeSet(changeSet);
-    if (!applied)
-      return;
+    if (!applied) return;
     session = await this.backend.reportVerificationRepair(session.id, "applied", applied.id, "Applied through the Phase 4 transactional manager");
     await this.publishVerification(session);
     await this.executeVerification(session);
@@ -2572,8 +2431,7 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
   async rejectVerificationRepair(sessionId) {
     const session = await this.backend.getVerificationSession(sessionId);
     const attempt = session.repair_attempts.at(-1);
-    if (!attempt?.repair_change_set_id)
-      return;
+    if (!attempt?.repair_change_set_id) return;
     await this.backend.decideChangeSet(attempt.repair_change_set_id, "reject", "Repair rejected in VS Code");
     const stopped = await this.backend.reportVerificationRepair(session.id, "rejected", attempt.repair_change_set_id, "Repair rejected by user");
     await this.publishVerification(stopped);
@@ -2581,12 +2439,10 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
   async restoreVerificationRepair(sessionId) {
     const session = await this.backend.getVerificationSession(sessionId);
     const attempt = session.repair_attempts.at(-1);
-    if (!attempt?.repair_change_set_id || attempt.result !== "applied")
-      return;
+    if (!attempt?.repair_change_set_id || attempt.result !== "applied") return;
     const changeSet = await this.backend.getChangeSet(attempt.repair_change_set_id);
     const restored = await this.restoreChangeSet(changeSet);
-    if (!restored)
-      return;
+    if (!restored) return;
     const updated = await this.backend.reportVerificationRepair(session.id, "restored", restored.id, "Repair restored through the Phase 4 checkpoint");
     await this.publishVerification(updated);
   }
@@ -2623,8 +2479,7 @@ var vscode4 = __toESM(require("vscode"));
 // src/eventStream.ts
 async function readEventStream(response, consume) {
   const reader = response.body?.getReader();
-  if (!reader)
-    throw new Error("The backend response stream is unavailable.");
+  if (!reader) throw new Error("The backend response stream is unavailable.");
   const decoder = new TextDecoder();
   let pending = "";
   let data = [];
@@ -2632,8 +2487,7 @@ async function readEventStream(response, consume) {
   let frameSize = 0;
   let stopped = false;
   const dispatch = () => {
-    if (data.length)
-      stopped = consume({ event, data: data.join("\n") }) === false;
+    if (data.length) stopped = consume({ event, data: data.join("\n") }) === false;
     data = [];
     event = "message";
     frameSize = 0;
@@ -2643,20 +2497,15 @@ async function readEventStream(response, consume) {
       dispatch();
       return;
     }
-    if (value.startsWith(":"))
-      return;
+    if (value.startsWith(":")) return;
     frameSize += value.length;
-    if (frameSize > 4194304)
-      throw new Error("The backend event exceeded the 4 MB limit.");
+    if (frameSize > 4194304) throw new Error("The backend event exceeded the 4 MB limit.");
     const colon = value.indexOf(":");
     const field = colon < 0 ? value : value.slice(0, colon);
     let content = colon < 0 ? "" : value.slice(colon + 1);
-    if (content.startsWith(" "))
-      content = content.slice(1);
-    if (field === "data")
-      data.push(content);
-    else if (field === "event")
-      event = content;
+    if (content.startsWith(" ")) content = content.slice(1);
+    if (field === "data") data.push(content);
+    else if (field === "event") event = content;
   };
   try {
     while (!stopped) {
@@ -2666,16 +2515,12 @@ async function readEventStream(response, consume) {
       pending = lines.pop() || "";
       for (const item of lines) {
         line(item);
-        if (stopped)
-          break;
+        if (stopped) break;
       }
-      if (pending.length + frameSize > 4194304)
-        throw new Error("The backend event exceeded the 4 MB limit.");
+      if (pending.length + frameSize > 4194304) throw new Error("The backend event exceeded the 4 MB limit.");
       if (done) {
-        if (!stopped && pending)
-          line(pending.replace(/\r$/, ""));
-        if (!stopped)
-          dispatch();
+        if (!stopped && pending) line(pending.replace(/\r$/, ""));
+        if (!stopped) dispatch();
         break;
       }
     }
@@ -2884,8 +2729,7 @@ var BackendClient = class {
       "/conversations/" + conversationId + "/chat",
       { model: model || this.configuredModel, messages },
       (event) => {
-        if (event.data === "[DONE]")
-          return false;
+        if (event.data === "[DONE]") return false;
         let decoded;
         try {
           decoded = JSON.parse(event.data);
@@ -2895,8 +2739,7 @@ var BackendClient = class {
         if (event.event === "error" || decoded && typeof decoded === "object" && "error" in decoded) {
           throw new Error(String(decoded?.error || "Chat request failed."));
         }
-        if (typeof decoded === "string")
-          onChunk(decoded);
+        if (typeof decoded === "string") onChunk(decoded);
       },
       onComplete,
       onError
@@ -2925,8 +2768,7 @@ var BackendClient = class {
   }
   async streamAgentEvents(endpoint, body, onEvent, onComplete, onError) {
     await this.stream(endpoint, body, (event) => {
-      if (event.event === "done" || event.data === "[DONE]")
-        return false;
+      if (event.event === "done" || event.data === "[DONE]") return false;
       const decoded = JSON.parse(event.data);
       if (event.event === "error" || "error" in decoded) {
         throw new Error("error" in decoded ? decoded.error : "Agent request failed.");
@@ -2956,20 +2798,17 @@ var BackendClient = class {
         body: JSON.stringify(body),
         signal: controller.signal
       });
-      if (!response.ok)
-        throw new Error("Backend request failed: " + response.status + " " + await response.text());
+      if (!response.ok) throw new Error("Backend request failed: " + response.status + " " + await response.text());
       let completed = false;
       await readEventStream(response, (event) => {
         resetIdleTimer();
-        if (controller.signal.aborted)
-          throw new DOMException("Generation stopped.", "AbortError");
+        if (controller.signal.aborted) throw new DOMException("Generation stopped.", "AbortError");
         if (consume(event) === false) {
           completed = true;
           return false;
         }
       });
-      if (!completed)
-        throw new Error("The backend stream ended early. Retry your request.");
+      if (!completed) throw new Error("The backend stream ended early. Retry your request.");
       onComplete();
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
@@ -2979,12 +2818,10 @@ var BackendClient = class {
         const cancelled = new Error("Generation stopped.");
         cancelled.name = "AbortError";
         onError(cancelled);
-      } else
-        onError(failure);
+      } else onError(failure);
     } finally {
       clearTimeout(idleTimer);
-      if (this.controller === controller)
-        this.controller = void 0;
+      if (this.controller === controller) this.controller = void 0;
     }
   }
   cancel() {
@@ -3113,8 +2950,7 @@ function activate(context) {
   registerCommand("personalCodex.startBackend", async () => sidebarProvider.startBackend());
   context.subscriptions.push(vscode6.workspace.onDidChangeWorkspaceFolders(() => sidebarProvider.workspaceChanged()));
   context.subscriptions.push(vscode6.workspace.onDidChangeConfiguration((event) => {
-    if (event.affectsConfiguration("personalCodex"))
-      void sidebarProvider.updateConfiguration();
+    if (event.affectsConfiguration("personalCodex")) void sidebarProvider.updateConfiguration();
     if (event.affectsConfiguration("personalCodex.enableUnsafeCommandExecution") && vscode6.workspace.getConfiguration("personalCodex").get("enableUnsafeCommandExecution", false)) {
       void vscode6.window.showWarningMessage(
         "personalCodex.enableUnsafeCommandExecution is deprecated. Raw commands remain display-only."
