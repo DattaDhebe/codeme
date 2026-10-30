@@ -27,6 +27,7 @@ pnpm-debug.log*
 
 # Local application state
 codeme.db
+.env
 
 # OS files
 .DS_Store

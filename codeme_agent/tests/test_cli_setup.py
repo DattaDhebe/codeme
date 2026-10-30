@@ -1,0 +1,103 @@
+"""The installer tests never install software, run a server model, or download weights."""
+
+import functools
+from pathlib import Path
+import threading
+from urllib.error import HTTPError
+from urllib.request import Request, urlopen
+
+import pytest
+
+import codeme_cli as cli
+
+
+def test_existing_ollama_does_not_reinstall(monkeypatch):
+    monkeypatch.setattr(cli, "executable", lambda name: "/installed/ollama")
+    monkeypatch.setattr(cli, "run", lambda *a, **k: pytest.fail("Existing runtime must be reused"))
+    cli.install_ollama()
+
+
+def test_windows_installer_uses_exact_package_and_no_shell(monkeypatch):
+    calls = []
+    monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+    installed = [False]
+    monkeypatch.setattr(cli, "executable", lambda name: "winget.exe" if name == "winget" else "ollama.exe" if installed[0] else None)
+    def run(args):
+        calls.append(args)
+        installed[0] = True
+    monkeypatch.setattr(cli, "run", run)
+    cli.install_ollama()
+    assert calls[0][:6] == ["winget.exe", "install", "--id", "Ollama.Ollama", "--exact", "--source"]
+    assert "--silent" in calls[0]
+
+
+def test_missing_package_manager_gives_actionable_recovery(monkeypatch):
+    monkeypatch.setattr(cli.platform, "system", lambda: "Windows")
+    monkeypatch.setattr(cli, "executable", lambda name: None)
+    with pytest.raises(cli.SetupError, match="winget"):
+        cli.install_ollama()
+
+
+def test_install_preserves_env_and_skips_ollama_for_compatible_provider(tmp_path, monkeypatch):
+    (tmp_path / ".env").write_text("MODEL_PROVIDER=openai_compatible\nDEFAULT_MODEL=my-model\n")
+    monkeypatch.setattr(cli, "ROOT", tmp_path)
+    monkeypatch.setattr(cli, "venv_python", lambda: Path(__file__))
+    monkeypatch.setattr(cli, "require_node", lambda: "npm")
+    monkeypatch.setattr(cli, "ensure_pip", lambda python: None)
+    monkeypatch.setattr(cli, "backend_settings", lambda python: {"provider": "openai_compatible"})
+    monkeypatch.setattr(cli, "install_ollama", lambda: pytest.fail("Must preserve other local providers"))
+    monkeypatch.setattr(cli, "launch", lambda **k: pytest.fail("--no-launch must not start model setup"))
+    monkeypatch.setattr(cli, "executable", lambda name: name)
+    calls = []
+    monkeypatch.setattr(cli, "run", lambda args, **kwargs: calls.append(args))
+    assert cli.install_main(["--no-launch"]) == 0
+    assert (tmp_path / ".env").read_text() == "MODEL_PROVIDER=openai_compatible\nDEFAULT_MODEL=my-model\n"
+    assert calls[-1] == ["npm", "run", "build"]
+
+
+def test_interrupted_install_repairs_missing_pip(monkeypatch):
+    from types import SimpleNamespace
+    calls = []
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=1))
+    monkeypatch.setattr(cli, "run", lambda arguments: calls.append(arguments))
+    cli.ensure_pip("venv-python")
+    assert calls == [["venv-python", "-m", "ensurepip", "--upgrade"]]
+
+
+def test_complete_environment_reuses_existing_pip(monkeypatch):
+    from types import SimpleNamespace
+    monkeypatch.setattr(cli.subprocess, "run", lambda *args, **kwargs: SimpleNamespace(returncode=0))
+    monkeypatch.setattr(cli, "run", lambda *args: pytest.fail("Must reuse working pip"))
+    cli.ensure_pip("venv-python")
+
+
+@pytest.fixture
+def browser_server(tmp_path):
+    (tmp_path / "index.html").write_text("<h1>CodeMe</h1>", encoding="utf8")
+    (tmp_path / "app.js").write_text("// app", encoding="utf8")
+    handler = functools.partial(cli.BrowserHandler, directory=str(tmp_path), backend_url="http://127.0.0.1:8123", model="my-coder")
+    server = cli.LocalWebServer(("127.0.0.1", 0), handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    yield f"http://127.0.0.1:{server.server_port}"
+    server.shutdown()
+    server.server_close()
+    thread.join(timeout=3)
+
+
+def test_browser_launcher_serves_spa_routes_and_runtime_configuration(browser_server):
+    import json
+    with urlopen(Request(browser_server + "/settings", headers={"Host": "127.0.0.1:4200"})) as response:
+        assert response.read() == b"<h1>CodeMe</h1>"
+    with urlopen(Request(browser_server + "/runtime-config.json", headers={"Host": "127.0.0.1:4200"})) as response:
+        assert json.load(response) == {"backendUrl": "http://127.0.0.1:8123", "defaultModel": "my-coder"}
+        assert response.headers["Cache-Control"] == "no-store"
+
+
+def test_browser_launcher_rejects_foreign_host_and_missing_assets(browser_server):
+    with pytest.raises(HTTPError) as foreign:
+        urlopen(Request(browser_server + "/", headers={"Host": "attacker.example"}))
+    assert foreign.value.code == 403
+    with pytest.raises(HTTPError) as missing:
+        urlopen(Request(browser_server + "/missing.js", headers={"Host": "127.0.0.1:4200"}))
+    assert missing.value.code == 404

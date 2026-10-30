@@ -870,6 +870,49 @@ var verificationTerminalStates = /* @__PURE__ */ new Set([
   "STOPPED_NO_PROGRESS"
 ]);
 
+// src/modelSetupMonitor.ts
+var setupActive = (state) => ["checking", "downloading", "loading"].includes(state);
+var ModelSetupMonitor = class {
+  constructor(backend, update, failure) {
+    this.backend = backend;
+    this.update = update;
+    this.failure = failure;
+    this.generation = 0;
+  }
+  stop() {
+    this.generation++;
+    if (this.timer)
+      clearTimeout(this.timer);
+    this.timer = void 0;
+  }
+  async refresh(action = "check") {
+    this.stop();
+    await this.poll(this.generation, action);
+  }
+  async poll(generation, action) {
+    try {
+      let status = action === "start" ? await this.backend.startModelSetup() : action === "cancel" ? await this.backend.cancelModelSetup() : await this.backend.getModelSetup();
+      if (generation !== this.generation)
+        return;
+      if (action === "check" && status.state === "idle" && status.auto_setup_enabled) {
+        status = await this.backend.startModelSetup();
+      }
+      if (generation !== this.generation)
+        return;
+      await this.update(status);
+      if (generation === this.generation && (setupActive(status.state) || !status.can_retry || status.state === "ready")) {
+        this.timer = setTimeout(() => {
+          void this.poll(generation, "check");
+        }, status.state === "ready" ? 3e4 : 1e3);
+      }
+    } catch (error) {
+      if (generation === this.generation) {
+        await this.failure(error instanceof Error ? error : new Error(String(error)));
+      }
+    }
+  }
+};
+
 // src/sidebarProvider.ts
 var PersonalCodexSidebarProvider = class {
   constructor(context, backend, resolver) {
@@ -901,6 +944,7 @@ var PersonalCodexSidebarProvider = class {
       tailLimitBytes: configuration.get("commandTailLimitBytes", 65536)
     });
     this.context.subscriptions.push({ dispose: () => {
+      this.modelSetupMonitor?.stop();
       this.cancelActiveChat();
       this.processRunner.dispose();
     } });
@@ -927,6 +971,7 @@ var PersonalCodexSidebarProvider = class {
         }));
       }),
       webviewView.onDidDispose(() => {
+        this.modelSetupMonitor?.stop();
         this.cancelActiveChat();
         this.view = void 0;
         this.webviewReady = false;
@@ -1062,7 +1107,7 @@ var PersonalCodexSidebarProvider = class {
     const tasks2 = await vscode3.tasks.fetchTasks();
     const backendTask = tasks2.find((task) => task.name === "Run Codeme API");
     if (!backendTask) {
-      void vscode3.window.showWarningMessage("Task 'Run Codeme API' was not found in this workspace.");
+      void vscode3.window.showInformationMessage("Run python start.py --backend-only from your CodeMe installation folder, then check the connection. For first-time setup, run python install.py.");
       return;
     }
     await vscode3.tasks.executeTask(backendTask);
@@ -1083,6 +1128,7 @@ var PersonalCodexSidebarProvider = class {
     });
   }
   async updateConfiguration() {
+    this.modelSetupMonitor?.stop();
     this.backend.updateSettings(vscode3.workspace.getConfiguration("personalCodex"));
     if (this.webviewReady) {
       await this.initialize();
@@ -1149,30 +1195,21 @@ var PersonalCodexSidebarProvider = class {
     }
   }
   async refreshBackendStatus(userTriggered) {
-    try {
-      const health = await this.backend.checkConnection(userTriggered);
-      await this.send({
-        command: "backendStatus",
-        payload: {
-          online: true,
-          model: health.model || this.backend.configuredModel,
-          models: health.models || [this.backend.configuredModel],
-          ollama: (health.inference || health.ollama) === "ok",
-          provider: health.provider || "Ollama"
-        }
-      });
-    } catch (error) {
-      await this.send({
-        command: "backendStatus",
-        payload: {
+    await this.setupMonitor().refresh();
+  }
+  setupMonitor() {
+    if (!this.modelSetupMonitor)
+      this.modelSetupMonitor = new ModelSetupMonitor(this.backend, async (status) => {
+        await this.send({ command: "modelSetupStatus", payload: status });
+      }, async (error) => {
+        await this.send({ command: "backendStatus", payload: {
           online: false,
-          model: this.backend.configuredModel,
-          models: [this.backend.configuredModel],
+          models: [],
           ollama: false,
           error: error.message
-        }
+        } });
       });
-    }
+    return this.modelSetupMonitor;
   }
   async refreshConversations(query) {
     const generation = ++this.historyGeneration;
@@ -1405,6 +1442,12 @@ var PersonalCodexSidebarProvider = class {
       }
       case "healthCheck":
         await this.refreshBackendStatus(true);
+        break;
+      case "setupModel":
+        await this.setupMonitor().refresh("start");
+        break;
+      case "cancelModelSetup":
+        await this.setupMonitor().refresh("cancel");
         break;
       case "startChat":
         await this.handleChatRequest(message.args);
@@ -2479,6 +2522,15 @@ var BackendClient = class {
       }
       throw error;
     }
+  }
+  getModelSetup() {
+    return this.request("/model-setup");
+  }
+  startModelSetup() {
+    return this.request("/model-setup", { method: "POST" });
+  }
+  cancelModelSetup() {
+    return this.request("/model-setup", { method: "DELETE" });
   }
   async registerWorkspace(path4, displayName) {
     const response = await this.post("/workspaces", {

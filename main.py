@@ -8,6 +8,7 @@ from codeme_agent.config import settings
 from codeme_agent.db import engine, initialize_database
 from codeme_agent.local_access import LocalAccessMiddleware
 from codeme_agent.model_client import create_model_client
+from codeme_agent.model_setup import model_setup
 from codeme_agent.ollama import OllamaClient, OllamaError
 from codeme_agent.routers import router
 from codeme_agent.schemas import GenerateRequest, GenerateResponse
@@ -18,7 +19,12 @@ from codeme_agent.workspace import WorkspaceError
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     initialize_database(engine)
-    yield
+    if settings.auto_model_setup:
+        model_setup.start()
+    try:
+        yield
+    finally:
+        model_setup.shutdown()
 
 
 app = FastAPI(

@@ -9,6 +9,7 @@ import { CommandPolicyDecision, CommandRun } from './commandRun';
 import { CommandPolicyError, evaluateCommandPolicy } from './commandPolicy';
 import { ControlledProcessRunner } from './processRunner';
 import { VerificationMode, VerificationSession, verificationTerminalStates } from './verification';
+import { ModelSetupMonitor } from './modelSetupMonitor';
 
 interface WebviewMessage {
   command: string;
@@ -27,6 +28,7 @@ interface ChatRequestArgs {
 export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider {
   private view?: vscode.WebviewView;
   private webviewReady = false;
+  private modelSetupMonitor?: ModelSetupMonitor;
   private pendingMessages: WebviewMessage[] = [];
   private currentWorkspaceId?: number;
   private chatGeneration = 0;
@@ -61,7 +63,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       displayLimitBytes: configuration.get('commandOutputLimitBytes', 1_048_576),
       tailLimitBytes: configuration.get('commandTailLimitBytes', 65_536),
     });
-    this.context.subscriptions.push({ dispose: () => { this.cancelActiveChat(); this.processRunner.dispose(); } });
+    this.context.subscriptions.push({ dispose: () => { this.modelSetupMonitor?.stop(); this.cancelActiveChat(); this.processRunner.dispose(); } });
     this.context.subscriptions.push(vscode.workspace.registerTextDocumentContentProvider('codeme-proposed', {
       provideTextDocumentContent: (uri) => this.proposedDocuments.get(uri.toString()) || '',
     }));
@@ -85,6 +87,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         }));
       }),
       webviewView.onDidDispose(() => {
+        this.modelSetupMonitor?.stop();
         this.cancelActiveChat();
         this.view = undefined;
         this.webviewReady = false;
@@ -229,7 +232,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     const tasks = await vscode.tasks.fetchTasks();
     const backendTask = tasks.find((task) => task.name === 'Run Codeme API');
     if (!backendTask) {
-      void vscode.window.showWarningMessage("Task 'Run Codeme API' was not found in this workspace.");
+      void vscode.window.showInformationMessage("Run python start.py --backend-only from your CodeMe installation folder, then check the connection. For first-time setup, run python install.py.");
       return;
     }
     await vscode.tasks.executeTask(backendTask);
@@ -252,6 +255,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   public async updateConfiguration(): Promise<void> {
+    this.modelSetupMonitor?.stop();
     this.backend.updateSettings(vscode.workspace.getConfiguration('personalCodex'));
     if (this.webviewReady) {
       await this.initialize();
@@ -322,30 +326,21 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async refreshBackendStatus(userTriggered: boolean): Promise<void> {
-    try {
-      const health = await this.backend.checkConnection(userTriggered);
-      await this.send({
-        command: 'backendStatus',
-        payload: {
-          online: true,
-          model: health.model || this.backend.configuredModel,
-          models: health.models || [this.backend.configuredModel],
-          ollama: (health.inference || health.ollama) === 'ok',
-          provider: health.provider || 'Ollama',
-        },
-      });
-    } catch (error) {
-      await this.send({
-        command: 'backendStatus',
-        payload: {
-          online: false,
-          model: this.backend.configuredModel,
-          models: [this.backend.configuredModel],
-          ollama: false,
-          error: (error as Error).message,
-        },
-      });
-    }
+    // Setup status stays reachable while the daemon/model is being prepared.
+    // A provider's 503 readiness response must not label the API itself offline.
+    await this.setupMonitor().refresh();
+  }
+
+  private setupMonitor(): ModelSetupMonitor {
+    if (!this.modelSetupMonitor) this.modelSetupMonitor = new ModelSetupMonitor(this.backend, async (status) => {
+      // One snapshot keeps setup, readiness, and model selection in the same generation.
+      await this.send({ command: 'modelSetupStatus', payload: status });
+    }, async (error) => {
+      await this.send({ command: 'backendStatus', payload: {
+        online: false, models: [], ollama: false, error: error.message,
+      } });
+    });
+    return this.modelSetupMonitor;
   }
 
   private async refreshConversations(query?: string): Promise<void> {
@@ -554,6 +549,12 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       }
       case 'healthCheck':
         await this.refreshBackendStatus(true);
+        break;
+      case 'setupModel':
+        await this.setupMonitor().refresh('start');
+        break;
+      case 'cancelModelSetup':
+        await this.setupMonitor().refresh('cancel');
         break;
       case 'startChat':
         await this.handleChatRequest(message.args as unknown as ChatRequestArgs);

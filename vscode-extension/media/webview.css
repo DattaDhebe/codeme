@@ -1206,3 +1206,10 @@ body.vscode-high-contrast .proposal-card, body.vscode-high-contrast .setup-card,
 .agent-plan-step.in_progress > span { color: var(--vscode-focusBorder); border-color: currentColor; }
 .agent-plan-step i { width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
 .agent-task-detail { line-height: 1.5; overflow-wrap: anywhere; margin: 10px 0 0; }
+.model-setup-card { flex-wrap: wrap; }
+.model-setup-card > div { min-width: 0; flex: 1 1 220px; }
+.model-setup-card code { overflow-wrap: anywhere; font-size: 11px; }
+.model-setup-card small { display: block; margin-top: 8px; color: var(--vscode-descriptionForeground); line-height: 1.5; }
+.model-download-progress { margin-top: 12px; }
+.model-download-progress progress { display: block; width: 100%; height: 8px; accent-color: var(--vscode-progressBar-background); }
+.model-setup-error { color: var(--vscode-errorForeground); }

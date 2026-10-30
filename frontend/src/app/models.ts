@@ -76,3 +76,18 @@ export interface HealthRead {
   models?: string[];
   detail?: string;
 }
+
+export interface ModelSetupStatus {
+  state: 'idle' | 'checking' | 'runtime_missing' | 'server_unavailable' | 'downloading' | 'loading' | 'ready' | 'error' | 'cancelled';
+  provider: 'ollama' | 'openai_compatible';
+  model: string | null;
+  available_models: string[];
+  message: string;
+  completed_bytes: number;
+  total_bytes: number;
+  percent: number | null;
+  progress_scope?: string;
+  error: string | null;
+  can_retry: boolean;
+  auto_setup_enabled: boolean;
+}

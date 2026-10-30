@@ -11,6 +11,7 @@ import {
   FileRead,
   GitStatusResponse,
   MessageRead,
+  ModelSetupStatus,
   SearchResult,
   WorkspaceRead,
 } from './models';
@@ -42,6 +43,18 @@ export class ApiService {
 
   getHealth(): Observable<HealthRead> {
     return this.http.get<HealthRead>(`${this.baseUrl}/health`);
+  }
+
+  getModelSetup(): Observable<ModelSetupStatus> {
+    return this.http.get<ModelSetupStatus>(`${this.baseUrl}/model-setup`);
+  }
+
+  startModelSetup(): Observable<ModelSetupStatus> {
+    return this.http.post<ModelSetupStatus>(`${this.baseUrl}/model-setup`, {});
+  }
+
+  cancelModelSetup(): Observable<ModelSetupStatus> {
+    return this.http.delete<ModelSetupStatus>(`${this.baseUrl}/model-setup`);
   }
 
   listConversations(query?: string): Observable<ConversationSummary[]> {

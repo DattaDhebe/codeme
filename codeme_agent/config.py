@@ -20,6 +20,7 @@ class Settings(BaseSettings):
     model_provider: Literal["ollama", "openai_compatible"] = "ollama"
     local_model_url: AnyHttpUrl = "http://127.0.0.1:1234/v1"
     default_model: str = "qwen2.5-coder:7b"
+    auto_model_setup: bool = True
     ollama_context_length: int = Field(8192, ge=2048, le=131072)
     agent_max_cycles: int = Field(8, ge=1, le=32)
     agent_time_budget_seconds: int = Field(900, ge=30, le=3600)

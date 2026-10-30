@@ -1,11 +1,17 @@
-import { ComponentFixture, TestBed } from '@angular/core/testing';
+import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
-import { of, Subject } from 'rxjs';
+import { HttpErrorResponse } from '@angular/common/http';
+import { of, Subject, throwError } from 'rxjs';
 import { ApiService } from './api.service';
 import { ChatShellComponent } from './chat-shell.component';
-import { ConversationSummary, MessageRead } from './models';
+import { ConversationSummary, MessageRead, ModelSetupStatus } from './models';
 
 const conversation = (id: number): ConversationSummary => ({ id, title: 'Conversation ' + id, created_at: '', updated_at: '' });
+const setupStatus = (changes: Partial<ModelSetupStatus> = {}): ModelSetupStatus => ({
+  state: 'ready', provider: 'ollama', model: 'local-model', available_models: ['local-model'],
+  message: 'Your local model is ready.', completed_bytes: 0, total_bytes: 0, percent: null,
+  error: null, can_retry: false, auto_setup_enabled: true, ...changes,
+});
 const response = (text = 'Hello'): Response => new Response(new ReadableStream<Uint8Array>({ start(controller) {
   controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(text) + '\n\nevent: done\ndata: {}\n\n'));
   controller.close();
@@ -17,11 +23,14 @@ describe('ChatShellComponent request ownership', () => {
   let api: jasmine.SpyObj<ApiService>;
 
   beforeEach(async () => {
-    api = jasmine.createSpyObj<ApiService>('ApiService', ['listConversations', 'createConversation', 'getMessages', 'getHealth', 'chatStreamUrl', 'renameConversation', 'deleteConversation'], { defaultModel: 'local-model', isBrowser: true });
+    api = jasmine.createSpyObj<ApiService>('ApiService', ['listConversations', 'createConversation', 'getMessages', 'getHealth', 'chatStreamUrl', 'renameConversation', 'deleteConversation', 'getModelSetup', 'startModelSetup', 'cancelModelSetup'], { defaultModel: 'local-model', isBrowser: true });
     api.listConversations.and.returnValue(of([]));
     api.createConversation.and.returnValue(of(conversation(1)));
     api.getMessages.and.returnValue(of([]));
     api.getHealth.and.returnValue(of({ status: 'ok', ollama: 'ok', model: 'local-model', models: ['local-model'] }));
+    api.getModelSetup.and.returnValue(of(setupStatus()));
+    api.startModelSetup.and.returnValue(of(setupStatus()));
+    api.cancelModelSetup.and.returnValue(of(setupStatus({ state: 'cancelled', can_retry: true })));
     api.chatStreamUrl.and.returnValue('http://127.0.0.1:8000/chat');
     await TestBed.configureTestingModule({ imports: [ChatShellComponent], providers: [provideRouter([]), { provide: ApiService, useValue: api }] }).compileComponents();
     fixture = TestBed.createComponent(ChatShellComponent);
@@ -99,4 +108,120 @@ describe('ChatShellComponent request ownership', () => {
     component.onComposerKeydown(new KeyboardEvent('keydown', { key: 'Enter', isComposing: true }));
     expect(send).not.toHaveBeenCalled();
   });
+
+  it('follows setup already started by the backend, shows real progress, and selects the ready model', fakeAsync(() => {
+    api.getModelSetup.and.returnValues(
+      of(setupStatus({ state: 'checking', available_models: [], message: 'Checking installed models.' })),
+      of(setupStatus({ state: 'downloading', model: 'coding-local', available_models: [], completed_bytes: 1024, total_bytes: 4096, percent: 25, message: 'Downloading model weights.' })),
+      of(setupStatus({ model: 'coding-local', available_models: ['coding-local'] })),
+    );
+    fixture.detectChanges();
+    component.inputText = 'Hello';
+    expect(component.canSend).toBeFalse();
+    expect(api.startModelSetup).not.toHaveBeenCalled();
+    tick(1000);
+    fixture.detectChanges();
+    const progress: HTMLProgressElement = fixture.nativeElement.querySelector('progress');
+    expect(progress.value).toBe(25);
+    expect(fixture.nativeElement.textContent).toContain('1.0 KB of 4.0 KB');
+    tick(1000);
+    expect(component.model).toBe('coding-local');
+    expect(component.connection).toBe('ready');
+    expect(component.canSend).toBeTrue();
+    fixture.destroy();
+  }));
+
+  it('honors disabled automatic setup and lets the user start it explicitly', () => {
+    api.getModelSetup.and.returnValue(of(setupStatus({ state: 'idle', available_models: [], auto_setup_enabled: false })));
+    component.refreshModelSetup();
+    component.inputText = 'Hello';
+    expect(api.startModelSetup).not.toHaveBeenCalled();
+    expect(component.canSend).toBeFalse();
+    component.startModelSetup();
+    expect(api.startModelSetup).toHaveBeenCalledTimes(1);
+    expect(component.canSend).toBeTrue();
+  });
+
+  it('starts an enabled idle setup only once while polling its state', fakeAsync(() => {
+    api.getModelSetup.and.returnValue(of(setupStatus({ state: 'idle', available_models: [] })));
+    api.startModelSetup.and.returnValue(of(setupStatus({ state: 'checking', available_models: [] })));
+    component.refreshModelSetup();
+    expect(api.startModelSetup).toHaveBeenCalledTimes(1);
+    tick(1000);
+    component.refreshModelSetup();
+    expect(api.startModelSetup).toHaveBeenCalledTimes(1);
+    fixture.destroy();
+  }));
+
+  it('preserves an explicitly selected model when it is still installed', () => {
+    component.model = 'my-installed-model';
+    api.getModelSetup.and.returnValue(of(setupStatus({ available_models: ['local-model', 'my-installed-model'] })));
+    component.refreshModelSetup();
+    expect(component.model).toBe('my-installed-model');
+  });
+
+  it('does not overlap setup requests or keep polling after the component is destroyed', fakeAsync(() => {
+    const pending = new Subject<ModelSetupStatus>();
+    api.getModelSetup.and.returnValue(pending);
+    component.refreshModelSetup();
+    component.refreshModelSetup();
+    expect(api.getModelSetup).toHaveBeenCalledTimes(1);
+    pending.next(setupStatus({ state: 'downloading', percent: null }));
+    fixture.destroy();
+    tick(2000);
+    expect(api.getModelSetup).toHaveBeenCalledTimes(1);
+  }));
+
+  it('recovers from an unavailable backend without starting a second model download', () => {
+    api.getModelSetup.and.returnValue(throwError(() => new Error('offline')));
+    component.refreshModelSetup();
+    expect(component.connection).toBe('offline');
+    expect(component.setupError).toContain('local backend');
+    api.getModelSetup.and.returnValue(of(setupStatus()));
+    component.reconnect();
+    expect(component.setupError).toBe('');
+    expect(component.connection).toBe('ready');
+    expect(api.startModelSetup).not.toHaveBeenCalled();
+  });
+
+  it('cancels setup and stops polling until the user retries', fakeAsync(() => {
+    api.getModelSetup.and.returnValue(of(setupStatus({ state: 'downloading', percent: 10 })));
+    component.refreshModelSetup();
+    component.cancelModelSetup();
+    expect(component.modelSetup?.state).toBe('cancelled');
+    tick(2000);
+    expect(api.getModelSetup).toHaveBeenCalledTimes(1);
+    fixture.destroy();
+  }));
+
+  it('offers setup recovery when a previously ready local model server stops', () => {
+    component.refreshModelSetup();
+    api.getHealth.and.returnValue(throwError(() => new HttpErrorResponse({ status: 503 })));
+    component.refreshHealth();
+    expect(component.connection).toBe('model-missing');
+    expect(component.modelSetup?.state).toBe('server_unavailable');
+    expect(component.modelSetup?.can_retry).toBeTrue();
+  });
+
+  it('keeps progress indeterminate while the download size is unknown', () => {
+    api.getModelSetup.and.returnValue(of(setupStatus({ state: 'downloading', percent: null, progress_scope: 'layer' })));
+    fixture.detectChanges();
+    const progress: HTMLProgressElement = fixture.nativeElement.querySelector('progress');
+    expect(progress.hasAttribute('value')).toBeFalse();
+    expect(progress.getAttribute('aria-label')).toContain('Current model layer');
+    fixture.destroy();
+  });
+
+  it('waits for cancelled setup to release its worker before offering another attempt', fakeAsync(() => {
+    api.getModelSetup.and.returnValues(
+      of(setupStatus({ state: 'cancelled', can_retry: false })),
+      of(setupStatus({ state: 'cancelled', can_retry: true })),
+    );
+    component.refreshModelSetup();
+    tick(1000);
+    expect(component.modelSetup?.can_retry).toBeTrue();
+    tick(2000);
+    expect(api.getModelSetup).toHaveBeenCalledTimes(2);
+    fixture.destroy();
+  }));
 });

@@ -6,14 +6,15 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { firstValueFrom } from 'rxjs';
 import { ApiService } from './api.service';
-import { ConversationSummary, MessageRead, ChatRequest, HealthRead } from './models';
+import { ConversationSummary, MessageRead, ChatRequest, HealthRead, ModelSetupStatus } from './models';
 import { MarkdownPipe } from './markdown.pipe';
 import { SseEvent, SseParser } from './sse-parser';
+import { ModelSetupComponent } from './model-setup.component';
 
 @Component({
   selector: 'app-chat-shell',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterModule, MarkdownPipe],
+  imports: [CommonModule, FormsModule, RouterModule, MarkdownPipe, ModelSetupComponent],
   templateUrl: './chat-shell.component.html',
   styleUrls: ['./chat-shell.component.scss'],
 })
@@ -43,6 +44,9 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   deleteId: number | null = null;
   conversationBusy = false;
   showJumpToLatest = false;
+  modelSetup: ModelSetupStatus | null = null;
+  setupRequestPending = false;
+  setupError = '';
   private readonly destroyRef = inject(DestroyRef);
   private abortController: AbortController | null = null;
   private messageLoadId = 0;
@@ -53,6 +57,9 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   private followStream = true;
   private destroyed = false;
   private healthTimer?: ReturnType<typeof setInterval>;
+  private setupTimer?: ReturnType<typeof setTimeout>;
+  private setupRequestId = 0;
+  private automaticSetupAttempted = false;
   private readonly drafts = new Map<number | 'new', string>();
 
   constructor(private readonly api: ApiService) {
@@ -65,16 +72,25 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   get canSend(): boolean {
-    return !!this.inputText.trim() && !this.streaming && !this.creating && !this.loadingMessages && this.connection === 'ready';
+    return !!this.inputText.trim() && !this.streaming && !this.creating && !this.loadingMessages && !this.setupBusy && !this.setupError && this.connection === 'ready';
   }
 
   get connectionLabel(): string {
     return { checking: 'Connecting', ready: 'Local model ready', offline: 'Connection unavailable', 'model-missing': 'Model setup needed' }[this.connection];
   }
 
+  get setupBusy(): boolean {
+    return this.setupRequestPending || !!this.modelSetup && ['checking', 'downloading', 'loading'].includes(this.modelSetup.state);
+  }
+
+  get showModelSetup(): boolean {
+    return !!this.setupError || !!this.modelSetup && this.modelSetup.state !== 'ready' || this.setupRequestPending;
+  }
+
   ngOnInit(): void {
     if (!this.api.isBrowser) return;
     this.loadConversations();
+    this.refreshModelSetup();
     this.refreshHealth();
     this.healthTimer = setInterval(() => this.refreshHealth(), 30000);
   }
@@ -83,6 +99,8 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.destroyed = true;
     this.stopGeneration(false);
     if (this.healthTimer) clearInterval(this.healthTimer);
+    if (this.setupTimer) clearTimeout(this.setupTimer);
+    this.setupRequestId++;
   }
 
   ngAfterViewChecked(): void {
@@ -99,22 +117,31 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.api.getHealth().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: health => this.applyHealth(health),
       error: (failure: HttpErrorResponse) => {
+        if (failure.status > 0 && this.setupError) this.refreshModelSetup();
         if (failure.error && typeof failure.error === 'object' && failure.error.ollama === 'ok') {
           this.applyHealth(failure.error as HealthRead);
-        } else {
+        } else if (!this.setupBusy) {
           this.models = [];
-          this.connection = 'offline';
+          this.connection = failure.status === 0 ? 'offline' : 'model-missing';
           this.connectionDetail = failure.status === 0
-            ? 'Start the local backend and your local model server, then reconnect.'
-            : 'The local model service is unavailable. Start it on this machine, then reconnect.';
+            ? 'Start the CodeMe backend, then reconnect. Your draft will stay here.'
+            : 'Your local model server is unavailable. Retry setup to reconnect your model.';
+          if (failure.status > 0 && this.modelSetup?.state === 'ready') {
+            this.modelSetup = { ...this.modelSetup, state: 'server_unavailable', message: this.connectionDetail, error: null, can_retry: true };
+          }
           this.healthChecking = false;
-        }
+        } else this.healthChecking = false;
       },
     });
   }
 
   private applyHealth(health: HealthRead): void {
+    if (this.setupError) this.refreshModelSetup();
     this.provider = health.provider || 'ollama';
+    if (this.setupBusy || this.modelSetup && this.modelSetup.state !== 'ready') {
+      this.healthChecking = false;
+      return;
+    }
     this.models = (health.models || []).filter((value): value is string => typeof value === 'string' && !!value.trim());
     if (!this.models.includes(this.model)) this.model = this.models.includes(health.model || '') ? health.model! : this.models[0] || this.api.defaultModel;
     this.connection = this.models.length && health.ollama !== 'unavailable' ? 'ready' : 'model-missing';
@@ -124,6 +151,64 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
         ? 'Install a coding model with ollama pull ' + this.api.defaultModel + ', then reconnect.'
         : 'Load a local coding model in your model server, then reconnect.';
     this.healthChecking = false;
+  }
+
+  refreshModelSetup(): void {
+    this.requestModelSetup(false);
+  }
+
+  startModelSetup(): void {
+    this.automaticSetupAttempted = true;
+    this.requestModelSetup(true);
+  }
+
+  cancelModelSetup(): void {
+    this.requestModelSetup(false, true);
+  }
+
+  reconnect(): void {
+    this.refreshModelSetup();
+    this.refreshHealth();
+  }
+
+  private requestModelSetup(start: boolean, cancel = false): void {
+    if (this.destroyed || this.setupRequestPending) return;
+    if (this.setupTimer) { clearTimeout(this.setupTimer); this.setupTimer = undefined; }
+    const request = ++this.setupRequestId;
+    this.setupRequestPending = true;
+    this.setupError = '';
+    if (this.connection !== 'ready' || start) this.connection = 'checking';
+    const source = cancel ? this.api.cancelModelSetup() : start ? this.api.startModelSetup() : this.api.getModelSetup();
+    source.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: status => {
+        if (this.destroyed || request !== this.setupRequestId) return;
+        this.setupRequestPending = false;
+        this.modelSetup = status;
+        this.provider = status.provider;
+        this.connectionDetail = status.message;
+        if (status.state === 'ready') {
+          this.automaticSetupAttempted = false;
+          this.models = status.available_models;
+          if (!this.models.includes(this.model)) this.model = status.model || this.models[0] || this.api.defaultModel;
+          this.connection = this.models.includes(this.model) ? 'ready' : 'model-missing';
+          return;
+        }
+        this.connection = 'model-missing';
+        if (status.state === 'idle' && status.auto_setup_enabled && !this.automaticSetupAttempted) {
+          this.automaticSetupAttempted = true;
+          this.requestModelSetup(true);
+        } else if (['checking', 'downloading', 'loading'].includes(status.state) || status.state === 'cancelled' && !status.can_retry) {
+          this.setupTimer = setTimeout(() => this.refreshModelSetup(), 1000);
+        }
+      },
+      error: () => {
+        if (this.destroyed || request !== this.setupRequestId) return;
+        this.setupRequestPending = false;
+        this.setupError = 'CodeMe could not check model setup. Make sure the local backend is running, then reconnect.';
+        this.connection = 'offline';
+        this.connectionDetail = this.setupError;
+      },
+    });
   }
 
   loadConversations(): void {

@@ -18,7 +18,8 @@ import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
 import type { CommandRun } from '../commandRun';
 import type { VerificationSession } from '../verification';
-import type { AgentRun } from '../backendClient';
+import type { AgentRun, ModelSetupStatus } from '../backendClient';
+import { setupActive } from '../modelSetupMonitor';
 
 declare const acquireVsCodeApi: any;
 
@@ -80,6 +81,7 @@ interface UiState {
   online: boolean;
   ollama: boolean;
   provider: string;
+  modelSetup: ModelSetupStatus | null;
   agentRuns: AgentRun[];
   workspace: string | null;
   rootPath: string | null;
@@ -110,6 +112,7 @@ const state: UiState = {
   online: false,
   ollama: false,
   provider: persisted.provider || 'Local provider',
+  modelSetup: null,
   agentRuns: persisted.agentRuns || [],
   workspace: persisted.workspace || null,
   rootPath: persisted.rootPath || null,
@@ -207,7 +210,8 @@ function render(): void {
 }
 
 function renderHeader(): string {
-  const statusLabel = !state.online ? 'Backend offline' : !state.ollama ? 'Local model unavailable' : 'Local model ready';
+  const statusLabel = !state.online ? 'Backend offline' : state.modelSetup && setupActive(state.modelSetup.state)
+    ? 'Preparing your local model' : !state.ollama ? 'Model setup needs attention' : 'Local model ready';
   return `
     <header class="topbar">
       <div class="brand">
@@ -341,8 +345,17 @@ function renderVerification(session: VerificationSession): string {
 }
 
 function renderSetupCard(): string {
-  if (!state.online) return '<section class="setup-card"><div><strong>Connect your local backend</strong><span>Start the API, then check the connection.</span></div><button data-action="startBackend">Start backend</button><button class="secondary" data-action="health">Check</button></section>';
-  if (!state.ollama) return '<section class="setup-card"><div><strong>Local model needs attention</strong><span>Start your local model provider and load a coding model, then check again.</span></div><button data-action="health">Check connection</button></section>';
+  if (!state.online) return '<section class="setup-card"><div><strong>Connect your local backend</strong><span>From your CodeMe installation folder, run <code>python start.py --backend-only</code>, then check the connection. First time? Run <code>python install.py</code>.</span></div><button data-action="startBackend">Start backend task</button><button class="secondary" data-action="health">Check</button></section>';
+  const setup = state.modelSetup;
+  if (setup && setup.state !== 'ready') {
+    const active = setupActive(setup.state);
+    const percent = typeof setup.percent === 'number' && Number.isFinite(setup.percent) ? Math.max(0, Math.min(100, setup.percent)) : null;
+    const bytes = (value: number) => Number.isFinite(value) && value > 0 ? (value / 1073741824).toFixed(2) + ' GB' : '0 GB';
+    const progress = setup.state === 'downloading' ? `<div class="model-download-progress"><progress aria-label="Current model download layer" max="100" ${percent === null ? '' : `value="${percent}"`}></progress><small>${percent === null ? 'Getting download details...' : `${percent.toFixed(0)}% of current layer`}${setup.total_bytes > 0 ? ` · ${bytes(setup.completed_bytes)} / ${bytes(setup.total_bytes)}` : ''}</small></div>` : '';
+    const title = setup.state === 'downloading' ? 'Downloading your coding model' : setup.state === 'loading' ? 'Loading the model into memory' : active ? 'Finding a local model' : setup.state === 'idle' ? 'Set up your local model' : 'Model setup needs attention';
+    return `<section class="setup-card model-setup-card" aria-label="Local model setup"><div role="status" aria-live="polite"><strong>${title}</strong><span>${escapeHtml(setup.message)}</span>${setup.model ? `<code>${escapeHtml(setup.model)}</code>` : ''}${progress}${setup.error && setup.error !== setup.message ? `<span class="model-setup-error">${escapeHtml(setup.error)}</span>` : ''}${setup.state === 'runtime_missing' ? '<span>From the CodeMe folder, run <code>python install.py</code>, then retry.</span>' : ''}<small>Installed models are reused. New model downloads need internet; your code stays local.</small></div>${active ? '<button class="secondary" data-action="cancelModelSetup">Cancel setup</button>' : '<button data-action="setupModel" ' + (!setup.can_retry ? 'disabled' : '') + '>' + (!setup.can_retry ? 'Finishing cancellation...' : setup.state === 'idle' ? 'Set up model' : 'Retry setup') + '</button>'}</section>`;
+  }
+  if (!state.ollama) return '<section class="setup-card"><div><strong>Prepare your local model</strong><span>CodeMe can find an installed model or download one through Ollama.</span></div><button data-action="setupModel">Set up model</button></section>';
   if (state.models.length === 0) return '<section class="setup-card"><div><strong>Install a local model</strong><span>No local models were found. Load a coding model in your local provider, then check again.</span></div><button data-action="health">Check models</button></section>';
   if (state.mode === 'agent' && state.workspaceFolders !== 1) return '<section class="setup-card"><div><strong>Open one workspace folder</strong><span>Agent mode inspects one local repository. Use Ask with attached context for other files.</span></div></section>';
   if (state.mode === 'agent' && !state.workspaceRegistered) return '<section class="setup-card"><div><strong>Connect this workspace</strong><span>Allow local repository inspection. Changes and commands need your review.</span></div><button data-action="registerWorkspace">Register workspace</button></section>';
@@ -657,10 +670,10 @@ function submitPrompt(): void {
     return;
   }
   if (!state.online || !state.ollama) {
-    showToast(!state.online ? 'Start the backend before sending a message.' : 'Connect Ollama before sending a message.');
+    showToast(!state.online ? 'Start the backend before sending a message.' : 'Your local model is being prepared. Check setup progress above.');
     return;
   }
-  if (!state.selectedModel || !state.models.includes(state.selectedModel)) { showToast('Install and select a local Ollama model before sending.'); return; }
+  if (!state.selectedModel || !state.models.includes(state.selectedModel)) { showToast('Set up and select a local coding model before sending.'); return; }
   if (prompt.length > 100_000) { showToast('Keep your request below 100,000 characters.'); return; }
   const attachments = [...state.attachments];
   activeRequestId = `${Date.now()}-${++requestSequence}`;
@@ -763,6 +776,7 @@ if (app) {
       app.querySelector('[data-action="applyChangeSet"], [data-action="runCommandProposal"]')?.closest('section')?.scrollIntoView({ block: 'start', behavior: 'smooth' });
     }
     if (action === 'registerWorkspace') vscode.postMessage({ command: 'registerWorkspace' });
+    if (action === 'setupModel' || action === 'cancelModelSetup') vscode.postMessage({ command: action });
     if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); if (state.historyOpen) document.getElementById('history-search')?.focus(); else focusComposer(); }
     if (action === 'settings') vscode.postMessage({ command: 'openSettings' });
     if (action === 'health') vscode.postMessage({ command: 'healthCheck' });
@@ -951,6 +965,17 @@ window.addEventListener('message', (event) => {
   if (requestEvents.includes(message.command || '') && message.payload?.requestId && message.payload.requestId !== activeRequestId) return;
   if (requestEvents.includes(message.command || '') && !message.payload?.requestId && message.payload?.conversationId && message.payload.conversationId !== state.currentConversationId) return;
   switch (message.command) {
+    case 'modelSetupStatus':
+      state.modelSetup = message.payload as ModelSetupStatus;
+      state.online = true;
+      state.ollama = state.modelSetup.state === 'ready';
+      state.provider = state.modelSetup.provider === 'ollama' ? 'Ollama' : 'Local compatible server';
+      state.models = state.modelSetup.available_models;
+      state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel
+        : state.models.includes(state.modelSetup.model || '') ? state.modelSetup.model! : state.models[0] || '';
+      if (state.taskStatus !== 'error') state.lastError = null;
+      render();
+      break;
     case 'backendStatus':
       state.online = Boolean(message.payload?.online);
       state.ollama = Boolean(message.payload?.ollama);

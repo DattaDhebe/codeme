@@ -11,8 +11,24 @@ from starlette.background import BackgroundTask
 from codeme_agent import agent, agent_runs, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
 from codeme_agent.db import get_db
 from codeme_agent.model_client import create_model_client
+from codeme_agent.model_setup import model_setup
 
 router = APIRouter(prefix="/api")
+
+
+@router.get("/model-setup")
+def get_model_setup():
+    return model_setup.status(refresh=True)
+
+
+@router.post("/model-setup")
+def start_model_setup():
+    return model_setup.start()
+
+
+@router.delete("/model-setup")
+def cancel_model_setup():
+    return model_setup.cancel()
 
 
 def _require_idle_execution(db: Session, owner_field: str, owner_id: int) -> None:

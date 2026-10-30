@@ -1,92 +1,92 @@
-# Personal Codeme for VS Code
+# CodeMe for VS Code
 
-Personal Codeme is the repository-aware VS Code client for the local Personal Codex backend and Ollama.
+The repository-aware client for CodeMe's local backend. Ask questions about code or use Agent mode to inspect a project, review proposed changes, run approved checks, and continue from the results.
 
-## Features
+## Install and connect
 
-- Ask and Agent modes with streamed local-model responses.
-- Workspace connection guidance, visible task progress, pending review navigation, and responsive native-theme cards.
-- Draft the next request while a response streams; focus, caret, scroll position, and draft context survive background updates.
-- Stop with Escape, switch chats without stale stream output, and search history without losing keyboard focus.
-- Model Markdown is inert content: raw HTML cannot inject webview actions and executable links are rejected.
-- Conversation history, search, rename, delete, and model selection.
-- Current selection, active file, and Git diff context.
-- Repository file reads, ripgrep search, Git inspection, and `AGENTS.md` lookup through the backend agent.
-- Transactional create/modify change sets with complete-set preview and approval.
-- Base-hash and dirty-editor conflict detection.
-- One `WorkspaceEdit` for a complete set, post-apply verification, rollback on failure, and guarded Restore.
-- Checkpoints stored in VS Code global storage rather than the source tree.
-- Legacy whole-file proposal compatibility through the same change-set pipeline.
-- Structured test, build, lint, read-only Git, Python-module, and user-allowlisted executable profiles.
-- Independent risk classification, exact one-time approval, workspace-bound execution, filtered environments, live bounded stdout/stderr, timeout, cancellation, and process-tree cleanup.
-- Durable command decisions and bounded results through the backend. Command output is not fed back to Ollama in Phase 5.
-- Legacy raw command proposals are display-only and cannot be executed.
-- Quick/Full verification cards with exact whole-plan approval, sequential controlled execution, bounded output, repair preview/apply/reject/Restore, exact reruns, cancellation, reload interruption, and durable limits.
+Prepare CodeMe from the repository root:
 
-File deletion, rename, automatic plan/repair approval, package installation, network verification, commits, pushes, and unattended open-ended execution are not implemented.
-
-## Setup
-
-Start the backend from the repository root:
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn main:app --host 127.0.0.1 --port 8000
+```console
+python install.py --no-launch
+python start.py --backend-only
 ```
 
-Build and package the extension:
+In another terminal, build the extension:
 
-```powershell
+```console
 cd vscode-extension
 npm ci
+npm run build
+npm run package
+```
+
+In VS Code, use **Extensions > Install from VSIX...** and select `personal-codeme-0.7.0.vsix`. Reload when prompted. Open the CodeMe Activity Bar view or run **Personal Codeme: Open Chat**.
+
+The default backend is `http://127.0.0.1:8000`. The sidebar displays automatic model preparation and actual download progress. An installed model is reused; missing Ollama weights are downloaded through the local daemon when setup is enabled. A compatible local server must already have a model loaded. See [Getting started](../docs/getting-started.md) and [Configuration](../docs/configuration.md).
+
+## Work with a project
+
+Open one folder in VS Code. Use **Ask** for conversation and attached selection/file/Git context. Choose **Agent** for repository inspection and coding tasks. CodeMe requests consent before registering a new workspace; existing backend registrations are reused.
+
+A coding task follows this flow:
+
+1. Inspect relevant files and scoped `AGENTS.md` instructions.
+2. Maintain a short public plan.
+3. Propose an exact edit or structured command and pause for review.
+4. Apply/run only after approval, then continue from durable recorded results.
+5. Review a verification plan; inspect any failure and separately approve a proposed repair.
+
+The task's goal, plan, review state, and bounded result history survive reloads. Resume/cancel controls make interrupted work explicit. Reload never silently restarts a missing process. Stop cancels the task and its tracked command/verification processes; an in-flight local model request may take until its bounded request returns to finish backend cleanup.
+
+## Review edits and restore
+
+Change sets contain complete create/modify proposals with exact diffs and base hashes. Preview the whole set before approval. Immediately before applying, the extension checks real paths, unsaved documents, and current hashes. One `WorkspaceEdit` applies the set; result hashes are checked and failure triggers best-effort rollback.
+
+Every successful application has a checkpoint in VS Code extension global storage, outside your source tree. **Restore** only succeeds while current files still match that set's applied hashes; newer user edits cause a conflict instead of being overwritten. Checkpoints survive reloads and are not automatically pruned. Remove old extension storage only when its restore history is no longer needed.
+
+File deletion and rename are not supported proposal operations. Model Markdown is inert display content and cannot inject UI actions. Legacy whole-file proposals use the same transactional pipeline.
+
+## Run approved checks
+
+Commands use typed profiles for tests, builds, lint, read-only Git, Python modules, and explicitly user-allowlisted executables. The model provides literal arguments and a relative working directory. The extension independently resolves the executable, checks policy and the exact registered workspace, calculates risk, and asks for **Run once** approval.
+
+The runner uses bounded separate stdout/stderr, filtered environments, timeouts, cancellation, and process-tree cleanup. Raw model shell strings remain display-only. Scripts in your own project can have side effects, so review the proposed check and its working directory before approval.
+
+Verification displays the whole Quick or Full plan with its exact steps, limits, and fingerprint. Approval covers only those steps and bounded reruns; changing the plan requires new approval. Applying an edit is not a passing check. Completion depends on required passing checks and file hashes captured before they ran.
+
+Failures become bounded, redacted, explicitly untrusted feedback for local repair mode. Repair mode can inspect and propose a focused edit; it cannot run commands or alter tests to hide a failure. Each repair requires the normal preview/approval/checkpoint flow. Identical failures, equivalent repairs, rejected actions, and exhausted limits remain visible instead of being reported as success.
+
+## Settings
+
+Existing `personalCodex.*` names remain for compatibility:
+
+| Setting | Purpose |
+| --- | --- |
+| `backendUrl` | Loopback backend URL; default `http://127.0.0.1:8000` |
+| `defaultModel` | Preferred local model; default `qwen2.5-coder:7b` |
+| `autoRegisterWorkspace` | Whether initialization may request registration; defaults to false |
+| `requireWriteApproval` | Retains approval for legacy editor actions |
+| `enableUnsafeCommandExecution` | Deprecated; does not enable raw commands or bypass policy |
+| `pythonExecutable`, `npmExecutable`, `dotnetExecutable`, `mavenExecutable`, `gradleExecutable`, `gitExecutable` | User-owned executable settings for fixed profiles |
+| `customExecutableAllowlist` | Explicit alias-to-executable map, empty by default |
+| `commandOutputLimitBytes` | Sidebar output cap: default 1 MB, hard maximum 4 MB |
+| `commandTailLimitBytes` | Persisted per-stream tail: default/hard maximum 64 KB |
+| `verificationMaximumRepairAttempts` | Default/hard maximum 2 |
+| `verificationMaximumReruns` | Default/hard maximum 2 |
+| `verificationTimeBudgetSeconds` | Default 600, hard maximum 1200 |
+| `showNotifications` | Connection and workspace notifications |
+
+Agent mode supports one workspace folder. Explicit attached editor context is bounded to 175,000 characters; select less code if it exceeds the limit. Repository content cannot add executable allowlist entries or approve actions.
+
+The extension does not provide unattended approval, package installation through agent commands, network verification, commits/pushes, or multi-root execution. Model/runtime installation is handled separately by CodeMe setup.
+
+## Development checks
+
+```console
 npm run typecheck
 npm test
 npm run build
 npm run package
 ```
 
-The package command creates `personal-codeme-0.6.0.vsix`.
-
-## Settings
-
-- `personalCodex.backendUrl`: loopback backend, default `http://127.0.0.1:8000`. Only HTTP(S) on `localhost`, `127.0.0.1`, or `[::1]` is accepted; redirects are refused.
-- `personalCodex.defaultModel`: default Ollama model, `qwen2.5-coder:7b`.
-- `personalCodex.autoRegisterWorkspace`: whether initialization may request workspace registration. Default `false` is honored.
-- `personalCodex.requireWriteApproval`: retains approval for legacy editor actions.
-- `personalCodex.enableUnsafeCommandExecution`: deprecated compatibility setting. Default `false`; enabling it does not make raw commands executable.
-- `personalCodex.pythonExecutable`, `npmExecutable`, `dotnetExecutable`, `mavenExecutable`, `gradleExecutable`, and `gitExecutable`: user-owned executable configuration for fixed profiles.
-- `personalCodex.customExecutableAllowlist`: explicit alias-to-executable map; empty by default and never populated from repository content.
-- `personalCodex.commandOutputLimitBytes`: bounded sidebar stream cap, default 1 MB and hard maximum 4 MB.
-- `personalCodex.commandTailLimitBytes`: per-stream persisted tail cap, default and hard maximum 64 KB.
-- `personalCodex.verificationMaximumRepairAttempts`: bounded repair attempts, default and hard maximum 2.
-- `personalCodex.verificationMaximumReruns`: exact-plan reruns, default and hard maximum 2.
-- `personalCodex.verificationTimeBudgetSeconds`: whole-session budget, default 600 seconds and hard maximum 1200 seconds.
-- `personalCodex.showNotifications`: connection and workspace notifications.
-
-Agent mode supports exactly one open workspace folder. Explicit attached context is bounded to 175,000 characters in the composer and oversized context is rejected with guidance to select less code.
-
-Workspace registration is scoped to the current VS Code workspace. Existing backend registrations are reused; otherwise the user must consent before Agent mode can inspect the folder.
-
-## Change-set safety
-
-The backend prepares and persists relative paths, verified base hashes, proposed hashes, exact content, and diffs. Immediately before applying, the extension resolves real paths, rejects symlink/junction escapes, verifies hashes, and rejects dirty documents. Restore succeeds only while current files still match the applied hashes.
-
-Phase 4 checkpoints are retained in VS Code global storage so Restore remains available across restarts. They are not removed automatically in this phase; users can remove stale Personal Codeme extension storage through VS Code after they no longer need its restore history. A bounded retention policy is deferred to production hardening so recoverable checkpoints are not deleted aggressively.
-
-## Controlled-command safety
-
-Ollama supplies only a profile, literal argument array, relative working directory, purpose, timeout, and advisory hint. The extension resolves the executable from user configuration, recalculates risk, verifies the exact registered single-folder workspace and real working directory immediately before spawn, and always asks for Run once approval. Shells, inline interpreter evaluation, destructive Git, deletion/system/credential operations, metacharacters, UNC roots, traversal, and symlink or junction escapes are blocked.
-
-Processes use closed stdin and separate pipes. ANSI/control sequences are removed, display and persisted tails are bounded while pipes continue draining, and cancellation/timeout/deactivation terminate the process tree. Windows wrappers use a constrained `cmd.exe` adapter only after literal-argument validation; raw model strings never reach it.
-
-## Bounded verification and repair
-
-Use **Verify** on an applied transactional change set. Personal Codeme discovers a minimal Quick plan (or a broader Full plan), displays every exact step and limit, and binds approval to the plan fingerprint. The extension creates normal Phase 5 command records and revalidates each step immediately before using the existing controlled runner. Extension reload never silently resumes a missing process.
-
-Required failures are durably summarized, bounded to 32 KB per failed step and 128 KB per model feedback payload, stripped of controls and secret-like values, and explicitly marked untrusted. Local Qwen repair mode has read/search/Git/instruction tools plus `propose_change_set`; it has no command tool. Proposed repairs cannot modify tests or unrelated files and always pause for the existing Phase 4 preview, approval, conflict, checkpoint, apply, and Restore workflow.
-
-## Troubleshooting
-
-- Backend readiness: `http://127.0.0.1:8000/api/health`.
-- Ollama inventory: `http://127.0.0.1:11434/api/tags`.
-- Database schema: run `..\.venv\Scripts\python.exe -m alembic current` from the repository root.
-- Reload VS Code after installing a new VSIX.
+Vitest uses a VS Code stub. Live-backend and native extension-host checks have separate opt-in/environment requirements. See [Development](../docs/development.md) for shared-contract validation and [Troubleshooting](../docs/troubleshooting.md) for connection, model, conflict, and migration problems.

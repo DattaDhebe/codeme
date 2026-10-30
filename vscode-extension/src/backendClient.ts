@@ -17,6 +17,21 @@ export interface HealthResponse {
   models?: string[];
 }
 
+export interface ModelSetupStatus {
+  state: 'idle' | 'checking' | 'runtime_missing' | 'server_unavailable' | 'downloading' | 'loading' | 'ready' | 'error' | 'cancelled';
+  provider: string;
+  model: string | null;
+  available_models: string[];
+  message: string;
+  completed_bytes: number;
+  total_bytes: number;
+  percent: number | null;
+  error: string | null;
+  can_retry: boolean;
+  auto_setup_enabled: boolean;
+  progress_scope?: 'layer';
+}
+
 export interface ConversationSummary {
   id: number;
   title: string;
@@ -120,6 +135,18 @@ export class BackendClient {
       }
       throw error;
     }
+  }
+
+  public getModelSetup(): Promise<ModelSetupStatus> {
+    return this.request<ModelSetupStatus>('/model-setup');
+  }
+
+  public startModelSetup(): Promise<ModelSetupStatus> {
+    return this.request<ModelSetupStatus>('/model-setup', { method: 'POST' });
+  }
+
+  public cancelModelSetup(): Promise<ModelSetupStatus> {
+    return this.request<ModelSetupStatus>('/model-setup', { method: 'DELETE' });
   }
 
   public async registerWorkspace(path: string, displayName: string): Promise<number> {
