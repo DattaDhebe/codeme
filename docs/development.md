@@ -33,6 +33,8 @@ Open `http://127.0.0.1:4200`. Stop an existing `start.py` launcher first so the 
 
 Extension:
 
+Building and testing the extension requires Node.js 22.12+ within 22.x, or Node.js 24 LTS (recommended). This is a development-tool requirement; the bundled extension retains its VS Code 1.90 runtime floor. The normal browser installer retains its separately documented Node.js support.
+
 ```console
 cd vscode-extension
 npm ci
@@ -128,6 +130,23 @@ Changes to database tables require a new Alembic revision and a data-preserving 
 Update the user-facing guide with the actual behavior and defaults when changing setup, permissions, models, or launch commands. Keep the root README short and put detailed explanations in `docs/`. `PLAN.md` separates delivered features from future work. Keep `CURRENT_IMPLEMENTATION_REPORT.md` aligned with the current source; the original audit under `docs/archive/` is historical and should not be used as the current feature matrix.
 
 Use the [documentation index](index.md), [contribution guide](../CONTRIBUTING.md), and [release checklist](release-checklist.md) for repository navigation, review expectations, and packaging. Preserve historical audits and unrelated owner edits; record new verified behavior in the current guides and review notes. A local build or generated customer ZIP does not establish publication, a Marketplace listing, or a working paid checkout.
+
+## Dependency updates and failed build emails
+
+GitHub failure emails describe the commit that ran, even after a newer commit fixes it. Follow the run link, compare its commit with the current pull request, and inspect the current checks before changing working code. The early repository-polish failures were missing test-output directories and Windows path handling on Linux; both are covered by the current Windows/Python 3.10 and Linux/Python 3.12 checks.
+
+Dependabot keeps its monthly schedule. Related Angular packages and browser test-runner packages are grouped so their peer dependencies can move together. The following compatibility boundaries need an explicit migration before changing them:
+
+| Dependency | Current boundary | Reason |
+| --- | --- | --- |
+| Angular | Keep the supported 21.x line for automated version updates | Angular 22 requires a coordinated framework, Node and TypeScript migration; updating `@angular/common` alone breaks peer dependencies. |
+| Jasmine and its types | Jasmine 5 with reporter 2.3; review major upgrades with Zone.js | The earlier reporter 2.1 only supported Jasmine 4/5. Reporter 2.3 supports newer Jasmine, but an actual Jasmine 7 browser run fails because Zone.js 0.16 patches a now read-only `describe` API. Keep the tested runner until that integration is migrated. |
+| Pydantic Settings | 2.15.0; versions 2.16+ excluded while Python 3.10 is supported | 2.15 supports Python 3.10 and the existing Pydantic pin. 2.16 requires Python 3.11. |
+| VS Code API types | 1.90.x, matching the declared extension engine floor | Compiling against a newer API can produce an extension that fails on its advertised minimum VS Code version. |
+
+These constraints do not disable build checks, secret scanning or vulnerability alerts. CI also checks Python dependency consistency and rejects high or critical npm advisories in both clients. If a security fix needs a newer runtime, review that runtime migration promptly; do not treat an ignored version range as a permanent security exception. Update the manifest, lockfile, compatibility constraint and documented runtime floor together, then run the relevant tests and packaging checks. Marked renderer changes must preserve escaping, safe links, disabled remote images and synchronous output.
+
+Sources: [Dependabot grouping and ignore options](https://docs.github.com/en/code-security/reference/supply-chain-security/dependabot-options-reference), [Angular compatibility](https://angular.dev/reference/versions), [Pydantic Settings 2.15 metadata](https://pypi.org/pypi/pydantic-settings/2.15.0/json), [Pydantic Settings 2.16 metadata](https://pypi.org/pypi/pydantic-settings/2.16.1/json), and [VS Code extension compatibility](https://code.visualstudio.com/api/working-with-extensions/publishing-extension#visual-studio-code-compatibility).
 
 ## Repository About information
 

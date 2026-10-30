@@ -14,6 +14,9 @@ This changelog describes development source. The extension version is **0.7.0**;
 
 ### Fixed
 
+- Adopt Marked 18 token-based renderer hooks while retaining escaped HTML, restricted links, blocked images and synchronous rendering.
+- Match the declared VS Code 1.90 API with floor-compatible type definitions.
+- Update development tools and replace the retired packaging tool with `@vscode/vsce`; keep the VSIX limited to required bundles, assets and notices.
 - Saved-file verification, LF/CRLF handling, nested file creation, and guarded rollback/restore.
 - Unsaved-buffer and changed-file conflicts; newer user changes are preserved instead of silently overwritten.
 - Bounded stream waits and stale-request handling.
