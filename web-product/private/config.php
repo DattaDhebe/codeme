@@ -7,9 +7,9 @@ return [
     'connection_file' => dirname(__DIR__).'/careerlift-payments-private/config.php',
     'runtime_dir' => __DIR__.'/runtime',
     'archive_dir' => __DIR__.'/releases',
-    'archive_path' => __DIR__.'/releases/codeme-0.7.0-local-c015749a7d93.zip',
-    'archive_sha256' => '6f640c61bb3b83b578b0740525ebe65b5f677f80422edb47abd8a3af221d8639',
-    'archive_bytes' => 638432,
+    'archive_path' => __DIR__.'/releases/codeme-0.7.0-local-9587d0a573e2.zip',
+    'archive_sha256' => '2a36319da9fbe3e5d03e9de0de43c01d1de01dfb678300a2544022dc71254b67',
+    'archive_bytes' => 644172,
     'version' => '0.7.0',
     'download_name' => 'CodeMe-0.7.0.zip',
 ];

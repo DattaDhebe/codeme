@@ -16,7 +16,7 @@ Copy the contents of `web-product/public/` to the product route, and the content
     ├── config.php                    # connection location and fixed release metadata
     ├── check-install.php             # CLI only
     ├── lib/Commerce.php
-    ├── releases/codeme-0.7.0-local-c015749a7d93.zip
+    ├── releases/codeme-0.7.0-local-9587d0a573e2.zip
     └── runtime/                      # created privately; keep across deployments
 ```
 
@@ -30,8 +30,8 @@ The archive currently expected by the server is:
 
 ```text
 Version: 0.7.0
-Bytes: 638432
-SHA-256: 6f640c61bb3b83b578b0740525ebe65b5f677f80422edb47abd8a3af221d8639
+Bytes: 644172
+SHA-256: 2a36319da9fbe3e5d03e9de0de43c01d1de01dfb678300a2544022dc71254b67
 ```
 
 Upload the ZIP to the private `releases/` folder. For a release change, upload a new immutable file first, then update the trusted archive filename, bytes, SHA-256, version and download name together in `config.php`. A missing, public, corrupt, symlinked or mismatched archive disables new checkout. Do not replace an active archive in place.

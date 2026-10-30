@@ -10,9 +10,9 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 SOURCE = ROOT / "web-product"
 OUTPUT = ROOT / ".runtime" / "deployment"
-ARCHIVE = "codeme-0.7.0-local-c015749a7d93.zip"
-ARCHIVE_SHA = "6f640c61bb3b83b578b0740525ebe65b5f677f80422edb47abd8a3af221d8639"
-ARCHIVE_BYTES = 638432
+ARCHIVE = "codeme-0.7.0-local-9587d0a573e2.zip"
+ARCHIVE_SHA = "2a36319da9fbe3e5d03e9de0de43c01d1de01dfb678300a2544022dc71254b67"
+ARCHIVE_BYTES = 644172
 
 
 def main() -> None:
