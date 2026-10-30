@@ -42,35 +42,37 @@
     "watch": "npm-run-all --parallel watch:extension watch:webview",
     "lint": "npm run typecheck",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run --config vitest.config.ts",
+    "test": "vitest run --config vitest.config.mjs",
     "test:integration": "node ./scripts/native-test-runner.cjs",
     "package": "vsce package --out personal-codeme-0.7.0.vsix --baseContentUrl https://github.com/DattaDhebe/codeme/blob/main/vscode-extension/ --baseImagesUrl https://raw.githubusercontent.com/DattaDhebe/codeme/main/vscode-extension/",
     "prepackage": "npm run build:notices",
     "build:notices": "node ./scripts/build-notices.cjs"
   },
   "files": [
-    "dist/**",
+    "dist/extension.js",
+    "dist/webview.js",
     "media/**",
     "README.md",
     "CHANGELOG.md",
+    "LICENSE",
     "NOTICE",
     "THIRD_PARTY_NOTICES.txt"
   ],
   "devDependencies": {
-    "@types/node": "^20.11.0",
-    "@types/vscode": "^1.90.0",
+    "@types/node": "^22.12.0",
+    "@types/vscode": "~1.90.0",
     "@vscode/test-electron": "^2.5.0",
-    "esbuild": "^0.19.4",
-    "npm-run-all": "^4.1.5",
-    "typescript": "^5.5.4",
-    "vitest": "^1.5.6",
-    "vsce": "^2.11.1",
+    "esbuild": "^0.28.2",
     "eslint": "^8.57.0",
     "eslint-plugin-import": "^2.29.1",
-    "eslint-plugin-node": "^11.1.0"
+    "eslint-plugin-node": "^11.1.0",
+    "npm-run-all": "^4.1.5",
+    "typescript": "^5.5.4",
+    "vitest": "^5.0.5",
+    "@vscode/vsce": "^4.1.0"
   },
   "dependencies": {
-    "marked": "^9.1.6",
+    "marked": "^18.1.2",
     "prismjs": "^1.30.0"
   },
   "contributes": {
@@ -327,5 +329,12 @@
   "galleryBanner": {
     "color": "#111D32",
     "theme": "dark"
+  },
+  "devEngines": {
+    "runtime": {
+      "name": "node",
+      "version": "^22.12.0 || ^24.0.0 || >=26.0.0",
+      "onFail": "error"
+    }
   }
 }

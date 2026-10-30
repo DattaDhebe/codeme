@@ -5,9 +5,9 @@ Their upstream license texts are reproduced without modification below.
 The extension code license is in LICENSE; component and brand information is in NOTICE.
 
 ========================================================================
-marked 9.1.6
+marked 18.1.2
 Source: https://www.npmjs.com/package/marked
-License file: LICENSE.md
+License file: LICENSE
 
 # License information
 

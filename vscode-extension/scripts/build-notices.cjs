@@ -5,7 +5,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const root = path.resolve(__dirname, '..');
 const dependencies = [
-  ['marked', 'LICENSE.md'],
+  ['marked', 'LICENSE'],
   ['prismjs', 'LICENSE'],
 ];
 let output = 'CodeMe VS Code extension — bundled third-party notices\n\n'

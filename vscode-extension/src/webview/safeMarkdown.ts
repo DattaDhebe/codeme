@@ -1,4 +1,4 @@
-import { marked } from 'marked';
+import { Marked, Renderer } from 'marked';
 
 export function escapeHtml(value: string): string {
   return value.replace(/[&<>'"]/g, (character) => ({
@@ -6,10 +6,11 @@ export function escapeHtml(value: string): string {
   })[character] || character);
 }
 
-const renderer = new marked.Renderer();
+const renderer = new Renderer();
 // Model output is content. It must never create webview controls or action attributes.
-renderer.html = (html) => escapeHtml(html);
-renderer.link = (href, title, text) => {
+renderer.html = ({ text }) => escapeHtml(text);
+renderer.link = function ({ href, title, tokens }) {
+  const text = this.parser.parseInline(tokens);
   if (!href || /[\u0000-\u0020\u007f]/.test(href)) return text;
   try {
     const url = new URL(href);
@@ -19,8 +20,11 @@ renderer.link = (href, title, text) => {
     (title ? ' title="' + escapeHtml(title) + '"' : '') + '>' + text + '</a>';
 };
 // Do not load model-supplied images, even from another service on this machine.
-renderer.image = (_href, _title, text) => escapeHtml(text || 'Image');
+renderer.image = ({ text }) => escapeHtml(text || 'Image');
+
+// Keep the untrusted-content policy separate from any global Marked extensions.
+const markdown = new Marked({ gfm: true, breaks: true, renderer, async: false });
 
 export function safeMarkdown(text: string): string {
-  return marked.parse(text || '', { gfm: true, breaks: true, renderer }) as string;
+  return markdown.parse(text || '', { async: false });
 }
