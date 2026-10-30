@@ -37,7 +37,7 @@
     "lint": "npm run typecheck",
     "typecheck": "tsc --noEmit",
     "test": "vitest run --config vitest.config.ts",
-    "test:integration": "node ./dist/test/runTest.js",
+    "test:integration": "node ./scripts/native-test-runner.cjs",
     "package": "vsce package --out personal-codeme-0.7.0.vsix"
   },
   "files": [

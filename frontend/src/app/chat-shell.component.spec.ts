@@ -1,4 +1,4 @@
-import { ComponentFixture, fakeAsync, TestBed, tick } from '@angular/core/testing';
+import { ComponentFixture, fakeAsync, flushMicrotasks, TestBed, tick } from '@angular/core/testing';
 import { provideRouter } from '@angular/router';
 import { HttpErrorResponse } from '@angular/common/http';
 import { of, Subject, throwError } from 'rxjs';
@@ -32,6 +32,7 @@ describe('ChatShellComponent request ownership', () => {
     api.startModelSetup.and.returnValue(of(setupStatus()));
     api.cancelModelSetup.and.returnValue(of(setupStatus({ state: 'cancelled', can_retry: true })));
     api.chatStreamUrl.and.returnValue('http://127.0.0.1:8000/chat');
+    sessionStorage.removeItem('codeme:drafts:v1:http://127.0.0.1:8000/chat');
     await TestBed.configureTestingModule({ imports: [ChatShellComponent], providers: [provideRouter([]), { provide: ApiService, useValue: api }] }).compileComponents();
     fixture = TestBed.createComponent(ChatShellComponent);
     component = fixture.componentInstance;
@@ -223,5 +224,83 @@ describe('ChatShellComponent request ownership', () => {
     tick(2000);
     expect(api.getModelSetup).toHaveBeenCalledTimes(2);
     fixture.destroy();
+  }));
+
+  it('ignores a stale health failure after a newer setup snapshot confirms readiness', () => {
+    const health = new Subject<never>();
+    api.getHealth.and.returnValue(health);
+    component.refreshHealth();
+    component.refreshModelSetup();
+    health.error(new HttpErrorResponse({ status: 503 }));
+    expect(component.connection).toBe('ready');
+    expect(component.modelSetup?.state).toBe('ready');
+    expect(component.healthChecking).toBeFalse();
+  });
+
+  it('can cancel while a passive setup status read is still pending', () => {
+    const pending = new Subject<ModelSetupStatus>();
+    api.getModelSetup.and.returnValue(pending);
+    component.refreshModelSetup();
+    component.cancelModelSetup();
+    pending.next(setupStatus());
+    expect(api.cancelModelSetup).toHaveBeenCalledTimes(1);
+    expect(component.modelSetup?.state).toBe('cancelled');
+    expect(component.setupRequestPending).toBeFalse();
+  });
+
+  it('keeps the Cancel setup control available during a pending status poll', () => {
+    fixture.detectChanges();
+    const pending = new Subject<ModelSetupStatus>();
+    api.getModelSetup.and.returnValues(of(setupStatus({ state: 'downloading' })), pending);
+    component.refreshModelSetup(); component.refreshModelSetup();
+    fixture.detectChanges();
+    const button = [...fixture.nativeElement.querySelectorAll('button')].find((item: unknown) => (item as HTMLButtonElement).textContent?.trim() === 'Cancel setup') as HTMLButtonElement;
+    expect(button).toBeTruthy();
+    button.click();
+    expect(api.cancelModelSetup).toHaveBeenCalledTimes(1);
+  });
+
+  it('recovers unsent drafts after navigating away and recreating the chat view', () => {
+    fixture.detectChanges();
+    component.inputText = 'A draft to keep when exploring the workspace';
+    fixture.destroy();
+    fixture = TestBed.createComponent(ChatShellComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    expect(component.inputText).toBe('A draft to keep when exploring the workspace');
+  });
+
+  it('keeps a separate draft for each saved conversation across view recreation', () => {
+    fixture.detectChanges();
+    component.selectConversation(conversation(2));
+    component.inputText = 'Continue working on this parser';
+    fixture.destroy();
+    fixture = TestBed.createComponent(ChatShellComponent);
+    component = fixture.componentInstance;
+    fixture.detectChanges();
+    component.selectConversation(conversation(2));
+    expect(component.inputText).toBe('Continue working on this parser');
+  });
+
+  it('does not treat chat-only model readiness as a chat failure', () => {
+    api.getModelSetup.and.returnValue(of(setupStatus({ tool_support: 'unsupported', agent_ready: false })));
+    component.refreshModelSetup();
+    component.inputText = 'Explain this function';
+    expect(component.canSend).toBeTrue();
+    expect(component.modelCapabilityNotice).toContain('Agent tasks in VS Code');
+  });
+
+  it('fails a stalled model request without discarding its draft or locking Stop forever', fakeAsync(() => {
+    spyOn(window, 'fetch').and.callFake((_url, options) => new Promise((_resolve, reject) => {
+      options?.signal?.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')));
+    }));
+    component.activeConversation = conversation(1);
+    component.inputText = 'Explain this code';
+    void component.sendMessage();
+    tick(180000);
+    flushMicrotasks();
+    expect(component.streaming).toBeFalse();
+    expect(component.error).toContain('three minutes');
+    expect(component.messages.some(message => message.role === 'user' && message.content === 'Explain this code')).toBeTrue();
   }));
 });

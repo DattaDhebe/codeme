@@ -6,7 +6,7 @@ Inference uses **Ollama** or a trusted **local OpenAI-compatible server**, such 
 
 ## Start here
 
-You need Python 3.10+ and Node.js/npm for the initial installation. Python 3.12 and a Node version supported by Angular 18 are good choices. Git and ripgrep enable the repository tools.
+You need Python 3.10+ and Node.js/npm for the initial installation. Python 3.12 and Node.js 24 LTS are recommended. The Angular 21 browser also supports Node.js 20.19+ and 22.12+ within those major versions. Git and ripgrep enable the repository tools.
 
 Open a terminal in this repository and run:
 
@@ -57,12 +57,13 @@ CodeMe shows work summaries, tool results, and outcomes. Private model reasoning
 - Ollama and loopback OpenAI-compatible chat/tool transports, local model discovery, and automatic Ollama model preparation.
 - Persistent conversations, workspaces, task plans, review decisions, command results, and verification history in SQLite.
 - Workspace-bounded file reads, ranged previews, bounded ripgrep search, Git inspection, and scoped project instructions.
+- Bounded, task-ranked repository navigation with file-selection reasons, symbol hints, and import links. Exact source reads remain required before editing.
 - Transactional create/modify proposals with exact diffs, base hashes, dirty-editor checks, external checkpoints, rollback, and guarded restore.
 - Approval-gated test/build/lint command profiles with independent extension policy checks, bounded output, timeout, and cancellation.
 - Bounded verification and repair with exact-plan approval, sanitized failure evidence, separately reviewed repairs, and rerun limits.
 - Automatic database upgrades with a consistent backup before upgrading an existing SQLite database.
 
-The current limits include one VS Code workspace folder at a time, estimated rather than tokenizer-exact context budgets, and no web-based edit/command execution. File deletion/rename, unattended approvals, repository indexing, and commit/push tools are outside the current workflow. The legacy `/generate` endpoint is a placeholder; normal chat and Agent endpoints perform real inference.
+The current limits include one VS Code workspace folder at a time, estimated rather than tokenizer-exact context budgets, and no web-based edit/command execution. File deletion/rename, unattended approvals, persistent repository indexing, and commit/push tools are outside the current workflow. The legacy `/generate` endpoint is a placeholder; normal chat and Agent endpoints perform real inference.
 
 ## Documentation
 
@@ -73,7 +74,11 @@ The current limits include one VS Code workspace folder at a time, estimated rat
 | Fix startup, download, or connection problems | [Troubleshooting](docs/troubleshooting.md) |
 | Understand ownership, data, and API contracts | [Architecture](docs/architecture.md) |
 | Develop, test, and package changes | [Development](docs/development.md) |
-| Check the current implementation and its limits | [Implementation report](CURRENT_IMPLEMENTATION_REPORT.md) |
+| Compare installed local models on repeatable tasks | [Model evaluations](docs/model-evaluations.md) |
+| Test installation in an isolated fresh copy | [Installation testing](docs/installation-testing.md) |
+| Understand relevant-file selection and its limits | [Repository context](docs/repository-context.md) |
+| Review reliability fixes and remaining gaps | [Application review](docs/review-2026-10-30.md) |
+| Read the earlier implementation report | [Implementation report](CURRENT_IMPLEMENTATION_REPORT.md) |
 | See delivered capabilities and remaining work | [Development plan](PLAN.md) |
 | Inspect database migrations | [Migration guide](alembic/README.md) |
 

@@ -30,6 +30,17 @@ export interface ModelSetupStatus {
   can_retry: boolean;
   auto_setup_enabled: boolean;
   progress_scope?: 'layer';
+  tool_support?: 'supported' | 'unsupported' | 'unknown';
+  agent_ready?: boolean | null;
+  model_capabilities?: string[];
+}
+
+export interface ModelCapabilities {
+  model: string;
+  provider: string;
+  tool_support: 'supported' | 'unsupported' | 'unknown';
+  agent_ready: boolean | null;
+  model_capabilities: string[];
 }
 
 export interface ConversationSummary {
@@ -107,7 +118,7 @@ export function localBackendUrl(value: string): string {
 export class BackendClient {
   private controller?: AbortController;
 
-  constructor(private config: BackendSettings) {}
+  constructor(private config: BackendSettings, private readonly streamIdleTimeoutMs = 190_000) {}
 
   public get configuredModel(): string {
     return this.config.get('defaultModel', 'qwen2.5-coder:7b');
@@ -147,6 +158,10 @@ export class BackendClient {
 
   public cancelModelSetup(): Promise<ModelSetupStatus> {
     return this.request<ModelSetupStatus>('/model-setup', { method: 'DELETE' });
+  }
+
+  public getModelCapabilities(model: string): Promise<ModelCapabilities> {
+    return this.request<ModelCapabilities>('/model-capabilities?model=' + encodeURIComponent(model), undefined, 15_000);
   }
 
   public async registerWorkspace(path: string, displayName: string): Promise<number> {
@@ -389,6 +404,13 @@ export class BackendClient {
     this.cancel();
     const controller = new AbortController();
     this.controller = controller;
+    let timedOut = false;
+    let idleTimer: ReturnType<typeof setTimeout>;
+    const resetIdleTimer = (): void => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => { timedOut = true; controller.abort(); }, this.streamIdleTimeoutMs);
+    };
+    resetIdleTimer();
     try {
       const response = await fetch(this.getUrl(endpoint), {
         method: 'POST', redirect: 'error',
@@ -398,6 +420,7 @@ export class BackendClient {
       if (!response.ok) throw new Error('Backend request failed: ' + response.status + ' ' + await response.text());
       let completed = false;
       await readEventStream(response, (event) => {
+        resetIdleTimer();
         if (controller.signal.aborted) throw new DOMException('Generation stopped.', 'AbortError');
         if (consume(event) === false) { completed = true; return false; }
       });
@@ -405,12 +428,15 @@ export class BackendClient {
       onComplete();
     } catch (error: unknown) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      if (controller.signal.aborted || failure.name === 'AbortError') {
+      if (timedOut) {
+        onError(new Error('The local model stopped responding. Check the backend/model server, then retry your saved request.'));
+      } else if (controller.signal.aborted || failure.name === 'AbortError') {
         const cancelled = new Error('Generation stopped.');
         cancelled.name = 'AbortError';
         onError(cancelled);
       } else onError(failure);
     } finally {
+      clearTimeout(idleTimer!);
       // An older request must never clear the controller for its successor.
       if (this.controller === controller) this.controller = undefined;
     }

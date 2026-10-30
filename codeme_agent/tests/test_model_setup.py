@@ -100,7 +100,21 @@ def test_installed_model_is_reused_without_downloading_and_warmed(monkeypatch):
     assert status["model"] == DEFAULT
     assert status["available_models"] == [DEFAULT]
     assert status["auto_setup_enabled"] is False
+    assert status["tool_support"] == "supported"
+    assert status["agent_ready"] is True
     assert len(calls) == 2
+
+
+def test_chat_only_model_stays_chat_ready_without_claiming_agent_support(monkeypatch):
+    install_client(monkeypatch, [[DEFAULT]])
+    normal_post(monkeypatch, capabilities={DEFAULT: ["completion"]})
+    manager = setup.ModelSetup()
+    manager._run()
+    status = manager.status()
+    assert status["state"] == "ready"
+    assert status["model"] == DEFAULT
+    assert status["agent_ready"] is False
+    assert status["tool_support"] == "unsupported"
 
 
 def test_existing_tool_model_is_selected_instead_of_downloading_default(monkeypatch):
@@ -272,6 +286,25 @@ def test_nonstandard_ollama_endpoint_is_not_used_to_spawn_daemon(monkeypatch):
     manager = setup.ModelSetup()
     assert manager._start_daemon("https://127.0.0.1:11434/proxy") is False
     assert manager.status()["state"] == "server_unavailable"
+
+
+def test_runtime_readiness_allows_slow_first_hardware_discovery(monkeypatch):
+    from types import SimpleNamespace
+    manager = setup.ModelSetup()
+    manager._daemon = SimpleNamespace(poll=lambda: None)
+    monkeypatch.setattr(setup, "find_ollama", lambda: "ollama")
+    clock = iter([0.0, 0.0, 25.0])
+    monkeypatch.setattr(setup, "monotonic", lambda: next(clock))
+    monkeypatch.setattr(manager._cancel, "wait", lambda seconds: False)
+    calls = []
+    def inventory(*args, **kwargs):
+        calls.append(True)
+        if len(calls) == 1:
+            raise setup.OllamaError("hardware discovery still starting")
+        return []
+    monkeypatch.setattr(setup.OllamaClient, "list_models", inventory)
+    assert manager._start_daemon("http://127.0.0.1:11434") is True
+    assert len(calls) == 2
 
 
 def test_start_is_idempotent_and_cancelled_job_cannot_become_ready(monkeypatch):

@@ -123,6 +123,9 @@ function sha256Bytes(value) {
 function sha256Text(value) {
   return sha256Bytes(Buffer.from(value, "utf8"));
 }
+function samePath(left, right) {
+  return process.platform === "win32" ? path.normalize(left).toLowerCase() === path.normalize(right).toLowerCase() : path.normalize(left) === path.normalize(right);
+}
 var ChangeSetManager = class {
   constructor(context) {
     this.context = context;
@@ -131,6 +134,7 @@ var ChangeSetManager = class {
     validateChangeSet(changeSet);
     const root = await import_fs.promises.realpath(folder.uri.fsPath);
     for (const operation of changeSet.operations) {
+      this.reviewedEndOfLine(operation.proposed_content);
       const target = await this.resolveTarget(root, operation);
       const openDocument = this.findOpenDocument(vscode2.Uri.file(target));
       if (openDocument?.isDirty) {
@@ -141,7 +145,7 @@ var ChangeSetManager = class {
           throw new ChangeSetConflictError(`Create target now exists: ${operation.relative_path}`);
       } else {
         const document = openDocument || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
-        if (sha256Text(document.getText()) !== operation.base_sha256) {
+        if (sha256Text(document.getText()) !== operation.base_sha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== operation.base_sha256) {
           throw new ChangeSetConflictError(`The file changed after proposal: ${operation.relative_path}`);
         }
       }
@@ -156,9 +160,11 @@ var ChangeSetManager = class {
       changeSetId: changeSet.id,
       workspaceRoot: root,
       createdAt: (/* @__PURE__ */ new Date()).toISOString(),
-      files: []
+      files: [],
+      createdDirectories: []
     };
     for (const operation of changeSet.operations) {
+      this.reviewedEndOfLine(operation.proposed_content);
       const target = await this.resolveTarget(root, operation);
       const uri = vscode2.Uri.file(target);
       const openDocument = this.findOpenDocument(uri);
@@ -181,6 +187,9 @@ var ChangeSetManager = class {
         if (sha256Text(current) !== operation.base_sha256) {
           throw new ChangeSetConflictError(`The file changed after preview: ${operation.relative_path}`);
         }
+        if (sha256Bytes(await import_fs.promises.readFile(target)) !== operation.base_sha256) {
+          throw new ChangeSetConflictError(`The disk file changed after preview: ${operation.relative_path}`);
+        }
         documents.set(operation.relative_path, document);
         checkpoint.files.push({
           relativePath: operation.relative_path,
@@ -195,25 +204,50 @@ var ChangeSetManager = class {
       }
     }
     const checkpointReference = await this.writeCheckpoint(checkpoint);
-    const edit = new vscode2.WorkspaceEdit();
-    for (const operation of changeSet.operations) {
-      const target = vscode2.Uri.file(path.join(root, validateRelativePath(operation.relative_path)));
-      if (operation.type === "create") {
-        edit.createFile(target, { overwrite: false, ignoreIfExists: false });
-        edit.insert(target, new vscode2.Position(0, 0), operation.proposed_content);
-      } else {
-        const document = documents.get(operation.relative_path);
-        edit.replace(target, new vscode2.Range(document.positionAt(0), document.positionAt(document.getText().length)), operation.proposed_content);
-      }
-    }
+    let editStarted = false;
+    let completeEditApplied = false;
     try {
+      for (const operation of changeSet.operations) {
+        if (operation.type === "create")
+          await this.createParents(root, operation.relative_path, checkpoint);
+      }
+      await this.writeCheckpoint(checkpoint);
+      const edit = new vscode2.WorkspaceEdit();
+      for (const operation of changeSet.operations) {
+        await this.resolveTarget(root, operation);
+        const target = vscode2.Uri.file(path.join(root, validateRelativePath(operation.relative_path)));
+        if (operation.type === "create") {
+          edit.createFile(target, { overwrite: false, ignoreIfExists: false });
+          edit.insert(target, new vscode2.Position(0, 0), operation.proposed_content);
+        } else {
+          const document = documents.get(operation.relative_path);
+          if (document.isDirty || sha256Text(document.getText()) !== operation.base_sha256 || sha256Bytes(await import_fs.promises.readFile(target.fsPath)) !== operation.base_sha256) {
+            throw new ChangeSetConflictError(`The file changed while preparing application: ${operation.relative_path}`);
+          }
+          edit.replace(target, new vscode2.Range(document.positionAt(0), document.positionAt(document.getText().length)), operation.proposed_content);
+        }
+        this.setReviewedEndOfLine(edit, target, operation.proposed_content);
+      }
+      editStarted = true;
       const applied = await vscode2.workspace.applyEdit(edit);
+      completeEditApplied = applied;
       if (!applied)
         throw new Error("VS Code rejected the complete WorkspaceEdit.");
+      await this.saveFiles(changeSet.operations.map((operation) => ({
+        relativePath: operation.relative_path,
+        expectedHash: operation.proposed_sha256
+      })), root);
       const resultHashes = await this.verifyApplied(changeSet, root);
       return { checkpointReference, resultHashes };
     } catch (error) {
-      await this.rollbackCheckpoint(checkpoint);
+      try {
+        if (editStarted)
+          await this.rollbackCheckpoint(checkpoint, completeEditApplied);
+      } catch (rollbackError) {
+        throw new Error(`${error.message} Automatic rollback stopped: ${rollbackError.message} Recovery checkpoint: ${checkpointReference}`);
+      } finally {
+        await this.removeCreatedDirectories(checkpoint);
+      }
       throw error;
     }
   }
@@ -223,7 +257,7 @@ var ChangeSetManager = class {
       throw new ChangeSetConflictError("This change set has no checkpoint.");
     const checkpoint = await this.readCheckpoint(checkpointReference);
     const root = await import_fs.promises.realpath(folder.uri.fsPath);
-    if (path.normalize(checkpoint.workspaceRoot).toLowerCase() !== path.normalize(root).toLowerCase()) {
+    if (!samePath(checkpoint.workspaceRoot, root)) {
       throw new ChangeSetConflictError("The checkpoint belongs to a different workspace.");
     }
     for (const file of checkpoint.files) {
@@ -234,23 +268,29 @@ var ChangeSetManager = class {
       if (!await this.exists(target))
         throw new ChangeSetConflictError(`Applied file is missing: ${file.relativePath}`);
       const document = this.findOpenDocument(vscode2.Uri.file(target)) || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
-      if (sha256Text(document.getText()) !== file.appliedSha256) {
+      if (document.isDirty || sha256Text(document.getText()) !== file.appliedSha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== file.appliedSha256) {
         throw new ChangeSetConflictError(`Restore conflict: ${file.relativePath} changed after application.`);
       }
     }
     const edit = new vscode2.WorkspaceEdit();
     for (const file of checkpoint.files) {
       const uri = vscode2.Uri.file(path.join(root, validateRelativePath(file.relativePath)));
+      this.assertInside(root, await import_fs.promises.realpath(uri.fsPath), file.relativePath);
       if (!file.existed) {
         edit.deleteFile(uri, { ignoreIfNotExists: false, recursive: false });
       } else {
         const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
         const original = Buffer.from(file.originalBase64, "base64").toString("utf8");
         edit.replace(uri, new vscode2.Range(document.positionAt(0), document.positionAt(document.getText().length)), original);
+        this.setReviewedEndOfLine(edit, uri, original);
       }
     }
     if (!await vscode2.workspace.applyEdit(edit))
       throw new Error("VS Code rejected the restore WorkspaceEdit.");
+    await this.saveFiles(checkpoint.files.filter((file) => file.existed).map((file) => ({
+      relativePath: file.relativePath,
+      expectedHash: file.originalSha256
+    })), root);
     for (const file of checkpoint.files) {
       const target = path.join(root, validateRelativePath(file.relativePath));
       if (!file.existed) {
@@ -258,24 +298,74 @@ var ChangeSetManager = class {
           throw new Error(`Restore verification failed for ${file.relativePath}`);
       } else {
         const document = this.findOpenDocument(vscode2.Uri.file(target)) || await vscode2.workspace.openTextDocument(vscode2.Uri.file(target));
-        if (sha256Text(document.getText()) !== file.originalSha256)
+        if (sha256Text(document.getText()) !== file.originalSha256 || sha256Bytes(await import_fs.promises.readFile(target)) !== file.originalSha256)
           throw new Error(`Restore verification failed for ${file.relativePath}`);
       }
     }
+    await this.removeCreatedDirectories(checkpoint);
+  }
+  async saveFiles(files, root) {
+    for (const file of files) {
+      const uri = vscode2.Uri.file(path.join(root, validateRelativePath(file.relativePath)));
+      this.assertInside(root, await import_fs.promises.realpath(uri.fsPath), file.relativePath);
+      const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
+      if (sha256Text(document.getText()) !== file.expectedHash)
+        throw new ChangeSetConflictError(`Editor content changed before saving: ${file.relativePath}`);
+      if (!await document.save())
+        throw new Error(`Could not save ${file.relativePath}. The change cannot be reported as applied.`);
+      if (document.isDirty || sha256Text(document.getText()) !== file.expectedHash || sha256Bytes(await import_fs.promises.readFile(uri.fsPath)) !== file.expectedHash) {
+        throw new ChangeSetConflictError(`Saved content differs from the reviewed change: ${file.relativePath}`);
+      }
+    }
+  }
+  reviewedEndOfLine(content) {
+    if (/\r(?!\n)/.test(content) || /\r\n/.test(content) && /(^|[^\r])\n/.test(content)) {
+      throw new ChangeSetConflictError("Mixed or bare-CR line endings cannot be preserved by the editor. Request a consistent LF or CRLF proposal.");
+    }
+    return content.includes("\r\n") ? vscode2.EndOfLine.CRLF : content.includes("\n") ? vscode2.EndOfLine.LF : void 0;
+  }
+  setReviewedEndOfLine(edit, uri, content) {
+    const eol = this.reviewedEndOfLine(content);
+    if (eol !== void 0)
+      edit.set(uri, [vscode2.TextEdit.setEndOfLine(eol)]);
   }
   async verifyApplied(changeSet, root) {
     const hashes = {};
     for (const operation of changeSet.operations) {
+      await this.resolveTarget(root, operation, true);
       const uri = vscode2.Uri.file(path.join(root, validateRelativePath(operation.relative_path)));
       const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
       const hash = sha256Text(document.getText());
       if (hash !== operation.proposed_sha256)
         throw new Error(`Application verification failed for ${operation.relative_path}`);
+      if (sha256Bytes(await import_fs.promises.readFile(uri.fsPath)) !== operation.proposed_sha256)
+        throw new Error(`Disk verification failed for ${operation.relative_path}`);
       hashes[operation.relative_path] = hash;
     }
     return hashes;
   }
-  async rollbackCheckpoint(checkpoint) {
+  async rollbackCheckpoint(checkpoint, completeEditApplied) {
+    for (const file of checkpoint.files) {
+      const target = await this.resolveTarget(checkpoint.workspaceRoot, {
+        relative_path: file.relativePath,
+        type: file.existed ? "modify" : "create"
+      }, true);
+      if (!await this.exists(target)) {
+        if (file.existed)
+          throw new ChangeSetConflictError(`Rollback conflict: ${file.relativePath} was removed.`);
+        continue;
+      }
+      const allowed = /* @__PURE__ */ new Set([file.appliedSha256, file.originalSha256 || sha256Text("")]);
+      const document = this.findOpenDocument(vscode2.Uri.file(target));
+      const diskHash = sha256Bytes(await import_fs.promises.readFile(target));
+      const knownPendingCreate = document?.isDirty && file.appliedSha256 !== sha256Text("") && sha256Text(document.getText()) === file.appliedSha256;
+      if (!file.existed && !completeEditApplied && diskHash === sha256Text("") && !knownPendingCreate) {
+        throw new ChangeSetConflictError(`Rollback conflict: ownership of empty ${file.relativePath} is uncertain; the file was preserved.`);
+      }
+      if (!allowed.has(diskHash) || document && !allowed.has(sha256Text(document.getText()))) {
+        throw new ChangeSetConflictError(`Rollback conflict: ${file.relativePath} contains newer changes.`);
+      }
+    }
     const edit = new vscode2.WorkspaceEdit();
     for (const file of checkpoint.files) {
       const uri = vscode2.Uri.file(path.join(checkpoint.workspaceRoot, validateRelativePath(file.relativePath)));
@@ -287,12 +377,18 @@ var ChangeSetManager = class {
         const document = this.findOpenDocument(uri) || await vscode2.workspace.openTextDocument(uri);
         const original = Buffer.from(file.originalBase64, "base64").toString("utf8");
         edit.replace(uri, new vscode2.Range(document.positionAt(0), document.positionAt(document.getText().length)), original);
+        this.setReviewedEndOfLine(edit, uri, original);
       } catch {
         edit.createFile(uri, { ignoreIfExists: true });
         edit.insert(uri, new vscode2.Position(0, 0), Buffer.from(file.originalBase64, "base64").toString("utf8"));
       }
     }
-    await vscode2.workspace.applyEdit(edit);
+    if (!await vscode2.workspace.applyEdit(edit))
+      throw new Error("Rollback failed. The saved checkpoint is available for recovery.");
+    await this.saveFiles(checkpoint.files.filter((file) => file.existed).map((file) => ({
+      relativePath: file.relativePath,
+      expectedHash: file.originalSha256
+    })), checkpoint.workspaceRoot);
   }
   async resolveTarget(root, operation, allowExistingCreate = false) {
     const relativePath = validateRelativePath(operation.relative_path);
@@ -317,11 +413,47 @@ var ChangeSetManager = class {
       }
       const realParent = await import_fs.promises.realpath(parent);
       this.assertInside(root, realParent, relativePath);
-      if (path.normalize(parent) !== path.normalize(path.dirname(target))) {
+      if (!(await import_fs.promises.stat(parent)).isDirectory()) {
+        throw new ChangeSetConflictError(`Create parent is not a directory: ${relativePath}`);
+      }
+      if (operation.type !== "create" && path.normalize(parent) !== path.normalize(path.dirname(target))) {
         throw new ChangeSetConflictError(`Create parent does not exist: ${relativePath}`);
       }
     }
     return target;
+  }
+  async createParents(root, relativePath, checkpoint) {
+    const components = validateRelativePath(relativePath).split(/[\\/]/).slice(0, -1);
+    let parent = root;
+    for (const component of components) {
+      parent = path.join(parent, component);
+      this.assertInside(root, parent, relativePath);
+      try {
+        await import_fs.promises.mkdir(parent);
+        checkpoint.createdDirectories.push(path.relative(root, parent).split(path.sep).join("/"));
+      } catch (error) {
+        if (error.code !== "EEXIST")
+          throw error;
+      }
+      this.assertInside(root, await import_fs.promises.realpath(parent), relativePath);
+      if (!(await import_fs.promises.stat(parent)).isDirectory())
+        throw new ChangeSetConflictError(`Create parent is not a directory: ${relativePath}`);
+    }
+  }
+  async removeCreatedDirectories(checkpoint) {
+    for (const relativePath of [...checkpoint.createdDirectories || []].reverse()) {
+      const target = path.resolve(checkpoint.workspaceRoot, validateRelativePath(relativePath));
+      this.assertInside(checkpoint.workspaceRoot, target, relativePath);
+      try {
+        if ((await import_fs.promises.lstat(target)).isSymbolicLink())
+          continue;
+        this.assertInside(checkpoint.workspaceRoot, await import_fs.promises.realpath(target), relativePath);
+        await import_fs.promises.rmdir(target);
+      } catch (error) {
+        if (!["ENOENT", "ENOTEMPTY", "EEXIST"].includes(error.code || ""))
+          throw error;
+      }
+    }
   }
   assertInside(root, target, relativePath) {
     const relative4 = path.relative(root, target);
@@ -330,14 +462,16 @@ var ChangeSetManager = class {
     }
   }
   findOpenDocument(uri) {
-    return vscode2.workspace.textDocuments.find((document) => path.normalize(document.uri.fsPath).toLowerCase() === path.normalize(uri.fsPath).toLowerCase());
+    return vscode2.workspace.textDocuments.find((document) => samePath(document.uri.fsPath, uri.fsPath));
   }
   async exists(target) {
     try {
-      await import_fs.promises.stat(target);
+      await import_fs.promises.lstat(target);
       return true;
-    } catch {
-      return false;
+    } catch (error) {
+      if (error.code === "ENOENT")
+        return false;
+      throw error;
     }
   }
   checkpointUri(reference) {
@@ -920,6 +1054,7 @@ var PersonalCodexSidebarProvider = class {
     this.backend = backend;
     this.resolver = resolver;
     this.webviewReady = false;
+    this.modelCapabilityGeneration = 0;
     this.pendingMessages = [];
     this.chatGeneration = 0;
     this.conversationLoadGeneration = 0;
@@ -1128,6 +1263,7 @@ var PersonalCodexSidebarProvider = class {
     });
   }
   async updateConfiguration() {
+    this.modelCapabilityGeneration++;
     this.modelSetupMonitor?.stop();
     this.backend.updateSettings(vscode3.workspace.getConfiguration("personalCodex"));
     if (this.webviewReady) {
@@ -1344,19 +1480,24 @@ var PersonalCodexSidebarProvider = class {
     }
   }
   async continueTask(runId, requestId, automatic = false, ownerGeneration = this.chatGeneration) {
+    const stopResume = async (message, conversationId = this.selectedConversationId) => {
+      if (automatic)
+        return;
+      if (requestId)
+        await this.send({ command: "streamStopped", payload: { conversationId, requestId } });
+      await this.send({ command: "taskNotice", payload: { conversationId, message } });
+    };
     if (this.continuingAgentRuns.has(runId) || this.activeChat) {
       if (automatic && this.activeChat?.runId === runId)
         this.pendingTaskContinuations.set(runId, ownerGeneration);
-      if (!automatic)
-        await this.send({ command: "taskNotice", payload: { conversationId: this.selectedConversationId, message: "A local request is already running. Wait for it to finish before resuming." } });
+      await stopResume("A local request is already running. Wait for it to finish before resuming.");
       return;
     }
     const known = [...this.agentRuns.values()].find((item) => item.id === runId);
     if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration)
       this.cancelledAgentRuns.delete(runId);
     if (!known || !this.ownsTask(runId, known.conversation_id, ownerGeneration) || known.workspace_id !== this.currentWorkspaceId) {
-      if (!automatic)
-        await this.send({ command: "taskNotice", payload: { conversationId: this.selectedConversationId, message: "Reload this conversation and register its workspace before resuming the saved task." } });
+      await stopResume("Reload this conversation and register its workspace before resuming the saved task.");
       return;
     }
     this.continuingAgentRuns.add(runId);
@@ -1367,11 +1508,20 @@ var PersonalCodexSidebarProvider = class {
       this.agentRuns.set(run.conversation_id, run);
       await this.send({ command: "agentRunUpdated", payload: run });
       if (["completed", "cancelled", "exhausted"].includes(run.status)) {
-        await this.send({ command: "taskNotice", payload: { conversationId: run.conversation_id, message: run.summary || `Task is ${run.status}.` } });
+        await stopResume(run.summary || `Task is ${run.status}.`, run.conversation_id);
         return;
       }
       if (automatic && ["interrupted", "blocked"].includes(run.status))
         return;
+      if (run.model && this.backend.getModelCapabilities) {
+        const capabilities = await this.backend.getModelCapabilities(run.model);
+        if (!this.ownsTask(runId, run.conversation_id, ownerGeneration))
+          return;
+        if (capabilities.agent_ready === false) {
+          await stopResume("This task model does not support Agent tools. Start a new task with a tool-capable local model.", run.conversation_id);
+          return;
+        }
+      }
       const generation = this.chatGeneration;
       const active = { requestId, conversationId: run.conversation_id, runId };
       this.activeChat = active;
@@ -1449,6 +1599,22 @@ var PersonalCodexSidebarProvider = class {
       case "cancelModelSetup":
         await this.setupMonitor().refresh("cancel");
         break;
+      case "checkModelCapabilities": {
+        const model = message.args?.model;
+        const requestId = message.args?.requestId;
+        if (typeof model !== "string" || model.length > 250)
+          break;
+        const generation = ++this.modelCapabilityGeneration;
+        try {
+          const capabilities = await this.backend.getModelCapabilities(model);
+          if (generation === this.modelCapabilityGeneration)
+            await this.send({ command: "modelCapabilities", payload: { ...capabilities, requestId } });
+        } catch (error) {
+          if (generation === this.modelCapabilityGeneration)
+            await this.send({ command: "modelCapabilityError", payload: { model, requestId, message: error.message } });
+        }
+        break;
+      }
       case "startChat":
         await this.handleChatRequest(message.args);
         break;
@@ -1697,6 +1863,13 @@ var PersonalCodexSidebarProvider = class {
       }).join("\n\n");
       if (contextText.length > 18e4)
         throw new Error("Attached context is too large. Remove a file or attach a smaller selection.");
+      if (args.mode === "agent" && args.model && this.backend.getModelCapabilities) {
+        const capabilities = await this.backend.getModelCapabilities(args.model);
+        if (generation !== this.chatGeneration)
+          return;
+        if (capabilities.agent_ready === false)
+          throw new Error("This model supports chat but not Agent tools. Choose Ask mode or select a tool-capable local model.");
+      }
       if (!conversationId) {
         const conversation = await this.backend.createConversation(this.createTitle(prompt));
         if (generation !== this.chatGeneration)
@@ -2335,7 +2508,9 @@ Session budget: ${session.total_time_budget_seconds}s; repairs: ${session.maximu
       }
       if (session.state === "VERIFICATION_FAILED" && session.maximum_repair_attempts > session.current_attempt) {
         await this.send({ command: "verificationRepairStarted", payload: { sessionId: session.id } });
-        session = await this.backend.prepareVerificationRepair(session.id, this.backend.configuredModel);
+        const owner = this.taskVerificationOwners.get(session.id);
+        const taskModel = owner ? [...this.agentRuns.values()].find((run) => run.id === owner.runId)?.model : void 0;
+        session = await this.backend.prepareVerificationRepair(session.id, taskModel || void 0);
         await this.publishVerification(session);
       }
     } catch (error) {
@@ -2496,8 +2671,9 @@ function localBackendUrl(value) {
   return url.toString().replace(/\/+$/, "");
 }
 var BackendClient = class {
-  constructor(config) {
+  constructor(config, streamIdleTimeoutMs = 19e4) {
     this.config = config;
+    this.streamIdleTimeoutMs = streamIdleTimeoutMs;
   }
   get configuredModel() {
     return this.config.get("defaultModel", "qwen2.5-coder:7b");
@@ -2531,6 +2707,9 @@ var BackendClient = class {
   }
   cancelModelSetup() {
     return this.request("/model-setup", { method: "DELETE" });
+  }
+  getModelCapabilities(model) {
+    return this.request("/model-capabilities?model=" + encodeURIComponent(model), void 0, 15e3);
   }
   async registerWorkspace(path4, displayName) {
     const response = await this.post("/workspaces", {
@@ -2725,6 +2904,16 @@ var BackendClient = class {
     this.cancel();
     const controller = new AbortController();
     this.controller = controller;
+    let timedOut = false;
+    let idleTimer;
+    const resetIdleTimer = () => {
+      clearTimeout(idleTimer);
+      idleTimer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, this.streamIdleTimeoutMs);
+    };
+    resetIdleTimer();
     try {
       const response = await fetch(this.getUrl(endpoint), {
         method: "POST",
@@ -2737,6 +2926,7 @@ var BackendClient = class {
         throw new Error("Backend request failed: " + response.status + " " + await response.text());
       let completed = false;
       await readEventStream(response, (event) => {
+        resetIdleTimer();
         if (controller.signal.aborted)
           throw new DOMException("Generation stopped.", "AbortError");
         if (consume(event) === false) {
@@ -2749,13 +2939,16 @@ var BackendClient = class {
       onComplete();
     } catch (error) {
       const failure = error instanceof Error ? error : new Error(String(error));
-      if (controller.signal.aborted || failure.name === "AbortError") {
+      if (timedOut) {
+        onError(new Error("The local model stopped responding. Check the backend/model server, then retry your saved request."));
+      } else if (controller.signal.aborted || failure.name === "AbortError") {
         const cancelled = new Error("Generation stopped.");
         cancelled.name = "AbortError";
         onError(cancelled);
       } else
         onError(failure);
     } finally {
+      clearTimeout(idleTimer);
       if (this.controller === controller)
         this.controller = void 0;
     }

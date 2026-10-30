@@ -10,11 +10,16 @@ CodeMe is a local coding assistant with a FastAPI/SQLite backend, an Angular bro
 | First-run setup | Installation and launch scripts, automatic model discovery, installed-model reuse, Ollama downloads with progress, and model loading. |
 | Browser | Conversation management, safe Markdown, streaming, model readiness, responsive chat, and a read-only workspace explorer. |
 | Repository tools | Registered local roots, bounded reads/search/Git output, path protections, and root-to-folder `AGENTS.md` instructions. |
+| Repository navigation | Fresh task-ranked file selection, heuristic symbols/import links, selection reasons, strict scan/output limits, and no edit permission from metadata. |
+| Model evaluations | Opt-in installed-model matrix with deterministic task oracles, separate quality/recovery/policy results, bounded inference, and JSON reports. |
+| Installation checks | Fresh-copy installer/build/launch/upgrade harness, controlled model-protocol failures, offline relaunch, and a manual Windows/macOS/Linux CI matrix. |
 | Task controller | Durable goals, public plans, read-before-edit checks, review pauses, observed-result continuation, explicit resume/cancel, and bounded recovery. |
 | Transactional editing | Versioned create/modify sets, complete-set review, base hashes, conflict checks, checkpoints, rollback, and guarded restore in VS Code. |
 | Controlled commands | Typed profiles, independent policy validation, one-time approval, workspace-bound execution, output caps, timeout, and process cleanup. |
 | Verification and repair | Immutable approved plans, required checks, current-file receipts, bounded failure feedback, reviewed repairs, and exact-plan reruns. |
 | Persistence | Conversations and audit records in SQLite, foreign keys, automatic Alembic upgrades, and pre-upgrade backups. |
+
+The [30 October 2026 application review](docs/review-2026-10-30.md) adds model suitability checks, source-read evidence, context budgeting for tools, disk-backed file application, nested creates, bounded UI waits, and stronger recovery tests. Remaining work below is still distinct from the delivered behavior.
 
 Historical implementation names remain in source and tests: **Phase 4** means transactional editing, **Phase 5** means controlled command execution, and **Phase 6** means bounded verification/repair. They are delivered layers, not unfinished prerequisites.
 
@@ -34,14 +39,17 @@ Historical implementation names remain in source and tests: **Phase 4** means tr
 | Priority | Work | Completion evidence |
 | --- | --- | --- |
 | 1 | Improve model suitability and hardware guidance | Clear support checks and actionable low-memory errors across supported local servers, without invented download percentages. |
-| 1 | Broaden first-install testing | Clean-machine checks for Windows/macOS/Linux, missing tools, interrupted downloads, reused models, and offline relaunch. |
-| 2 | Improve context selection | Traceable relevant-file selection, tokenizer-aware budgets, and durable conversation compaction. |
-| 2 | Add repository intelligence | Bounded symbol/index support that respects scoped guidance, excluded paths, and local-only storage. |
+| 1 | Expand real-model evidence | Run the evaluation suite across more installed local models and hardware; investigate task failures separately from policy-control results. |
+| 1 | Complete clean-OS installation evidence | Run the configured OS matrix and representative VMs, including actual runtime installation, missing prerequisites, and real download interruption. Fresh-copy tests on an existing host cover a narrower boundary. |
+| 2 | Improve context precision and continuity | Add tokenizer-aware budgets and durable conversation compaction; measure navigation quality on representative large repositories. |
+| 2 | Extend repository intelligence | Evaluate incremental local indexing beyond the current bounded fresh symbol/import hints, while preserving scoped guidance and excluded paths. |
 | 2 | Extend editor integration | VS Code diagnostics and explicit multi-root ownership without weakening path or approval rules. |
 | 3 | Add browser task review | Agent views and diff/approval interfaces backed by the same durable contracts and an explicit execution design. |
 | 3 | Improve local operations | Clearer structured logs, request/body limits, backup management, checkpoint retention, and reproducible distributions. |
 
 These are planned improvements, not promises of existing functionality. Cloud inference, remote machine execution, unattended approval, deployment/publishing, and model-controlled commits/pushes are outside the current product scope.
+
+Use [Model evaluations](docs/model-evaluations.md), [Installation testing](docs/installation-testing.md), and [Repository context](docs/repository-context.md) for the implemented commands, evidence boundaries, and remaining limits.
 
 ## Validation expectations
 

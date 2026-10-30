@@ -42,6 +42,21 @@ describe('local backend configuration', () => {
 });
 
 describe('SSE transport', () => {
+  it('reports a stalled response as an actionable timeout rather than a user cancellation', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.stubGlobal('fetch', vi.fn().mockImplementation((_url, init: RequestInit) => new Promise((_resolve, reject) => {
+        init.signal?.addEventListener('abort', () => reject(new DOMException('aborted', 'AbortError')));
+      })));
+      const failed = vi.fn(); const done = vi.fn();
+      const pending = new BackendClient(settings(), 100).streamChat(1, [], undefined, vi.fn(), done, failed);
+      await vi.advanceTimersByTimeAsync(101);
+      await pending;
+      expect(failed).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('stopped responding'), name: 'Error' }));
+      expect(done).not.toHaveBeenCalled();
+    } finally { vi.useRealTimers(); }
+  });
+
   it('decodes split UTF-8, fragmented CRLF, multiple records and the final frame', async () => {
     const bytes = encode.encode('data: "नमस्ते"\r\n\r\nevent: message\r\ndata: {"type":\r\ndata: "message", "content": "ok"}\r\n\r\nevent: done\r\ndata: [DONE]');
     const frames: Array<{ event: string; data: string }> = [];
@@ -131,6 +146,26 @@ function providerFor(backend: Record<string, unknown>): any {
 }
 
 describe('sidebar request ownership', () => {
+  it('rejects a known chat-only model before creating an Agent conversation', async () => {
+    const provider = providerFor({ cancel: vi.fn(), getModelCapabilities: vi.fn().mockResolvedValue({ agent_ready: false }), createConversation: vi.fn(), streamAgent: vi.fn() });
+    await provider.handleChatRequest({ prompt: 'Fix parser', requestId: 'chat-only', model: 'chat:small', mode: 'agent' });
+    expect(provider.backend.createConversation).not.toHaveBeenCalled();
+    expect(provider.backend.streamAgent).not.toHaveBeenCalled();
+    expect(provider.send).toHaveBeenCalledWith({ command: 'streamError', payload: expect.objectContaining({ requestId: 'chat-only', message: expect.stringContaining('not Agent tools') }) });
+  });
+
+  it('drops outdated tool capability replies after a different model is selected', async () => {
+    const replies: Array<(value: unknown) => void> = [];
+    const provider = providerFor({ getModelCapabilities: vi.fn().mockImplementation(() => new Promise(resolve => { replies.push(resolve); })) });
+    provider.modelCapabilityGeneration = 0;
+    const first = provider.handleMessage({ command: 'checkModelCapabilities', args: { model: 'old', requestId: 1 } });
+    const second = provider.handleMessage({ command: 'checkModelCapabilities', args: { model: 'new', requestId: 2 } });
+    replies[1]({ model: 'new', agent_ready: true }); await second;
+    replies[0]({ model: 'old', agent_ready: false }); await first;
+    expect(provider.send).toHaveBeenCalledOnce();
+    expect(provider.send).toHaveBeenCalledWith({ command: 'modelCapabilities', payload: { model: 'new', agent_ready: true, requestId: 2 } });
+  });
+
   it('surfaces conversation-creation failures with the owning request ID', async () => {
     const provider = providerFor({ cancel: vi.fn(), createConversation: vi.fn().mockRejectedValue(new Error('API offline')) });
     await provider.handleChatRequest({ prompt: 'help', requestId: 'request-1', mode: 'ask' });

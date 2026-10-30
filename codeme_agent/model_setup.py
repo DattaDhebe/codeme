@@ -20,7 +20,7 @@ import httpx
 
 from codeme_agent.config import settings
 from codeme_agent.local_access import validate_local_url
-from codeme_agent.model_client import create_model_client
+from codeme_agent.model_client import capability_summary, create_model_client
 from codeme_agent.model_messages import cloud_model_name, normalize_assistant
 from codeme_agent.ollama import OllamaClient, OllamaError
 
@@ -63,18 +63,21 @@ class ModelSetup:
         self._daemon: subprocess.Popen | None = None
         self._ready_checked_at = 0.0
         self._ready_check_in_progress = False
+        self._capabilities: dict[str, list[str] | None] = {}
         self._status = {
             "state": "idle", "provider": settings.model_provider, "model": None,
             "available_models": [], "message": "Ready to check your local model.",
             "completed_bytes": 0, "total_bytes": 0, "percent": None,
             "progress_scope": "layer", "error": None,
+            **capability_summary(None),
         }
 
     def status(self, *, refresh: bool = False) -> dict:
         if refresh:
             self._refresh_readiness()
         with self._lock:
-            result = {**self._status, "available_models": list(self._status["available_models"])}
+            result = {**self._status, "available_models": list(self._status["available_models"]),
+                      "model_capabilities": list(self._status["model_capabilities"])}
             result["auto_setup_enabled"] = settings.auto_model_setup
             result["can_retry"] = not (self._thread and self._thread.is_alive())
             return result
@@ -96,11 +99,12 @@ class ModelSetup:
             changes = {"available_models": installed}
             if not available:
                 changes.update(state="idle", model=None, percent=None, error=None,
-                               message="The selected model is no longer installed. Set up a local model to continue.")
+                               message="The selected model is no longer installed. Set up a local model to continue.",
+                               **capability_summary(None))
         except Exception:
             changes = {"state": "server_unavailable", "available_models": [], "percent": None,
                        "message": "Your local model server is no longer reachable. Choose Retry to reconnect or restart it.",
-                       "error": "The local model server is unavailable."}
+                       "error": "The local model server is unavailable.", **capability_summary(None)}
         finally:
             with self._lock:
                 self._ready_check_in_progress = False
@@ -120,10 +124,12 @@ class ModelSetup:
             if self._thread and self._thread.is_alive():
                 return self.status()
             self._cancel = threading.Event()
+            self._capabilities = {}
             self._status.update(
                 state="checking", provider=settings.model_provider, model=None,
                 available_models=[], message="Checking for an installed local model…",
                 completed_bytes=0, total_bytes=0, percent=None, error=None,
+                **capability_summary(None),
             )
             self._thread = threading.Thread(target=self._run, name="codeme-model-setup", daemon=True)
             self._thread.start()
@@ -164,7 +170,7 @@ class ModelSetup:
         if parsed.scheme != "http" or parsed.path not in {"", "/"}:
             self._update(state="server_unavailable", message="Start your configured local Ollama server, then choose Retry.")
             return False
-        self._update(message="Starting your local Ollama server…")
+        self._update(message="Starting your local Ollama server. First-time hardware discovery can take up to a minute…")
         environment = {**os.environ, "OLLAMA_HOST": parsed.netloc, "OLLAMA_NO_CLOUD": "1"}
         if self._daemon is None or self._daemon.poll() is not None:
             self._daemon = subprocess.Popen(
@@ -172,7 +178,7 @@ class ModelSetup:
                 stderr=subprocess.DEVNULL, env=environment, shell=False,
                 creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0,
             )
-        deadline = monotonic() + 20
+        deadline = monotonic() + 60
         client = OllamaClient(base_url=base_url)
         while monotonic() < deadline:
             self._check_cancelled()
@@ -197,15 +203,9 @@ class ModelSetup:
 
     def _model_capabilities(self, base_url: str, name: str) -> list[str] | None:
         self._check_cancelled()
-        try:
-            response = httpx.post(f"{base_url}/api/show", json={"model": name}, timeout=5,
-                                  trust_env=False, follow_redirects=False)
-            response.raise_for_status()
-            data = response.json()
-            capabilities = data.get("capabilities") if isinstance(data, dict) else None
-            return capabilities if isinstance(capabilities, list) else None
-        except (httpx.HTTPError, ValueError):
-            return None  # Older Ollama versions do not expose capabilities.
+        capabilities = OllamaClient(base_url=base_url)._read_model_capabilities(name, timeout=5)
+        self._capabilities[name] = capabilities
+        return capabilities
 
     def _choose_ollama_model(self, base_url: str, installed: list[str], desired: str) -> str | None:
         ordered = sorted(installed, key=lambda name: (
@@ -292,6 +292,7 @@ class ModelSetup:
 
     def _run(self) -> None:
         try:
+            self._capabilities = {}
             provider = settings.model_provider
             desired = settings.default_model
             client = create_model_client()
@@ -321,8 +322,13 @@ class ModelSetup:
                                      if OllamaClient._model_key(name) == OllamaClient._model_key(desired)), None)
                     if selected is None:
                         raise OllamaError("Download finished but Ollama did not report installed local weights. Retry setup.")
+                capabilities = (self._capabilities[selected] if selected in self._capabilities
+                                else self._model_capabilities(base_url, selected))
+                if capabilities is not None and "completion" not in capabilities:
+                    raise OllamaError("The installed model cannot generate chat. Set DEFAULT_MODEL to a text-generation coding model, then choose Retry.")
                 self._warm_ollama(base_url, selected)
             else:
+                capabilities = None
                 if not installed:
                     self._update(state="error", message="No local model is loaded. Load a coding model in your server, then choose Retry; use Ollama for automatic downloads.", error="The configured server has no available local models.")
                     return
@@ -354,7 +360,8 @@ class ModelSetup:
                 settings.default_model = selected
                 self._ready_checked_at = monotonic()
                 self._status.update(state="ready", model=selected, available_models=installed, percent=100,
-                                    message=f"{selected} is ready. You can start chatting.", error=None)
+                                    message=f"{selected} is ready. You can start chatting.", error=None,
+                                    **capability_summary(capabilities))
         except SetupCancelled:
             self._update(state="cancelled", message="Model setup cancelled. Downloaded layers can be reused on retry.", error=None)
         except Exception as exc:

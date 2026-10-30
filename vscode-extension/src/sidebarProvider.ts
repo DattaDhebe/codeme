@@ -29,6 +29,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   private view?: vscode.WebviewView;
   private webviewReady = false;
   private modelSetupMonitor?: ModelSetupMonitor;
+  private modelCapabilityGeneration = 0;
   private pendingMessages: WebviewMessage[] = [];
   private currentWorkspaceId?: number;
   private chatGeneration = 0;
@@ -255,6 +256,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   public async updateConfiguration(): Promise<void> {
+    this.modelCapabilityGeneration++;
     this.modelSetupMonitor?.stop();
     this.backend.updateSettings(vscode.workspace.getConfiguration('personalCodex'));
     if (this.webviewReady) {
@@ -462,15 +464,20 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   }
 
   private async continueTask(runId: string, requestId?: string, automatic = false, ownerGeneration = this.chatGeneration): Promise<void> {
+    const stopResume = async (message: string, conversationId = this.selectedConversationId): Promise<void> => {
+      if (automatic) return;
+      if (requestId) await this.send({ command: 'streamStopped', payload: { conversationId, requestId } });
+      await this.send({ command: 'taskNotice', payload: { conversationId, message } });
+    };
     if (this.continuingAgentRuns.has(runId) || this.activeChat) {
       if (automatic && this.activeChat?.runId === runId) this.pendingTaskContinuations.set(runId, ownerGeneration);
-      if (!automatic) await this.send({ command: 'taskNotice', payload: { conversationId: this.selectedConversationId, message: 'A local request is already running. Wait for it to finish before resuming.' } });
+      await stopResume('A local request is already running. Wait for it to finish before resuming.');
       return;
     }
     const known = [...this.agentRuns.values()].find((item) => item.id === runId);
     if (!automatic && known && this.selectedConversationId === known.conversation_id && ownerGeneration === this.chatGeneration) this.cancelledAgentRuns.delete(runId);
     if (!known || !this.ownsTask(runId, known.conversation_id, ownerGeneration) || known.workspace_id !== this.currentWorkspaceId) {
-      if (!automatic) await this.send({ command: 'taskNotice', payload: { conversationId: this.selectedConversationId, message: 'Reload this conversation and register its workspace before resuming the saved task.' } });
+      await stopResume('Reload this conversation and register its workspace before resuming the saved task.');
       return;
     }
     this.continuingAgentRuns.add(runId);
@@ -480,10 +487,18 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       this.agentRuns.set(run.conversation_id, run);
       await this.send({ command: 'agentRunUpdated', payload: run });
       if (['completed', 'cancelled', 'exhausted'].includes(run.status)) {
-        await this.send({ command: 'taskNotice', payload: { conversationId: run.conversation_id, message: run.summary || `Task is ${run.status}.` } });
+        await stopResume(run.summary || `Task is ${run.status}.`, run.conversation_id);
         return;
       }
       if (automatic && ['interrupted', 'blocked'].includes(run.status)) return;
+      if (run.model && this.backend.getModelCapabilities) {
+        const capabilities = await this.backend.getModelCapabilities(run.model);
+        if (!this.ownsTask(runId, run.conversation_id, ownerGeneration)) return;
+        if (capabilities.agent_ready === false) {
+          await stopResume('This task model does not support Agent tools. Start a new task with a tool-capable local model.', run.conversation_id);
+          return;
+        }
+      }
       const generation = this.chatGeneration;
       const active = { requestId, conversationId: run.conversation_id, runId };
       this.activeChat = active;
@@ -556,6 +571,19 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       case 'cancelModelSetup':
         await this.setupMonitor().refresh('cancel');
         break;
+      case 'checkModelCapabilities': {
+        const model = message.args?.model;
+        const requestId = message.args?.requestId;
+        if (typeof model !== 'string' || model.length > 250) break;
+        const generation = ++this.modelCapabilityGeneration;
+        try {
+          const capabilities = await this.backend.getModelCapabilities(model);
+          if (generation === this.modelCapabilityGeneration) await this.send({ command: 'modelCapabilities', payload: { ...capabilities, requestId } });
+        } catch (error) {
+          if (generation === this.modelCapabilityGeneration) await this.send({ command: 'modelCapabilityError', payload: { model, requestId, message: (error as Error).message } });
+        }
+        break;
+      }
       case 'startChat':
         await this.handleChatRequest(message.args as unknown as ChatRequestArgs);
         break;
@@ -793,6 +821,11 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         return 'Context: ' + item.label + ' (' + item.kind + ')\n\x60\x60\x60' + (item.language || 'text') + '\n' + item.content + '\n\x60\x60\x60';
       }).join('\n\n');
       if (contextText.length > 180_000) throw new Error('Attached context is too large. Remove a file or attach a smaller selection.');
+      if (args.mode === 'agent' && args.model && this.backend.getModelCapabilities) {
+        const capabilities = await this.backend.getModelCapabilities(args.model);
+        if (generation !== this.chatGeneration) return;
+        if (capabilities.agent_ready === false) throw new Error('This model supports chat but not Agent tools. Choose Ask mode or select a tool-capable local model.');
+      }
       if (!conversationId) {
         const conversation = await this.backend.createConversation(this.createTitle(prompt));
         if (generation !== this.chatGeneration) return;
@@ -1369,7 +1402,9 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       }
       if (session.state === 'VERIFICATION_FAILED' && session.maximum_repair_attempts > session.current_attempt) {
         await this.send({ command: 'verificationRepairStarted', payload: { sessionId: session.id } });
-        session = await this.backend.prepareVerificationRepair(session.id, this.backend.configuredModel);
+        const owner = this.taskVerificationOwners.get(session.id);
+        const taskModel = owner ? [...this.agentRuns.values()].find((run) => run.id === owner.runId)?.model : undefined;
+        session = await this.backend.prepareVerificationRepair(session.id, taskModel || undefined);
         await this.publishVerification(session);
       }
     } catch (error) {

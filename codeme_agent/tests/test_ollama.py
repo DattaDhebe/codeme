@@ -165,7 +165,7 @@ def test_cloud_and_unknown_models_are_hidden_and_never_receive_prompts(monkeypat
         list(client.stream_chat([], model=entry["name"]))
 
 
-def test_local_model_preflight_is_cached_for_agent_turns_and_accepts_latest_alias(monkeypatch):
+def test_local_model_preflight_is_rechecked_each_turn_and_accepts_latest_alias(monkeypatch):
     calls = []
     class Response:
         status_code = 200
@@ -183,7 +183,58 @@ def test_local_model_preflight_is_cached_for_agent_turns_and_accepts_latest_alia
     client = ollama.OllamaClient()
     client.chat_with_tools([], [], model="coder")
     client.chat_with_tools([], [], model="coder:latest")
-    assert calls == ["inventory"]
+    assert calls == ["inventory", "inventory"]
+
+
+def test_previously_local_alias_cannot_receive_more_prompts_after_becoming_remote(monkeypatch):
+    inventories = [[local_entry()], [local_entry(remote_host="https://ollama.com", remote_model="cloud-coder")]]
+    prompts = []
+    class Inventory:
+        status_code = 200
+        def json(self):
+            return {"models": inventories.pop(0)}
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {"message": {"role": "assistant", "content": "ok"}}
+    monkeypatch.setattr(ollama.httpx, "get", lambda *args, **kwargs: Inventory())
+    monkeypatch.setattr(ollama.httpx, "post", lambda *args, **kwargs: prompts.append(kwargs) or Reply())
+    client = ollama.OllamaClient()
+    client.chat_with_tools([{"role": "user", "content": "first"}], [])
+    with pytest.raises(ollama.OllamaError, match="installed local model"):
+        client.chat_with_tools([{"role": "user", "content": "private follow-up"}], [])
+    assert len(prompts) == 1
+
+
+def test_known_chat_only_model_rejects_agent_before_sending_source_context(monkeypatch):
+    calls = []
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {"capabilities": ["completion"]}
+    def post(url, **kwargs):
+        calls.append((url, kwargs))
+        assert url.endswith("/api/show"), "Source context must not be sent to an unsupported tool model"
+        return Reply()
+    monkeypatch.setattr(ollama.httpx, "post", post)
+    with pytest.raises(ollama.OllamaError, match="Ask mode"):
+        ollama.OllamaClient().chat_with_tools([{"role": "user", "content": "private source"}],
+                                             [{"type": "function", "function": {"name": "read_file"}}])
+    assert len(calls) == 1
+    assert calls[0][1]["json"] == {"model": "qwen2.5-coder:7b"}
+
+
+def test_remote_metadata_in_capabilities_cannot_receive_agent_prompt(monkeypatch):
+    class Reply:
+        status_code = 200
+        def json(self):
+            return {"capabilities": ["completion", "tools"], "remote_host": "https://ollama.com"}
+    def post(url, **kwargs):
+        assert url.endswith("/api/show")
+        return Reply()
+    monkeypatch.setattr(ollama.httpx, "post", post)
+    with pytest.raises(ollama.OllamaError, match="Cloud models"):
+        ollama.OllamaClient().chat_with_tools([], [{"type": "function", "function": {"name": "read_file"}}])
 
 
 def test_local_model_preflight_fails_closed_when_inventory_unavailable(monkeypatch):

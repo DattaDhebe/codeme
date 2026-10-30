@@ -58,7 +58,7 @@ def _target(root: Path, relative_path: str) -> tuple[str, Path]:
         raise ChangeSetError("Absolute and UNC paths are not allowed")
     if any(part in {"", ".", ".."} for part in candidate.parts):
         raise ChangeSetError("Traversal and ambiguous path segments are not allowed")
-    resolved = (root / candidate).resolve(strict=False)
+    resolved = workspace._resolve_path(root / candidate, strict=False)
     try:
         workspace.assert_within_workspace(root, resolved)
     except workspace.WorkspaceSecurityError as exc:
@@ -125,8 +125,17 @@ def _prepare_operation(root: Path, operation: schemas.ChangeOperationInput) -> d
     if operation.type == "create":
         if target.exists():
             raise ChangeSetError(f"Create target already exists: {normalized}")
-        if not target.parent.exists() or not target.parent.is_dir():
-            raise ChangeSetError(f"Create target parent does not exist: {normalized}")
+        # Reviewing a create path also reviews its missing parent folders. The
+        # extension creates them only after approval; proposal preparation must
+        # remain read-only. Resolve the nearest existing ancestor to reject
+        # file parents and symlink escapes before accepting that path.
+        parent = target.parent
+        while not parent.exists():
+            parent = parent.parent
+        resolved_parent = workspace._resolve_path(parent)
+        workspace.assert_within_workspace(root, resolved_parent)
+        if not resolved_parent.is_dir():
+            raise ChangeSetError(f"Create target parent is not a directory: {normalized}")
         proposed = operation.content or ""
         if len(proposed.encode("utf-8")) > settings.max_file_size:
             raise ChangeSetError(f"Proposed file exceeds the configured limit: {normalized}")
@@ -161,10 +170,24 @@ def prepare_change_set(root: Path, summary: str, raw_operations: list[dict]) -> 
         raise ChangeSetError("A change set must contain at least one operation")
     if len(raw_operations) > 50:
         raise ChangeSetError("A change set cannot contain more than 50 operations")
-    try:
-        operations = [schemas.ChangeOperationInput.model_validate(item) for item in raw_operations]
-    except ValidationError as exc:
-        raise ChangeSetError(f"Invalid change-set operation: {exc.errors()[0]['msg']}") from exc
+    operations = []
+    known_fields = set(schemas.ChangeOperationInput.model_fields) | set(schemas.SearchReplaceEdit.model_fields)
+    for index, item in enumerate(raw_operations):
+        try:
+            operations.append(schemas.ChangeOperationInput.model_validate(item))
+        except ValidationError as exc:
+            # Give smaller local models a field they can correct without
+            # echoing proposed source, invalid values, or arbitrary extra keys.
+            details = []
+            for error in exc.errors(include_url=False, include_input=False)[:3]:
+                location = f"operations[{index}]"
+                for part in error["loc"]:
+                    if isinstance(part, int):
+                        location += f"[{part}]"
+                    else:
+                        location += "." + (part if part in known_fields else "<unknown field>")
+                details.append(f"{location}: {error['msg'][:200]}")
+            raise ChangeSetError("Invalid change-set operation at " + "; ".join(details)) from exc
     prepared = [_prepare_operation(root, operation) for operation in operations]
     paths = [item["relative_path"].casefold() for item in prepared]
     if len(paths) != len(set(paths)):

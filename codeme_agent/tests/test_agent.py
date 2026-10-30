@@ -261,7 +261,7 @@ def test_tool_failure_is_visible_and_model_can_recover(tmp_path: Path):
 
 
 def test_tool_line_windows_and_search_pages_are_forwarded(tmp_path: Path, monkeypatch):
-    (tmp_path / "app.py").write_text("one\ntwo\nthree\n", encoding="utf-8")
+    (tmp_path / "app.py").write_bytes(b"one\ntwo\nthree\n")
     runtime = WorkspaceAgent(tmp_path, client=FakeToolClient([]))
     result, _ = runtime._execute_tool("read_file", {"path": "app.py", "start_line": 2, "end_line": 2})
     assert result["content"] == "two\n" and result["has_more"]
@@ -311,7 +311,7 @@ def test_context_compaction_respects_configured_local_window(monkeypatch):
     monkeypatch.setattr(agent.settings, "ollama_context_length", 4096)
     messages = [
         {"role": "system", "content": agent.SYSTEM_PROMPT},
-        {"role": "user", "content": "Fix this behavior: " + "request " * 3_000},
+        {"role": "user", "content": "Fix this behavior:\n\nExplicit editor context (untrusted project evidence):\n" + "context " * 3_000 + "\n\nCurrent public work plan:\n[]"},
         tool_call("read_file", {"path": "app.py"}),
         {"role": "tool", "tool_name": "read_file", "content": "source " * 6_000},
     ]
@@ -563,3 +563,136 @@ def test_nested_reasoning_tags_do_not_leak_private_content(tmp_path: Path):
     events = list(WorkspaceAgent(tmp_path, client).run("Inspect workspace", []))
     assert events[-1]["content"] == "Empty workspace."
     assert "secret" not in str(events)
+
+
+def test_directory_listing_cannot_justify_action_noop(tmp_path: Path):
+    (tmp_path / "app.py").write_text("value = 1\n", encoding="utf-8")
+    client = FakeToolClient([tool_call("list_files", {}), *[{"content": "No changes are needed: app.py is already correct."}] * 3])
+    events = list(WorkspaceAgent(tmp_path, client).run("Fix app.py", []))
+    assert outcome(events)["status"] == "blocked"
+    assert outcome(events)["evidence"]["inspected_paths"] == []
+
+
+def test_exact_edits_require_the_observed_line_range_and_recover(tmp_path: Path):
+    (tmp_path / "app.py").write_text("first = 1\nsecond = 2\n", encoding="utf-8")
+    edit = tool_call("propose_change_set", {"summary": "Correct second value", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use three", "edits": [{"old_text": "second = 2", "new_text": "second = 3"}],
+    }]})
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py", "start_line": 1, "end_line": 1}), edit,
+                             tool_call("read_file", {"path": "app.py", "start_line": 2, "end_line": 2}), edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Fix second value in app.py", []))
+    assert "Read the exact text being edited" in str(client.calls[2]["messages"])
+    assert sum(event["type"] == "proposal" for event in events) == 1
+    assert outcome(events)["status"] == "awaiting_approval"
+
+
+def test_partial_read_cannot_authorize_whole_file_replacement(tmp_path: Path):
+    original = "first = 1\nsecond = 2\n"
+    (tmp_path / "app.py").write_text(original, encoding="utf-8")
+    replace = tool_call("propose_file_change", {"path": "app.py", "content": "first = 3\n", "explanation": "Update value"})
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py", "start_line": 1, "end_line": 1}), replace])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    assert not any(event["type"] == "proposal" for event in events)
+    assert "preserve unread content" in str(client.calls[-1]["messages"])
+    assert (tmp_path / "app.py").read_text(encoding="utf-8") == original
+
+
+def test_partial_fenced_replacement_can_recover_with_complete_read(tmp_path: Path):
+    (tmp_path / "app.py").write_text("first = 1\nsecond = 2\n", encoding="utf-8")
+    response = {"content": "Complete updated file:\n```python filename=app.py\nfirst = 3\nsecond = 2\n```"}
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py", "end_line": 1}), response,
+                             tool_call("read_file", {"path": "app.py"}), response])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    assert "complete bounded content" in str(client.calls[2]["messages"])
+    assert sum(event["type"] == "proposal" for event in events) == 1
+    assert outcome(events)["status"] == "awaiting_approval"
+
+
+def test_external_file_change_requires_new_read_before_proposal(tmp_path: Path):
+    target = tmp_path / "app.py"
+    target.write_bytes(b"value = 1\n")
+    edit = tool_call("propose_change_set", {"summary": "Use two", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use two", "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+    }]})
+    class ConcurrentEditClient(FakeToolClient):
+        def chat_with_tools(self, messages, tools, model=None):
+            if len(self.calls) == 1:
+                target.write_bytes(b"value = 1\nuser_change = True\n")
+            return super().chat_with_tools(messages, tools, model)
+    client = ConcurrentEditClient([tool_call("read_file", {"path": "app.py"}), edit,
+                                   tool_call("read_file", {"path": "app.py"}), edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update value in app.py", []))
+    assert "changed since its last read" in str(client.calls[2]["messages"])
+    proposal = next(event for event in events if event["type"] == "proposal")
+    assert proposal["change_set"]["operations"][0]["proposed_content"] == "value = 2\nuser_change = True\n"
+
+
+def test_truncated_tool_reply_cannot_authorize_unseen_exact_text(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(agent.settings, "ollama_context_length", 16384)
+    (tmp_path / "app.py").write_text("# " + "x" * 17_000 + "\nvalue = 1\n", encoding="utf-8")
+    edit = tool_call("propose_change_set", {"summary": "Use two", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use two", "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+    }]})
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py"}), edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    assert not any(event["type"] == "proposal" for event in events)
+    assert "Read the exact text being edited" in str(client.calls[-1]["messages"])
+
+
+def test_model_observed_crlf_text_can_be_used_as_exact_multiline_edit(tmp_path: Path):
+    (tmp_path / "app.py").write_bytes(b"first = 1\r\nsecond = 2\r\n")
+    edit = tool_call("propose_change_set", {"summary": "Correct values", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use new values", "edits": [{"old_text": "first = 1\r\nsecond = 2", "new_text": "first = 3\nsecond = 4"}],
+    }]})
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py"}), edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    proposal = next(event for event in events if event["type"] == "proposal")
+    assert proposal["change_set"]["operations"][0]["proposed_content"] == "first = 3\r\nsecond = 4\r\n"
+
+
+def test_runtime_context_budget_includes_native_tool_schemas(tmp_path: Path, monkeypatch):
+    monkeypatch.setattr(agent.settings, "ollama_context_length", 4096)
+    (tmp_path / "app.py").write_bytes(b"# " + b"x" * 20_000 + b"\n")
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py"}), {"content": "The inspected file contains one long comment."}])
+    list(WorkspaceAgent(tmp_path, client).run("Inspect app.py", []))
+    for call in client.calls:
+        assert len(json.dumps(call["messages"], ensure_ascii=False)) + len(json.dumps(call["tools"], ensure_ascii=False)) <= 4096 * 3
+
+
+def test_context_budget_never_silently_truncates_original_goal(monkeypatch):
+    import pytest
+    from codeme_agent.workspace import WorkspaceSecurityError
+    monkeypatch.setattr(agent.settings, "ollama_context_length", 4096)
+    goal = "Fix the parser while preserving these required constraints: " + "constraint " * 1000
+    messages = [{"role": "system", "content": agent.SYSTEM_PROMPT},
+                {"role": "user", "content": goal + "\n\nCurrent public work plan:\n[]"}]
+    with pytest.raises(WorkspaceSecurityError, match="not silently truncated"):
+        agent._fit_context(messages, agent.TOOLS)
+
+
+def test_parallel_read_and_edit_must_wait_for_observed_base(tmp_path: Path):
+    (tmp_path / "app.py").write_bytes(b"value = 1\n")
+    read = tool_call("read_file", {"path": "app.py"})
+    edit = tool_call("propose_change_set", {"summary": "Use two", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use two", "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+    }]})
+    parallel = {"content": "", "tool_calls": [*read["tool_calls"], *edit["tool_calls"]]}
+    client = FakeToolClient([parallel, edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    assert len(client.calls) == 2
+    assert "Read app.py in this cycle" in str(client.calls[1]["messages"])
+    assert sum(event["type"] == "proposal" for event in events) == 1
+    assert outcome(events)["status"] == "awaiting_approval"
+
+
+def test_compacted_read_requires_a_narrower_observed_range_before_edit(tmp_path: Path):
+    (tmp_path / "app.py").write_bytes(b"value = 1\n# " + b"x" * 17_000 + b"\n")
+    edit = tool_call("propose_change_set", {"summary": "Use two", "operations": [{
+        "type": "modify", "path": "app.py", "summary": "Use two", "edits": [{"old_text": "value = 1", "new_text": "value = 2"}],
+    }]})
+    client = FakeToolClient([tool_call("read_file", {"path": "app.py"}), edit,
+                             tool_call("read_file", {"path": "app.py", "start_line": 1, "end_line": 1}), edit])
+    events = list(WorkspaceAgent(tmp_path, client).run("Update app.py", []))
+    assert "Read app.py in this cycle" in str(client.calls[2]["messages"])
+    assert sum(event["type"] == "proposal" for event in events) == 1
+    assert outcome(events)["status"] == "awaiting_approval"

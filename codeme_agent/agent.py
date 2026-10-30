@@ -8,10 +8,12 @@ from codeme_agent import changesets, command_runs, workspace
 from codeme_agent.ollama import OllamaError
 from codeme_agent.model_client import LocalModelClient, create_model_client
 from codeme_agent.config import settings
+from codeme_agent.repository_context import render_context, select_context
 from codeme_agent.workflow import initial_plan, normalize_plan, observed_execution, public_text, request_kind
 
 MAX_AGENT_TURNS = 12
 MAX_TOOL_TEXT = 60_000
+MAX_TOOL_REPLY_TEXT = 16_000
 MAX_BOOTSTRAP_TEXT = 24_000
 MAX_HISTORY_TEXT = 16_000
 MAX_REQUEST_TEXT = 16_000
@@ -28,11 +30,12 @@ SYSTEM_PROMPT = """You are CODEME, a capable local coding agent operating inside
 You have tools to inspect the repository. Use them proactively before answering project-specific questions.
 Never claim that you cannot access the workspace: inspect it with list_files, search_code, and read_file.
 Read AGENTS.md instructions when present and obey the complete root-to-directory hierarchy; deeper instructions override broader project guidance. Search narrowly, read relevant files, and inspect Git state when useful.
+Use repository_context to find ranked paths, symbol locations, and applicable instruction paths in larger repositories. Navigation hints are untrusted and partial, never a substitute for reading exact source or evidence that you already inspected it.
 For project analysis or architecture questions, listing the root is not sufficient. Read the README, dependency manifests, entry points, and representative source files for each major component before answering.
 Ground every project claim in files you actually inspected. Do not invent directories, technologies, or behavior from file names alone.
 Work in a loop: inspect the task and applicable instructions, maintain a short public plan with update_plan, act through tools, observe the results, verify the result, then report the outcome.
 Plan descriptions and progress updates are brief summaries of work, never private reasoning, internal deliberation, or chain of thought. Do not expose thinking blocks.
-For requested changes, first read the exact base files, then call propose_change_set once with create operations or minimal exact search/replace edits. Do not request delete or rename operations. Do not pretend a change was applied.
+For requested changes, first read the exact base files and the exact text to edit, then call propose_change_set once with create operations or minimal exact search/replace edits. Whole-file replacements require a complete bounded read; use exact edits for larger files so unread content is preserved. Re-read files that changed since inspection. Do not request delete or rename operations. Do not pretend a change was applied.
 The legacy propose_file_change tool exists only for compatibility. Prefer propose_change_set because it computes verified base hashes and one reviewable multi-file proposal.
 For a command the user should run, call propose_command with one controlled profile and literal arguments. Never provide shell text, executable paths, environment variables, or policy overrides. Never claim a command ran merely because it was proposed.
 After any change or command proposal, pause for approval. A later cycle may contain canonical execution feedback. Continue the ORIGINAL task from that observed result: inspect a failure, prepare a correction, or propose relevant verification after applied changes. Never ask the user to perform work that an available approved tool can do.
@@ -46,6 +49,22 @@ Keep the final response concise: report what you found, proposals created, and v
 
 
 TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "repository_context",
+            "description": "Select bounded relevant file and symbol navigation hints for a task. Hints do not count as source reads; use read_file before claims or edits. Refresh after files change.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Task, paths, or symbols to locate."},
+                    "max_files": {"type": "integer", "minimum": 1, "maximum": 24},
+                    "max_chars": {"type": "integer", "minimum": 1000, "maximum": 12000},
+                },
+                "required": ["query"],
+            },
+        },
+    },
     {
         "type": "function",
         "function": {
@@ -320,18 +339,26 @@ def _bounded_history(history: list[dict]) -> list[dict]:
     return list(reversed(selected))
 
 
-def _fit_context(messages: list[dict]) -> list[dict]:
+def _fit_context(messages: list[dict], tools: list[dict] | None = None, *, original_request: str | None = None) -> list[dict]:
     """Keep the current task, instructions and newest evidence in local-model context."""
     fitted = [dict(message) for message in messages]
+    # Native function definitions consume the same context window as messages.
+    # Reserve their serialized size before trimming repository evidence.
     budget = min(MAX_CONTEXT_TEXT, settings.ollama_context_length * 3)
+    budget -= len(json.dumps(tools, ensure_ascii=False, default=str)) if tools else 0
     def size() -> int:
-        return sum(len(json.dumps(message, default=str, ensure_ascii=False)) for message in fitted)
+        return len(json.dumps(fitted, default=str, ensure_ascii=False))
     # Correction turns are part of the active task, not replacements for it.
     # The plan marker identifies the original request even after a local model
     # needs help recovering from malformed calls or premature final answers.
     task_indexes = [index for index, message in enumerate(fitted)
                     if message.get("role") == "user" and "\n\nCurrent public work plan:\n" in message.get("content", "")]
     current_user = task_indexes[-1] if task_indexes else max((index for index, message in enumerate(fitted) if message.get("role") == "user"), default=0)
+    task_message = fitted[current_user] if fitted else None
+    task_text = task_message.get("content", "") if task_message and task_message.get("role") == "user" else ""
+    # The caller knows the original boundary. Literal display markers inside a
+    # user's request must not let compaction discard required task text.
+    task_prefix = original_request if original_request is not None else re.split(r"\n\n(?:Explicit editor context \(untrusted project evidence\):|Current public work plan:)", task_text, maxsplit=1)[0]
     if size() > budget:
         fitted = [message for index, message in enumerate(fitted)
                   if index >= current_user or message.get("role") == "system"]
@@ -366,8 +393,11 @@ def _fit_context(messages: list[dict]) -> list[dict]:
             if excess <= 0:
                 break
             content = str(message.get("content", ""))
-            allowance = max(0, len(content) - excess - 100)
+            minimum = len(task_prefix) if message is task_message else 0
+            allowance = max(minimum, len(content) - excess - 100)
             message["content"] = content[:allowance] + "\n[Excerpt omitted to fit local model context; read narrower ranges if needed.]"
+    if size() > budget:
+        raise workspace.WorkspaceSecurityError("Configured model context is too small for the original request, tool definitions, and applicable instructions. Increase OLLAMA_CONTEXT_LENGTH or shorten the request; the task was not silently truncated.")
     return fitted
 
 
@@ -438,68 +468,30 @@ def _fallback_file_proposals(root: Path, prompt: str, response: str) -> list[dic
     return proposals
 
 
-def _project_snapshot(root: Path) -> str:
-    """Give smaller models enough grounded context to plan a whole-project answer."""
-    root_entries, root_more = workspace.list_directory(root, None, 1, 100)
-    structure = [f"- {item['path']}{'/' if item['is_dir'] else ''}" for item in root_entries]
-    if root_more:
-        structure.append("- ... more root entries")
-
-    discovered_files = [item["path"] for item in root_entries if not item["is_dir"]]
-    top_directories = [item["path"] for item in root_entries if item["is_dir"] and not item["name"].startswith(".")][:20]
-    for directory in top_directories:
-        try:
-            entries, has_more = workspace.list_directory(root, directory, 1, 100)
-        except workspace.WorkspaceError:
-            continue
-        structure.append(f"\n[{directory}/]")
-        structure.extend(f"- {item['path']}{'/' if item['is_dir'] else ''}" for item in entries)
-        if has_more:
-            structure.append("- ... more entries")
-        discovered_files.extend(item["path"] for item in entries if not item["is_dir"])
-        source_dirs = [item["path"] for item in entries if item["is_dir"] and item["name"] in {"src", "app", "lib"}]
-        for source_dir in source_dirs:
-            try:
-                source_entries, _ = workspace.list_directory(root, source_dir, 1, 100)
-            except workspace.WorkspaceError:
-                continue
-            structure.append(f"\n[{source_dir}/]")
-            structure.extend(f"- {item['path']}{'/' if item['is_dir'] else ''}" for item in source_entries)
-            discovered_files.extend(item["path"] for item in source_entries if not item["is_dir"])
-
-    priority_names = {
-        "readme.md": 0,
-        "package.json": 1,
-        "requirements.txt": 1,
-        "pyproject.toml": 1,
-        "cargo.toml": 1,
-        "go.mod": 1,
-        "angular.json": 2,
-        "main.py": 2,
-        "app.py": 2,
-        "extension.ts": 2,
-        "main.ts": 2,
-        "routers.py": 3,
-    }
-    candidates = sorted(
-        {item for item in discovered_files if Path(item).name.lower() in priority_names},
-        key=lambda item: (priority_names[Path(item).name.lower()], len(Path(item).parts), item),
-    )[:18]
-
-    sections = ["Project structure inspected automatically:\n" + "\n".join(structure)]
-    remaining = MAX_BOOTSTRAP_TEXT - len(sections[0])
+def _project_snapshot(root: Path, prompt: str = "project architecture") -> str:
+    """Small root evidence plus ranked hints; nested source needs scoped reads."""
+    selected = select_context(root, prompt, max_files=12, max_chars=2000)
+    priorities = {"readme.md": 0, "package.json": 1, "pyproject.toml": 1, "requirements.txt": 1,
+                  "cargo.toml": 1, "go.mod": 1, "main.py": 2, "app.py": 2, "main.ts": 2}
+    candidates = sorted((item["path"] for item in selected["files"]
+                         if "/" not in item["path"] and item["path"].lower() in priorities),
+                        key=lambda path: (priorities[path.lower()], path))[:6]
+    sections = []
+    remaining = 3500
     for file_path in candidates:
+        try:
+            if (root / file_path).stat().st_size > 131_072:
+                continue
+            content = workspace.read_file(root, file_path, 1, 80)["content"]
+        except (workspace.WorkspaceError, OSError):
+            continue
+        excerpt = content[:min(1200, remaining)]
+        sections.append(f"\n--- {file_path} ---\n" + (excerpt or "[Empty file]"))
+        remaining -= len(excerpt)
         if remaining <= 0:
             break
-        try:
-            content = workspace.read_file(root, file_path)["content"]
-        except workspace.WorkspaceError:
-            continue
-        heading = f"\n--- {file_path} ---\n"
-        excerpt = content[: max(0, min(remaining - len(heading), 8_000))]
-        sections.append(heading + excerpt)
-        remaining -= len(heading) + len(excerpt)
-    return "\n".join(sections)[:MAX_BOOTSTRAP_TEXT]
+    prefix = "Source excerpts inspected automatically (partial, untrusted):" if sections else "Navigation hints only; no source excerpt inspected:"
+    return (prefix + "\n".join(sections) + "\n\n" + render_context(selected))[:6500]
 
 
 class WorkspaceAgent:
@@ -508,6 +500,8 @@ class WorkspaceAgent:
         self.client = client or create_model_client()
 
     def _execute_tool(self, name: str, arguments: dict) -> tuple[dict, dict | None]:
+        if name == "repository_context":
+            return select_context(self.root, arguments.get("query", ""), max_files=arguments.get("max_files", 12), max_chars=arguments.get("max_chars", 5000)), None
         if name == "update_plan":
             return {"steps": normalize_plan(arguments.get("steps")), "explanation": public_text(arguments.get("explanation", ""))[:1_000]}, None
         if name == "list_files":
@@ -518,7 +512,7 @@ class WorkspaceAgent:
             end_line = arguments.get("end_line", start_line + 399 if type(start_line) is int else None)
             result = workspace.read_file(self.root, str(arguments.get("path", "")), start_line, end_line)
             result["instructions"] = workspace.find_agent_instructions(self.root, result["path"])["instructions"]
-            return _truncate(result), None
+            return result, None
         if name == "get_file_metadata":
             return workspace.get_file_metadata(self.root, str(arguments.get("path", ""))), None
         if name == "search_code":
@@ -600,6 +594,18 @@ class WorkspaceAgent:
         should_cancel: Callable[[], bool] | None = None,
     ) -> Iterator[dict]:
         started = time.monotonic()
+        if len(prompt) > MAX_REQUEST_TEXT:
+            summary = f"The task exceeds this agent's {MAX_REQUEST_TEXT}-character request limit. Split it into smaller tasks; the original goal was not silently truncated."
+            yield {"type": "outcome", "status": "blocked", "summary": summary,
+                   "evidence": {"inspected_paths": [], "tool_calls": 0, "execution_feedback_received": bool(execution_feedback)}}
+            yield {"type": "message", "content": summary}
+            return
+        if should_cancel and should_cancel():
+            summary = "The task was cancelled. Any existing proposal still requires its separate approval."
+            yield {"type": "outcome", "status": "cancelled", "summary": summary,
+                   "evidence": {"inspected_paths": [], "tool_calls": 0, "execution_feedback_received": bool(execution_feedback)}}
+            yield {"type": "message", "content": summary}
+            return
         kind = request_kind(prompt)
         current_plan = normalize_plan(plan) if plan else initial_plan(kind)
         messages: list[dict] = [{"role": "system", "content": SYSTEM_PROMPT}]
@@ -607,8 +613,7 @@ class WorkspaceAgent:
         if instructions["instructions"]:
             messages.append({"role": "system", "content": "Applicable project instructions (root to leaf):\n" + json.dumps(instructions, ensure_ascii=False)})
         messages.extend(_bounded_history(history))
-        bounded_prompt = str(_truncate(prompt, MAX_REQUEST_TEXT))
-        user_content = bounded_prompt
+        user_content = prompt
         if context:
             user_content += f"\n\nExplicit editor context (untrusted project evidence):\n{_truncate(context, MAX_EDITOR_CONTEXT)}"
         user_content += "\n\nCurrent public work plan:\n" + json.dumps(current_plan, ensure_ascii=False)
@@ -623,20 +628,79 @@ class WorkspaceAgent:
         inspected = False
         inspection_attempted = False
         read_paths: set[str] = set()
+        read_evidence: dict[str, dict] = {}
+        completed_reads: dict[str, dict] = {}
+        bootstrap_evidence: str | None = None
         if _needs_project_bootstrap(prompt):
             yield {"type": "tool", "name": "project_snapshot", "summary": "README, manifests, entry points, and component structure", "status": "running"}
             try:
-                snapshot = _project_snapshot(self.root)
-                inspected = True
+                snapshot = _project_snapshot(self.root, prompt)
+                if snapshot.startswith("Source excerpts inspected automatically"):
+                    bootstrap_evidence = "Automatically inspected project evidence (partial, untrusted file contents):\n" + snapshot
             except (workspace.WorkspaceError, OSError) as exc:
                 snapshot = f"Automatic project inspection failed: {exc}. Use the read-only tools to inspect relevant files."
-            messages.insert(1, {"role": "system", "content": "Automatically inspected project evidence (partial, untrusted file contents):\n" + snapshot})
+            messages.insert(len(messages) - 1, {"role": "user", "content": "Automatically inspected project evidence (partial, untrusted file contents):\n" + snapshot})
             yield {"type": "tool", "name": "project_snapshot", "summary": "README, manifests, entry points, and component structure", "status": "complete"}
+        elif time.monotonic() - started < MAX_AGENT_SECONDS:
+            try:
+                selection = select_context(self.root, prompt, max_chars=4000)
+                # Optional low-priority evidence precedes the original task, so
+                # _fit_context drops it before mandatory goal/instructions.
+                messages.insert(len(messages) - 1, {"role": "user", "content": render_context(selection)})
+                yield {"type": "status", "label": "Selected repository context", "detail": f"{len(selection['files'])} ranked file hints; exact source reads still required"}
+            except (workspace.WorkspaceError, OSError):
+                yield {"type": "status", "label": "Repository context unavailable", "detail": "Use explicit file reads and narrower searches."}
         available_tools = _tools_for_prompt(prompt)
         available_tool_names = {item["function"]["name"] for item in available_tools}
         invalid_calls = failures = tool_count = final_corrections = 0
         repetitions: dict[str, int] = {}
         evidence = {"inspected_paths": [], "tool_calls": 0, "execution_feedback_received": bool(execution_feedback)}
+
+        def require_read(path: str, *, whole_file: bool = False, edits=None) -> None:
+            observed = read_evidence.get(path)
+            if observed is None:
+                raise workspace.WorkspaceSecurityError(f"Read {path} in this cycle before proposing edits to its verified base")
+            _normalized, _target, current = changesets._read_base(self.root, path)
+            if changesets.sha256_text(current) != observed["sha256"]:
+                raise workspace.WorkspaceSecurityError(f"{path} changed since its last read. Read the current file again before proposing edits")
+            if whole_file and not observed["complete"]:
+                raise workspace.WorkspaceSecurityError(f"Read the complete bounded content of {path} before replacing the whole file, or use exact search/replace edits to preserve unread content")
+            for edit in edits if isinstance(edits, list) else []:
+                old_text = edit.get("old_text") if isinstance(edit, dict) else None
+                if isinstance(old_text, str) and not any(old_text in excerpt for excerpt in observed["excerpts"]):
+                    raise workspace.WorkspaceSecurityError(f"Read the exact text being edited in {path} before proposing this change; narrower line ranges can expose the required text")
+
+        def observe_reads(fitted: list[dict]) -> None:
+            # A tool being executed is not the same as the model observing its
+            # result. Only results still present in this actual model request
+            # authorize later edits; batched speculative writes cannot borrow a
+            # read that happened earlier in the same assistant response.
+            for message in fitted:
+                if message.get("role") != "tool" or message.get("tool_name") != "read_file":
+                    continue
+                result = completed_reads.get(message.get("tool_call_id"))
+                if result is None:
+                    continue
+                try:
+                    delivered = json.loads(message.get("content", ""))
+                except (ValueError, TypeError):
+                    continue  # A compacted textual summary is not an exact base.
+                if (not isinstance(delivered, dict) or delivered.get("content_sha256") != result["content_sha256"]
+                        or delivered.get("path") != result["path"]
+                        or delivered.get("content") != _truncate(result["content"], MAX_TOOL_REPLY_TEXT)):
+                    continue
+                path, content = result["path"], result["content"]
+                observed = read_evidence.get(path)
+                if observed is None or observed["sha256"] != result["content_sha256"]:
+                    observed = {"sha256": result["content_sha256"], "excerpts": [], "complete": False}
+                    read_evidence[path] = observed
+                visible = content[:MAX_TOOL_REPLY_TEXT]
+                if visible not in observed["excerpts"]:
+                    observed["excerpts"].append(visible)
+                observed["complete"] |= (result.get("start_line", 1) == 1 and not result.get("has_more", False)
+                                         and len(content) <= MAX_TOOL_REPLY_TEXT)
+                if visible or observed["complete"]:
+                    read_paths.add(path)
 
         def finish(status: str, summary: str) -> Iterator[dict]:
             commands = execution_feedback.get("commands", []) if isinstance(execution_feedback, dict) else []
@@ -665,7 +729,17 @@ class WorkspaceAgent:
                 yield from finish(*reason)
                 return
             try:
-                assistant = self.client.chat_with_tools(_fit_context(messages), available_tools, model=model)
+                fitted = _fit_context(messages, available_tools, original_request=prompt)
+                observe_reads(fitted)
+                # A successful local snapshot is evidence only after the model
+                # receives it. Optional bootstrap evidence can be dropped when
+                # the goal, tool definitions, and instructions need the window.
+                if bootstrap_evidence and any(message.get("role") == "user" and message.get("content") == bootstrap_evidence for message in fitted):
+                    inspected = True
+                assistant = self.client.chat_with_tools(fitted, available_tools, model=model)
+            except workspace.WorkspaceSecurityError as exc:
+                yield from finish("blocked", str(exc))
+                return
             except (OllamaError, StopIteration) as exc:
                 detail = public_text(str(exc)) or "The local model stopped before returning a complete answer."
                 yield from finish("blocked", "The local model could not continue: " + detail)
@@ -686,10 +760,17 @@ class WorkspaceAgent:
                     # complete files instead of structured tool calls.
                     fallback = _fallback_file_proposals(self.root, prompt, content)
                     if fallback:
-                        unread = [item["path"] for item in fallback if (self.root / item["path"]).exists() and item["path"] not in read_paths]
-                        if len(fallback) > 1 or unread:
+                        read_error = None
+                        for item in fallback:
+                            if (self.root / item["path"]).exists():
+                                try:
+                                    require_read(item["path"], whole_file=True)
+                                except workspace.WorkspaceError as exc:
+                                    read_error = str(exc)
+                                    break
+                        if len(fallback) > 1 or read_error:
                             messages.append({"role": "assistant", "content": content})
-                            correction = "Read the existing target files in this cycle before proposing replacements: " + ", ".join(unread) if unread else "Use one propose_change_set tool call for all these files so they are reviewed atomically. Read existing files first."
+                            correction = "Read the existing target files in this cycle before proposing replacements: " + read_error if read_error else "Use one propose_change_set tool call for all these files so they are reviewed atomically. Read existing files first."
                             messages.append({"role": "user", "content": correction})
                             final_corrections += 1
                             if final_corrections <= MAX_FINAL_CORRECTIONS:
@@ -701,7 +782,7 @@ class WorkspaceAgent:
                     # The controller remains authoritative about applied changes,
                     # verification and unresolved approvals. Here we reject a
                     # model's advice-only or unsupported success answer early.
-                    no_op = inspected and bool(re.search(r"\b(no (?:code |file )?(?:changes?|edits?|fix(?:es)?|action) (?:are |is |were |was )?(?:needed|necessary|required)|already (?:correct|implemented|working|satisfies)|nothing (?:needs|requires) (?:changing|fixing))\b", content, re.IGNORECASE))
+                    no_op = bool(read_paths) and bool(re.search(r"\b(no (?:code |file )?(?:changes?|edits?|fix(?:es)?|action) (?:are |is |were |was )?(?:needed|necessary|required)|already (?:correct|implemented|working|satisfies)|nothing (?:needs|requires) (?:changing|fixing))\b", content, re.IGNORECASE))
                     has_execution = observed_execution(execution_feedback)
                     verification_due = bool(execution_feedback and execution_feedback.get("requires_verification"))
                     if (not has_execution and not no_op) or verification_due or not content:
@@ -793,12 +874,11 @@ class WorkspaceAgent:
                             for operation in operations if isinstance(operations, list) else []:
                                 if isinstance(operation, dict) and operation.get("type") == "modify":
                                     path = _safe_proposal_path(self.root, str(operation.get("path", "")))
-                                    if path not in read_paths:
-                                        raise workspace.WorkspaceSecurityError(f"Read {path} in this cycle before proposing edits to its verified base")
+                                    require_read(path, edits=operation.get("edits"))
                         if name == "propose_file_change":
                             path = _safe_proposal_path(self.root, str(arguments.get("path", "")))
-                            if (self.root / path).exists() and path not in read_paths:
-                                raise workspace.WorkspaceSecurityError(f"Read {path} in this cycle before proposing a replacement")
+                            if (self.root / path).exists():
+                                require_read(path, whole_file=True)
                         result, proposal = self._execute_tool(name, arguments)
                     except (workspace.WorkspaceError, OSError, TypeError, ValueError) as exc:
                         result = {"error": str(exc)}
@@ -808,17 +888,17 @@ class WorkspaceAgent:
                 elif not failed:
                     invalid_calls = 0
                 failures = failures + 1 if failed else 0
-                reply = {"role": "tool", "content": json.dumps(_truncate(result, 16_000), default=str), "tool_name": name}
+                reply = {"role": "tool", "content": json.dumps(_truncate(result, MAX_TOOL_REPLY_TEXT), default=str), "tool_name": name}
                 if "id" in call:
                     reply["tool_call_id"] = call["id"]
                 messages.append(reply)
                 yield {"type": "tool", "name": name, "summary": str(summary)[:200], "status": "error" if failed else "complete"}
-                if not malformed and name in available_tool_names and name != "update_plan" and not name.startswith("propose_"):
+                if not malformed and name in available_tool_names and name not in {"update_plan", "repository_context"} and not name.startswith("propose_"):
                     inspection_attempted = True
                     if not failed:
                         inspected = True
                 if not failed and name == "read_file":
-                    read_paths.add(result["path"])
+                    completed_reads[call["id"]] = result
                 if not failed and name == "update_plan":
                     current_plan = result["steps"]
                     event = {"type": "plan", "steps": current_plan}

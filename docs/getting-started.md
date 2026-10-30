@@ -5,14 +5,14 @@ The simplest setup uses Ollama. CodeMe can reuse a model already installed there
 ## Before you install
 
 - Install Python 3.10 or newer. Python 3.12 is recommended.
-- Install Node.js with npm for the first browser build. Angular 18 supports Node 18.19+, 20.11+, and 22.x. Use a supported runtime rather than an arbitrary newer major version.
+- Install Node.js with npm for the first browser build. Use Node.js 24 LTS. Angular 21 also accepts Node.js 20.19+ or 22.12+ within those major versions. The installer rejects unsupported versions before installing dependencies.
 - Install Git and ripgrep to enable repository status, diff, and code search.
 - Allow enough disk space for the application dependencies and your model. Model weights may be several gigabytes. Loading a model also requires sufficient RAM and, when used, GPU memory.
 - Install VS Code 1.90+ if you want reviewed edits and controlled test/build execution.
 
 Run commands from the CodeMe repository root unless a step says otherwise. On a machine where Python is named `python3`, substitute that for `python`.
 
-The installer permits newer Node majors with a compatibility warning. They are outside Angular 18's declared support range; Node 22 is the recommended choice for this repository.
+Use a supported Node major version even when a newer release is available; the installer checks compatibility before preparing dependencies.
 
 ## Install and launch
 

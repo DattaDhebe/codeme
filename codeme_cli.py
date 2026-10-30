@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import platform
 import shutil
+import signal
 import subprocess
 import sys
 import threading
@@ -57,16 +58,14 @@ def executable(name):
 def require_node():
     node, npm = executable("node"), executable("npm")
     if not node or not npm:
-        raise SetupError("Install Node.js 22 LTS (includes npm) from https://nodejs.org, reopen your terminal, then run python install.py again.")
+        raise SetupError("Install Node.js 24 LTS (includes npm) from https://nodejs.org, reopen your terminal, then run python install.py again.")
     try:
         version = subprocess.check_output([node, "--version"], text=True).strip().lstrip("v")
         major, minor = [int(value) for value in version.split(".")[:2]]
     except (ValueError, subprocess.SubprocessError) as exc:
-        raise SetupError("Could not check Node.js. Reinstall Node.js 22 LTS and retry.") from exc
-    if not (major >= 22 or major == 20 and minor >= 11 or major == 18 and minor >= 19):
-        raise SetupError("CodeMe needs Node.js 18.19+, 20.11+, or 22+. Node.js 22 LTS is recommended for this Angular version.")
-    if major > 22:
-        print(f"Node.js {version} is newer than Angular 18's supported majors. If the browser build fails, retry with Node.js 22 LTS.", flush=True)
+        raise SetupError("Could not check Node.js. Reinstall Node.js 24 LTS and retry.") from exc
+    if not (major == 24 or major == 22 and minor >= 12 or major == 20 and minor >= 19):
+        raise SetupError("CodeMe's Angular 21 browser requires Node.js 20.19+, 22.12+, or 24.x. Install Node.js 24 LTS, reopen your terminal, and retry.")
     return npm
 
 
@@ -75,7 +74,8 @@ def backend_settings(python, root=ROOT):
             "print(json.dumps({'host':settings.host,'port':settings.port,"
             "'provider':settings.model_provider,'model':settings.default_model,"
             "'ollama_url':str(settings.ollama_url)}))")
-    return json.loads(subprocess.check_output([str(python), "-B", "-c", code], cwd=root, text=True))
+    return json.loads(subprocess.check_output([str(python), "-B", "-c", code], cwd=root, text=True,
+                                             stdin=subprocess.DEVNULL, timeout=30))
 
 
 def ensure_pip(python):
@@ -236,6 +236,41 @@ def local_json(url):
         return None
 
 
+def terminate_owned_backend(process):
+    """Stop the owned Windows redirector and its actual Python child together."""
+    if platform.system() == "Windows":
+        taskkill = Path(os.environ.get("SystemRoot", "C:/Windows")) / "System32/taskkill.exe"
+        try:
+            subprocess.run([str(taskkill), "/PID", str(process.pid), "/T", "/F"], check=False,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=10)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    if process.poll() is None:
+        process.terminate()
+
+
+def stop_owned_backend(process):
+    """Allow FastAPI lifespan cleanup before falling back to forced termination."""
+    if process.poll() is not None:
+        return
+    try:
+        # A Windows process group accepts CTRL_BREAK without interrupting this
+        # launcher's own console. Uvicorn then closes its setup/daemon ownership.
+        process.send_signal(signal.CTRL_BREAK_EVENT if os.name == "nt" else signal.SIGINT)
+    except (OSError, ValueError, SystemError):
+        # Detached Windows processes may have no console for CTRL_BREAK.
+        terminate_owned_backend(process)
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        terminate_owned_backend(process)
+        try:
+            process.wait(timeout=5)
+        except subprocess.TimeoutExpired:
+            process.kill()
+            process.wait(timeout=5)
+
+
 def launch(*, no_browser=False, backend_only=False):
     python = venv_python()
     if not python.is_file():
@@ -244,6 +279,8 @@ def launch(*, no_browser=False, backend_only=False):
     if not backend_only and not (browser / "index.html").is_file():
         raise SetupError("The browser build is missing. Run python install.py first, or use python start.py --backend-only.")
     config = backend_settings(python)
+    if not backend_only and config["port"] == 4200:
+        raise SetupError("PORT=4200 is reserved for the browser app. Choose another backend PORT, or use --backend-only.")
     hostname = f"[{config['host']}]" if ":" in config["host"] else config["host"]
     backend_url = f"http://{hostname}:{config['port']}"
     process = None
@@ -253,7 +290,8 @@ def launch(*, no_browser=False, backend_only=False):
         if not (isinstance(existing, dict) and "state" in existing and "provider" in existing):
             environment = dict(os.environ, PYTHONDONTWRITEBYTECODE="1")
             process = subprocess.Popen([str(python), "-B", "-m", "uvicorn", "main:app", "--host", config["host"],
-                                        "--port", str(config["port"]), "--workers", "1"], cwd=ROOT, env=environment)
+                                        "--port", str(config["port"]), "--workers", "1"], cwd=ROOT, env=environment,
+                                       creationflags=subprocess.CREATE_NEW_PROCESS_GROUP if os.name == "nt" else 0)
             deadline = time.monotonic() + 45
             while time.monotonic() < deadline:
                 if process.poll() is not None:
@@ -283,13 +321,8 @@ def launch(*, no_browser=False, backend_only=False):
         if server:
             server.shutdown()
             server.server_close()
-        if process and process.poll() is None:
-            process.terminate()
-            try:
-                process.wait(timeout=10)
-            except subprocess.TimeoutExpired:
-                process.kill()
-                process.wait(timeout=5)
+        if process:
+            stop_owned_backend(process)
 
 
 def start_main(argv=None):
@@ -297,8 +330,16 @@ def start_main(argv=None):
     parser.add_argument("--no-browser", action="store_true", help="Do not open the browser automatically.")
     parser.add_argument("--backend-only", action="store_true", help="Start only the backend for the VS Code extension.")
     args = parser.parse_args(argv)
+    previous_break_handler = None
+    if platform.system() == "Windows" and threading.current_thread() is threading.main_thread():
+        # Python's default SIGBREAK action bypasses finally blocks. Route an
+        # actual console Ctrl+Break through the same cleanup as Ctrl+C.
+        previous_break_handler = signal.signal(signal.SIGBREAK, signal.default_int_handler)
     try:
         return launch(no_browser=args.no_browser, backend_only=args.backend_only)
     except (SetupError, OSError, subprocess.SubprocessError, ValueError) as exc:
         print(f"\nCould not start CodeMe: {exc}", file=sys.stderr)
         return 1
+    finally:
+        if previous_break_handler is not None:
+            signal.signal(signal.SIGBREAK, previous_break_handler)

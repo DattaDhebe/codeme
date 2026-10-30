@@ -18,7 +18,6 @@ class OllamaClient:
         except ValueError as exc:
             raise OllamaError(str(exc)) from exc
         self.default_model = default_model or settings.default_model
-        self._verified_local_models: set[str] = set()
 
     def stream_chat(self, messages: list[dict[str, str]], model: str | None = None, timeout: int = 120):
         model = model or self.default_model
@@ -77,6 +76,10 @@ class OllamaClient:
         """Run one non-streaming native Ollama tool-calling turn."""
         model = model or self.default_model
         self._require_local_model(model, timeout=min(timeout, 5))
+        if tools:
+            capabilities = self._read_model_capabilities(model, timeout=min(timeout, 5))
+            if capabilities is not None and ("completion" not in capabilities or "tools" not in capabilities):
+                raise OllamaError("This installed model does not support Agent tool calls. Use Ask mode or select a local model with completion and tools support.")
         url = f"{self.base_url.rstrip('/')}/api/chat"
         payload = {
             "model": model,
@@ -134,12 +137,34 @@ class OllamaClient:
         if tag == "cloud" or tag.endswith("-cloud"):
             raise OllamaError("Cloud models are disabled in CodeMe; choose an installed local model")
         key = self._model_key(model)
-        if key in self._verified_local_models:
-            return
         available = self.list_models(timeout=timeout)
-        self._verified_local_models.update(self._model_key(name) for name in available)
-        if key not in self._verified_local_models:
+        # Aliases/templates may be changed while an agent task is running. A prior
+        # local inventory entry does not authorize later prompts to that alias.
+        if key not in {self._model_key(name) for name in available}:
             raise OllamaError(f"Model '{model}' is not verified as an installed local model. Install local weights in Ollama and choose that model.")
+
+    def _read_model_capabilities(self, model: str, timeout: int = 5) -> list[str] | None:
+        """Read advertised capabilities; old daemons can legitimately omit them."""
+        try:
+            response = httpx.post(f"{self.base_url.rstrip('/')}/api/show", json={"model": model},
+                                  timeout=timeout, trust_env=False, follow_redirects=False)
+            if response.status_code != 200:
+                return None
+            data = response.json()
+            if explicit_remote_model(data):
+                raise OllamaError("Cloud models are disabled in CodeMe; choose installed local weights")
+            values = data.get("capabilities") if isinstance(data, dict) else None
+            if (not isinstance(values, list) or len(values) > 64
+                    or any(not isinstance(value, str) or len(value) > 128 for value in values)):
+                return None
+            return list(dict.fromkeys(values))
+        except (httpx.RequestError, ValueError):
+            return None
+
+    def model_capabilities(self, model: str | None = None, timeout: int = 5) -> list[str] | None:
+        model = model or self.default_model
+        self._require_local_model(model, timeout=timeout)
+        return self._read_model_capabilities(model, timeout=timeout)
 
     def list_models(self, timeout: int = 5) -> list[str]:
         url = f"{self.base_url.rstrip('/')}/api/tags"

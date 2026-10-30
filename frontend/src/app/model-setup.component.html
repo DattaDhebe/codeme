@@ -11,7 +11,7 @@
         <div class="setup-recovery" *ngIf="setup.state === 'runtime_missing'"><p>Run the CodeMe installer from your repository folder, then try again:</p><code>python install.py</code><p>It installs Ollama when needed. Already installed it? Start Ollama and choose Retry setup.</p></div>
         <p class="setup-hint" *ngIf="setup.state === 'idle' && !setup.auto_setup_enabled">Automatic setup is turned off. Choose Set up model to let CodeMe reuse an installed model or download the default one.</p>
         <p class="setup-error" *ngIf="setup.error && setup.error !== setup.message" role="alert">{{ setup.error }}</p>
-        <div class="setup-actions"><button class="button primary" *ngIf="!busy && (setup.can_retry || setup.state === 'idle')" (click)="retry.emit()">{{ setup.state === 'idle' ? 'Set up model' : 'Retry setup' }}</button><button class="button subtle" *ngIf="busy && !requestPending" (click)="cancel.emit()">Cancel setup</button><button class="button subtle" *ngIf="!busy" (click)="reconnect.emit()">Check again</button></div>
+        <div class="setup-actions"><button class="button primary" *ngIf="!busy && (setup.can_retry || setup.state === 'idle')" (click)="retry.emit()">{{ setup.state === 'idle' ? 'Set up model' : 'Retry setup' }}</button><button class="button subtle" *ngIf="canCancel" (click)="cancel.emit()">Cancel setup</button><button class="button subtle" *ngIf="!busy" (click)="reconnect.emit()">Check again</button></div>
       </ng-container>
       <button class="button" *ngIf="error" (click)="reconnect.emit()" [disabled]="requestPending">Reconnect</button>
     </section>

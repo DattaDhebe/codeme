@@ -1,4 +1,5 @@
 import json
+import hashlib
 import shutil
 import subprocess
 import threading
@@ -242,12 +243,15 @@ def read_file(root: Path, path: str, start_line: int | None = None, end_line: in
     if target.stat().st_size > settings.max_file_size:
         raise WorkspaceSecurityError("File size exceeds the configured limit")
 
-    with target.open("r", encoding="utf-8", errors="replace") as handle:
+    # Search/replace proposals bind to exact UTF-8 bytes. Universal-newline
+    # translation would make an observed CRLF excerpt fail against its base.
+    with target.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         content = handle.read(settings.max_file_size + 1)
     if len(content) > settings.max_file_size:
         raise WorkspaceSecurityError("File size exceeds the configured limit")
     metadata = get_file_metadata(root, path)
-    result = {"path": metadata["path"], "content": content, "metadata": metadata}
+    result = {"path": metadata["path"], "content": content, "metadata": metadata,
+              "content_sha256": hashlib.sha256(content.encode("utf-8")).hexdigest()}
     if start_line is not None or end_line is not None:
         lines = content.splitlines(keepends=True)
         first = start_line or 1

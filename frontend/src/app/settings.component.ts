@@ -39,6 +39,8 @@ export class SettingsComponent implements OnInit {
   private explorerRequestId = 0;
   private fileRequestId = 0;
   private searchRequestId = 0;
+  private workspaceListRequestId = 0;
+  private gitStatusRequestId = 0;
   private filePage = 1;
   private searchPage = 1;
 
@@ -47,10 +49,11 @@ export class SettingsComponent implements OnInit {
   ngOnInit(): void { if (this.api.isBrowser) this.loadWorkspaces(); }
 
   loadWorkspaces(): void {
+    const request = ++this.workspaceListRequestId;
     this.loadingWorkspaces = true;
     this.api.listWorkspaces().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: items => { this.workspaces = items; this.loadingWorkspaces = false; if (!this.selectedWorkspace && items.length) this.selectWorkspace(items[0]); },
-      error: () => { this.error = 'Could not load local workspaces. Check the backend connection and retry.'; this.loadingWorkspaces = false; },
+      next: items => { if (request !== this.workspaceListRequestId) return; this.workspaces = items; this.loadingWorkspaces = false; if (!this.selectedWorkspace && items.length) this.selectWorkspace(items[0]); },
+      error: () => { if (request !== this.workspaceListRequestId) return; this.error = 'Could not load local workspaces. Check the backend connection and retry.'; this.loadingWorkspaces = false; },
     });
   }
 
@@ -60,6 +63,8 @@ export class SettingsComponent implements OnInit {
     this.registering = true;
     this.api.createWorkspace(this.workspacePath.trim(), this.workspaceName.trim() || undefined).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: workspace => {
+        this.workspaceListRequestId++;
+        this.loadingWorkspaces = false;
         this.workspaces = [workspace, ...this.workspaces.filter(item => item.id !== workspace.id)];
         this.selectWorkspace(workspace);
         this.workspacePath = ''; this.workspaceName = ''; this.registering = false;
@@ -85,6 +90,8 @@ export class SettingsComponent implements OnInit {
     this.removing = true;
     this.api.deleteWorkspace(workspaceId).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: () => {
+        this.workspaceListRequestId++;
+        this.loadingWorkspaces = false;
         this.workspaces = this.workspaces.filter(item => item.id !== workspaceId);
         this.removeId = null; this.removing = false;
         if (this.selectedWorkspace?.id === workspaceId) {
@@ -173,9 +180,10 @@ export class SettingsComponent implements OnInit {
   loadGitStatus(): void {
     if (!this.selectedWorkspace) return;
     const selection = this.selectionId;
+    const request = ++this.gitStatusRequestId;
     this.api.getGitStatus(this.selectedWorkspace.id).pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: status => { if (selection === this.selectionId) this.gitStatus = status; },
-      error: () => { if (selection === this.selectionId) this.gitStatus = null; },
+      next: status => { if (selection === this.selectionId && request === this.gitStatusRequestId) this.gitStatus = status; },
+      error: () => { if (selection === this.selectionId && request === this.gitStatusRequestId) this.gitStatus = null; },
     });
   }
 

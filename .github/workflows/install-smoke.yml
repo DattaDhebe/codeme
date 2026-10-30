@@ -1,0 +1,42 @@
+name: Isolated installation smoke
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  fresh-install:
+    name: Fresh copy on ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest, ubuntu-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@v7
+        with:
+          python-version: '3.12'
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - name: Install into a fresh copy and exercise local protocol fixtures
+        run: python -B scripts/install_smoke.py --run
+      - name: Retain reports and logs only
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: install-smoke-${{ matrix.os }}
+          include-hidden-files: true
+          retention-days: 7
+          path: |
+            .runtime/install-smoke-*/report.json
+            .runtime/install-smoke-*/probe-result.json
+            .runtime/install-smoke-*/*.log
+          if-no-files-found: warn

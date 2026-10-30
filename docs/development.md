@@ -4,7 +4,7 @@ The repository contains a Python backend, an Angular browser client, and a TypeS
 
 ## Prepare the environment
 
-Use Python 3.10+ and Node/npm supported by Angular 18. Git and ripgrep are required for the corresponding repository tools. From the repository root:
+Use Python 3.10+ and Node/npm supported by Angular 21; Node.js 24 LTS is recommended. Git and ripgrep are required for the corresponding repository tools. From the repository root:
 
 ```console
 python install.py --no-launch
@@ -71,6 +71,15 @@ npm run package
 
 `npm test` runs the Vitest suite with a VS Code test stub. Optional live-backend tests and native extension-host smoke tests have additional environment requirements; passing unit tests does not imply a real local model was exercised. Read the test's opt-in requirements before running it. The package is `personal-codeme-0.7.0.vsix` and is a generated artifact.
 
+To exercise actual editor saves, new folders, line endings, restore, and save hooks, select an installed VS Code executable explicitly:
+
+```powershell
+$env:CODEME_VSCODE_EXECUTABLE = 'C:\Users\you\AppData\Local\Programs\Microsoft VS Code\Code.exe'
+npm run test:integration
+```
+
+On macOS/Linux, set the same variable to the installed editor's executable path. The harness does not download VS Code. It opens an isolated profile, extensions directory and fixture workspace; artifacts and logs are under `.runtime/native-vscode-*`. Native checks are distinct from browser visual inspection and from real-model evaluation.
+
 Before submitting:
 
 ```console
@@ -79,6 +88,21 @@ git status --short
 ```
 
 Run checks appropriate to your change. Shared API changes usually affect the backend and both clients. Report live-model, clean-install, and native UI checks separately from fixture-based tests.
+
+## Evaluate models and installation
+
+These commands show the available cases and installation plan without inference or dependency installation:
+
+```console
+python -B scripts/evaluate_models.py
+python -B scripts/install_smoke.py
+```
+
+Use CodeMe's virtualenv Python for model evaluations. Add `--run --model INSTALLED_ID` to evaluate installed weights in disposable repositories. The suite never downloads a model, approves a proposal, or executes model-generated code. Quality, injected recovery, and policy-control results are reported separately; passing a cancellation control is not evidence of model coding ability. See [Model evaluations](model-evaluations.md) for limits and reports.
+
+Add `--run` to the installation command to create a fresh source snapshot, install Python/npm dependencies there, and exercise the actual launcher with a controlled local model server. This uses public package registries. It does not install Ollama, download weights, or change the host's CodeMe data. A manual GitHub Actions workflow runs the same harness on Windows, macOS, and Linux; a workflow definition alone is not a passing result. See [Installation testing](installation-testing.md).
+
+For navigation changes, run `codeme_agent/tests/test_repository_context.py` and the agent tests. Verify that ignored/private files stay excluded, scan/output budgets remain bounded, optional hints yield to the original goal, and metadata never authorizes edits. See [Repository context](repository-context.md).
 
 ## Preserve the important boundaries
 

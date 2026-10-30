@@ -28,4 +28,9 @@ describe('SseParser', () => {
     controller.abort();
     expect(controller.signal.aborted).toBeTrue();
   });
+
+  it('rejects oversized terminated and unterminated events instead of growing without a bound', () => {
+    expect(() => new SseParser().feed('data: ' + 'x'.repeat(4_194_304))).toThrowError(/4 MB/);
+    expect(() => new SseParser().feed('data: ' + 'x'.repeat(4_194_304) + '\n\n')).toThrowError(/4 MB/);
+  });
 });

@@ -13,6 +13,7 @@ export class ModelSetupComponent {
   @Input() status: ModelSetupStatus | null = null;
   @Input() busy = false;
   @Input() requestPending = false;
+  @Input() canCancel = false;
   @Input() error = '';
   @Output() retry = new EventEmitter<void>();
   @Output() cancel = new EventEmitter<void>();

@@ -52,6 +52,28 @@ def test_schema_rejects_empty_and_unknown_operation_types():
         schemas.ChangeOperationInput(type="delete", relative_path="a.txt", summary="Delete")
 
 
+def test_validation_error_identifies_operation_and_field_without_proposed_values(workspace_root):
+    invalid = create("second.py", {"private": "DO_NOT_ECHO_SOURCE"})
+    with pytest.raises(changesets.ChangeSetError) as failure:
+        changesets.prepare_change_set(workspace_root, "Create modules", [create("first.py", "pass\n"), invalid])
+    message = str(failure.value)
+    assert "operations[1].content: Input should be a valid string" in message
+    assert "DO_NOT_ECHO_SOURCE" not in message
+    assert not (workspace_root / "first.py").exists()
+
+
+def test_validation_error_identifies_nested_edit_and_hides_arbitrary_extra_keys(workspace_root):
+    invalid = modify("app.py", "old", "new")
+    invalid["edits"][0]["new_text"] = {"private": "DO_NOT_ECHO_SOURCE"}
+    invalid["DO_NOT_ECHO_EXTRA_KEY"] = True
+    with pytest.raises(changesets.ChangeSetError) as failure:
+        changesets.prepare_change_set(workspace_root, "Repair", [invalid])
+    message = str(failure.value)
+    assert "operations[0].edits[0].new_text" in message
+    assert "<unknown field>" in message
+    assert "DO_NOT_ECHO" not in message
+
+
 def test_modify_generates_verified_hash_diff_and_minimal_edit(workspace_root: Path):
     target = workspace_root / "app.py"
     target.write_bytes(b"value = 1\n")
@@ -63,14 +85,21 @@ def test_modify_generates_verified_hash_diff_and_minimal_edit(workspace_root: Pa
     assert "-value = 1" in operation["diff"] and "+value = 2" in operation["diff"]
 
 
-def test_create_requires_nonexistent_target_and_existing_parent(workspace_root: Path):
+def test_create_requires_nonexistent_target_and_allows_missing_parent_without_writing(workspace_root: Path):
     prepared = changesets.prepare_change_set(workspace_root, "Create", [create("new.txt", "hello\n")])
     assert prepared["operations"][0]["base_sha256"] is None
     (workspace_root / "existing.txt").write_text("old", encoding="utf-8")
     with pytest.raises(changesets.ChangeSetError, match="already exists"):
         changesets.prepare_change_set(workspace_root, "Bad", [create("existing.txt", "new")])
-    with pytest.raises(changesets.ChangeSetError, match="parent does not exist"):
-        changesets.prepare_change_set(workspace_root, "Bad", [create("missing/new.txt", "new")])
+    nested = changesets.prepare_change_set(workspace_root, "New package", [create("missing/nested/new.txt", "new")])
+    assert nested["operations"][0]["relative_path"] == "missing/nested/new.txt"
+    assert not (workspace_root / "missing").exists()
+
+
+def test_create_rejects_existing_file_as_parent(workspace_root: Path):
+    (workspace_root / "file.txt").write_text("existing", encoding="utf-8")
+    with pytest.raises(changesets.ChangeSetError, match="parent is not a directory"):
+        changesets.prepare_change_set(workspace_root, "Invalid parent", [create("file.txt/nested/new.py", "pass\n")])
 
 
 def test_duplicate_and_conflicting_paths_are_rejected(workspace_root: Path):
@@ -93,7 +122,7 @@ def test_symlink_escape_is_rejected(workspace_root: Path, tmp_path: Path):
     except OSError:
         pytest.skip("Creating symlinks is not permitted in this Windows environment")
     with pytest.raises(changesets.ChangeSetError):
-        changesets.prepare_change_set(workspace_root, "Escape", [create("linked/file.txt", "x")])
+        changesets.prepare_change_set(workspace_root, "Escape", [create("linked/missing/file.txt", "x")])
 
 
 def test_secret_binary_and_large_files_are_rejected(workspace_root: Path, monkeypatch):

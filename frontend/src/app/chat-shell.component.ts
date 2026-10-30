@@ -4,7 +4,7 @@ import { FormsModule } from '@angular/forms';
 import { RouterModule } from '@angular/router';
 import { HttpErrorResponse } from '@angular/common/http';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
-import { firstValueFrom } from 'rxjs';
+import { firstValueFrom, Subscription } from 'rxjs';
 import { ApiService } from './api.service';
 import { ConversationSummary, MessageRead, ChatRequest, HealthRead, ModelSetupStatus } from './models';
 import { MarkdownPipe } from './markdown.pipe';
@@ -59,6 +59,9 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   private healthTimer?: ReturnType<typeof setInterval>;
   private setupTimer?: ReturnType<typeof setTimeout>;
   private setupRequestId = 0;
+  private setupRevision = 0;
+  private setupSubscription?: Subscription;
+  private setupAction: 'check' | 'start' | 'cancel' = 'check';
   private automaticSetupAttempted = false;
   private readonly drafts = new Map<number | 'new', string>();
 
@@ -87,8 +90,14 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     return !!this.setupError || !!this.modelSetup && this.modelSetup.state !== 'ready' || this.setupRequestPending;
   }
 
+  get canCancelSetup(): boolean {
+    return !!this.modelSetup && ['checking', 'downloading', 'loading'].includes(this.modelSetup.state)
+      && (!this.setupRequestPending || this.setupAction === 'check');
+  }
+
   ngOnInit(): void {
     if (!this.api.isBrowser) return;
+    this.restoreDrafts();
     this.loadConversations();
     this.refreshModelSetup();
     this.refreshHealth();
@@ -96,11 +105,13 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   ngOnDestroy(): void {
+    this.saveDraft();
     this.destroyed = true;
     this.stopGeneration(false);
     if (this.healthTimer) clearInterval(this.healthTimer);
     if (this.setupTimer) clearTimeout(this.setupTimer);
     this.setupRequestId++;
+    this.setupSubscription?.unsubscribe();
   }
 
   ngAfterViewChecked(): void {
@@ -113,10 +124,15 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
 
   refreshHealth(): void {
     if (this.healthChecking) return;
+    const setupRevision = this.setupRevision;
     this.healthChecking = true;
     this.api.getHealth().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
-      next: health => this.applyHealth(health),
+      next: health => {
+        if (setupRevision !== this.setupRevision) { this.healthChecking = false; return; }
+        this.applyHealth(health);
+      },
       error: (failure: HttpErrorResponse) => {
+        if (setupRevision !== this.setupRevision) { this.healthChecking = false; return; }
         if (failure.status > 0 && this.setupError) this.refreshModelSetup();
         if (failure.error && typeof failure.error === 'object' && failure.error.ollama === 'ok') {
           this.applyHealth(failure.error as HealthRead);
@@ -172,16 +188,20 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   }
 
   private requestModelSetup(start: boolean, cancel = false): void {
-    if (this.destroyed || this.setupRequestPending) return;
+    if (this.destroyed || this.setupRequestPending && !cancel) return;
+    if (cancel) this.setupSubscription?.unsubscribe();
     if (this.setupTimer) { clearTimeout(this.setupTimer); this.setupTimer = undefined; }
     const request = ++this.setupRequestId;
+    this.setupAction = cancel ? 'cancel' : start ? 'start' : 'check';
+    this.setupRevision++;
     this.setupRequestPending = true;
     this.setupError = '';
     if (this.connection !== 'ready' || start) this.connection = 'checking';
     const source = cancel ? this.api.cancelModelSetup() : start ? this.api.startModelSetup() : this.api.getModelSetup();
-    source.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+    this.setupSubscription = source.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: status => {
         if (this.destroyed || request !== this.setupRequestId) return;
+        this.setupRevision++;
         this.setupRequestPending = false;
         this.modelSetup = status;
         this.provider = status.provider;
@@ -269,8 +289,46 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     });
   }
 
+  rememberDraft(): void {
+    this.saveDraft();
+  }
+
   private saveDraft(): void {
-    this.drafts.set(this.activeConversation?.id || 'new', this.inputText);
+    const key = this.activeConversation?.id || 'new';
+    this.drafts.delete(key);
+    if (this.inputText) this.drafts.set(key, this.inputText.slice(0, 100000));
+    while (this.drafts.size > 20) this.drafts.delete(this.drafts.keys().next().value!);
+    if (!this.api.isBrowser) return;
+    try {
+      // Session storage survives navigation/reload without keeping source drafts permanently.
+      const entries = [...this.drafts.entries()].reverse();
+      let remaining = 200000;
+      const bounded = entries.filter(([, value]) => { remaining -= value.length; return remaining >= 0; }).reverse();
+      sessionStorage.setItem(this.draftStorageKey, JSON.stringify(bounded));
+    } catch { /* In-memory drafts still work when browser storage is unavailable. */ }
+  }
+
+  private get draftStorageKey(): string {
+    return 'codeme:drafts:v1:' + this.api.chatStreamUrl(0);
+  }
+
+  private restoreDrafts(): void {
+    try {
+      const entries: unknown = JSON.parse(sessionStorage.getItem(this.draftStorageKey) || '[]');
+      if (!Array.isArray(entries)) return;
+      for (const entry of entries.slice(-20)) {
+        if (!Array.isArray(entry) || entry.length !== 2) continue;
+        const [key, value] = entry;
+        if ((key === 'new' || typeof key === 'number' && Number.isSafeInteger(key) && key > 0)
+          && typeof value === 'string' && value.length <= 100000) this.drafts.set(key, value);
+      }
+      this.inputText = this.drafts.get('new') || '';
+    } catch { /* Invalid/private-mode storage must not stop chat startup. */ }
+  }
+
+  get modelCapabilityNotice(): string {
+    return this.modelSetup?.state === 'ready' && this.modelSetup.model === this.model && this.modelSetup.tool_support === 'unsupported'
+      ? 'Chat is ready. Agent tasks in VS Code require a model that supports tools.' : '';
   }
 
   startRename(conversation: ConversationSummary): void {
@@ -301,7 +359,8 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
       next: () => {
         this.conversations = this.conversations.filter(item => item.id !== conversation.id);
         this.drafts.delete(conversation.id);
-        if (this.activeConversation?.id === conversation.id) this.createConversation();
+        if (this.activeConversation?.id === conversation.id) { this.inputText = ''; this.createConversation(); }
+        else this.saveDraft();
         this.deleteId = null;
         this.conversationBusy = false;
       },
@@ -353,6 +412,10 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   async sendMessage(): Promise<void> {
     if (!this.canSend) return;
     const content = this.inputText.trim();
+    if (content.length > 100000) {
+      this.error = 'Keep your message below 100,000 characters. Your draft is still in the composer.';
+      return;
+    }
     this.error = null;
     this.notice = '';
     if (!this.activeConversation) {
@@ -378,6 +441,7 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.streamingMessageId = assistantMessage.id;
     this.inputText = '';
     this.drafts.delete(conversationId);
+    this.saveDraft();
     this.streaming = true;
     this.jumpToLatest();
     const controller = new AbortController();
@@ -385,10 +449,17 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     const isCurrent = () => !this.destroyed && this.abortController === controller && this.activeConversation?.id === conversationId;
     const request: ChatRequest = { model: this.model, messages: [{ role: 'user', content }] };
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timedOut = false;
+    let streamTimer: ReturnType<typeof setTimeout> | undefined;
+    const resetStreamTimeout = () => {
+      if (streamTimer) clearTimeout(streamTimer);
+      streamTimer = setTimeout(() => { timedOut = true; controller.abort(); }, 180000);
+    };
+    resetStreamTimeout();
     try {
       const response = await fetch(this.api.chatStreamUrl(conversationId), {
         method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'text/event-stream' },
-        body: JSON.stringify(request), signal: controller.signal,
+        body: JSON.stringify(request), signal: controller.signal, redirect: 'error',
       });
       if (!response.ok) {
         const failure = await response.json().catch(() => null);
@@ -413,6 +484,7 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
       while (!completed && isCurrent()) {
         const chunk = await reader.read();
         if (chunk.done) break;
+        resetStreamTimeout();
         parser.feed(decoder.decode(chunk.value, { stream: true })).forEach(handleEvent);
       }
       if (isCurrent() && !completed) {
@@ -422,8 +494,10 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
       }
       if (isCurrent()) this.loadConversations();
     } catch (failure) {
-      if (isCurrent() && !controller.signal.aborted) this.error = failure instanceof Error ? failure.message : 'Could not connect to the local backend.';
+      if (isCurrent() && timedOut) this.error = 'The local model did not respond for three minutes. Your partial reply is kept; check the model server and retry.';
+      else if (isCurrent() && !controller.signal.aborted) this.error = failure instanceof Error ? failure.message : 'Could not connect to the local backend.';
     } finally {
+      if (streamTimer) clearTimeout(streamTimer);
       if (reader) { try { await reader.cancel(); } catch { /* The network may already be closed. */ } reader.releaseLock(); }
       if (isCurrent()) {
         this.streaming = false;

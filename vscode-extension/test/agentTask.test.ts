@@ -51,6 +51,32 @@ describe('durable local task transport', () => {
 });
 
 describe('task approvals and request ownership', () => {
+  it('finishes the UI resume request when a saved task is already completed', async () => {
+    const provider = providerFor({ getAgentRun: vi.fn().mockResolvedValue(task({ status: 'completed' })), continueAgentRun: vi.fn() });
+    await provider.continueTask('task-1', 'resume-completed');
+    expect(provider.send).toHaveBeenCalledWith({ command: 'streamStopped', payload: { conversationId: 4, requestId: 'resume-completed' } });
+    expect(provider.backend.continueAgentRun).not.toHaveBeenCalled();
+    expect(provider.activeChat).toBeUndefined();
+  });
+
+  it('finishes a rejected resume request when its workspace is unavailable', async () => {
+    const provider = providerFor({ continueAgentRun: vi.fn() });
+    provider.currentWorkspaceId = undefined;
+    await provider.continueTask('task-1', 'resume-no-workspace');
+    expect(provider.send).toHaveBeenCalledWith({ command: 'streamStopped', payload: { conversationId: 4, requestId: 'resume-no-workspace' } });
+    expect(provider.backend.continueAgentRun).not.toHaveBeenCalled();
+  });
+
+  it('keeps verification repairs on the original task model after automatic setup selected it', async () => {
+    const provider = providerFor({ prepareVerificationRepair: vi.fn().mockResolvedValue({ id: 'verify-1', state: 'AWAITING_REPAIR_APPROVAL' }), configuredModel: 'missing-configured-model' });
+    provider.agentRuns.set(4, task({ model: 'installed-local-coder' }));
+    provider.taskVerificationOwners.set('verify-1', { runId: 'task-1', generation: 0 });
+    provider.executingVerifications = new Set(); provider.activeVerificationCommands = new Map();
+    provider.publishVerification = vi.fn();
+    await provider.executeVerification({ id: 'verify-1', state: 'VERIFICATION_FAILED', maximum_repair_attempts: 1, current_attempt: 0 });
+    expect(provider.backend.prepareVerificationRepair).toHaveBeenCalledWith('verify-1', 'installed-local-coder');
+  });
+
   it('creates a verification plan after an approved task edit without executing it', async () => {
     const provider = providerFor();
     provider.applyChangeSet = vi.fn().mockResolvedValue({ id: 'edit-1', conversation_id: 4 });

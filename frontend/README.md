@@ -1,6 +1,6 @@
 # CodeMe browser app
 
-This Angular 18 app provides local chat, automatic model setup with progress, conversation management, and a read-only workspace explorer. It uses the same FastAPI backend as the VS Code extension.
+This Angular 21 app provides local chat, automatic model setup with progress, conversation management, and a read-only workspace explorer. It uses the same FastAPI backend as the VS Code extension. Use Node.js 24 LTS for installation and development.
 
 For normal installation and launch, use `python install.py` and `python start.py` from the repository root. See [Getting started](../docs/getting-started.md).
 
@@ -26,7 +26,7 @@ npm test -- --watch=false
 npm run build
 ```
 
-Tests need a headless Chrome-compatible browser. On Windows, Karma checks Chrome and Edge; set `CHROME_BIN` if needed. The production browser output is under `dist/frontend/browser/`. `start.py` serves the built browser app locally with a single-page application fallback. An optional Angular SSR server can also be built, but it is not the normal launcher path.
+Tests need a headless Chrome-compatible browser. On Windows, Karma checks Chrome and Edge; set `CHROME_BIN` if needed. The production browser output is under `dist/frontend/browser/`. `start.py` serves the built browser app locally with a single-page application fallback. The unused Node SSR server has been removed; there is no separate server-rendering command or public-interface listener.
 
 ## Runtime configuration
 

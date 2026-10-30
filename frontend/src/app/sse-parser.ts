@@ -5,6 +5,7 @@ export interface SseEvent {
 
 export class SseParser {
   private buffer = '';
+  private readonly maxEventCharacters = 4_194_304;
 
   feed(chunk: string): SseEvent[] {
     this.buffer += chunk;
@@ -20,8 +21,10 @@ export class SseParser {
     while (this.buffer) {
       const separator = /\r\n\r\n|\n\n|\r\r/.exec(this.buffer);
       if (!separator) {
+        if (this.buffer.length > this.maxEventCharacters) throw new Error('The local backend sent a response event larger than 4 MB.');
         break;
       }
+      if (separator.index > this.maxEventCharacters) throw new Error('The local backend sent a response event larger than 4 MB.');
       const block = this.buffer.slice(0, separator.index);
       this.buffer = this.buffer.slice(separator.index + separator[0].length);
       const event = this.parseBlock(block);

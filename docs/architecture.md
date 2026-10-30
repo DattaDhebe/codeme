@@ -18,6 +18,8 @@ Backend filenames in the table are under `codeme_agent/` unless shown otherwise.
 
 Model setup is distinct from a coding task. It checks the configured local server, discovers installed models, prepares an Ollama model when necessary, and exposes progress through `/api/model-setup`. Both clients display the same backend-owned status. A reused model does not need another weights download.
 
+Chat readiness and Agent suitability are separate. Setup reports advertised capabilities and `tool_support`; the extension checks `/api/model-capabilities` for an explicitly selected model. Known chat-only models remain usable in Ask mode. An older daemon or compatible protocol can leave tool support unknown; a successful capability check does not prove model quality. Ollama local-weight inventory is rechecked before each prompt, including later turns of the same task.
+
 Ollama downloads weights through its local daemon. A download is network traffic; inference sends prompts to the loopback daemon. For OpenAI-compatible servers, the standard chat API provides discovery and generation, not a universal model installer. Those servers must already have a local model loaded.
 
 Inference adapters bypass environment proxies and refuse redirects. Ollama inventory must describe local weights. Compatible server metadata cannot prove that a local proxy will never forward a prompt, so that provider requires a trusted local-only daemon with remote connectors disabled.
@@ -36,7 +38,13 @@ Later edits or restores can invalidate earlier verification receipts. A failure 
 
 ## Who can change a project
 
-The backend prepares source edits in memory and persists their paths, hashes, exact content, and diffs. The extension rechecks real paths and dirty documents immediately before applying one complete `WorkspaceEdit`. It creates checkpoints outside the source tree, verifies applied hashes, and attempts rollback on failure. Restore refuses to overwrite newer user changes.
+The backend prepares source edits in memory and persists their paths, hashes, exact content, and diffs. Edit permission comes from source content actually delivered to a subsequent model turn, with its source hash; a partial read cannot authorize a whole-file replacement. Reads preserve CRLF instead of silently normalizing the source. Context budgeting includes tool definitions and preserves the original task goal.
+
+Before inference, a bounded fresh repository map ranks candidate paths from task terms, filenames, symbol hints, import relationships, and safe Git metadata. The read-only `repository_context` tool can refresh those hints during a task. Selection respects repository ignore rules and built-in private/generated-path exclusions; it returns reasons and partial-map notices. It has no persistent source cache and does not grant source-read evidence. Optional navigation hints are removed before the original task or applicable instructions when context is tight. Requests exceeding the agent's 16,000-character task limit receive an explicit error. See [Repository context](repository-context.md) for scan limits and fallback behavior.
+
+The extension rechecks real paths, disk hashes, and dirty documents immediately before applying one complete `WorkspaceEdit`. It saves the editor documents, verifies their on-disk bytes, and sets the reviewed LF/CRLF style explicitly. Mixed/bare-CR proposals are refused before mutation because the editor cannot preserve them exactly. Approved create paths can include missing parent folders; preview remains read-only. Checkpoints record which folders were created so rollback/restore remove only owned empty folders and preserve files added later by the user.
+
+Checkpoints stay outside the source tree. Rollback and restore refuse to overwrite unexpected current content. An ambiguous partial create can leave a file in place with an explicit recovery checkpoint rather than risk removing a concurrently created user file. Save failures and save-time formatters that change the reviewed bytes cannot be reported as successful application.
 
 For project commands, the model supplies a fixed profile and literal argument array. The extension chooses the configured executable, recomputes risk, checks the registered workspace and working directory, and asks for approval. It captures separate bounded stdout/stderr and owns timeout, cancellation, and process cleanup. Legacy raw shell strings are display-only.
 
@@ -59,6 +67,7 @@ Startup applies Alembic upgrades. An existing SQLite schema receives a consisten
 | `GET /api/model-setup` | Model preparation state and progress |
 | `POST /api/model-setup` | Start/retry preparation without creating duplicate work |
 | `DELETE /api/model-setup` | Cancel preparation; already downloaded layers remain reusable |
+| `GET /api/model-capabilities?model=...` | Inspect installed-model Agent suitability without downloading or generating |
 | `/api/conversations` | Conversation management and messages |
 | `POST /api/conversations/{id}/chat` | Normal chat stream |
 | `POST /api/conversations/{id}/agent` | Initial coding-task stream |

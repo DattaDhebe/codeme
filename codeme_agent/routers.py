@@ -10,7 +10,7 @@ from starlette.background import BackgroundTask
 
 from codeme_agent import agent, agent_runs, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
 from codeme_agent.db import get_db
-from codeme_agent.model_client import create_model_client
+from codeme_agent.model_client import create_model_client, inspect_model_capabilities
 from codeme_agent.model_setup import model_setup
 
 router = APIRouter(prefix="/api")
@@ -29,6 +29,14 @@ def start_model_setup():
 @router.delete("/model-setup")
 def cancel_model_setup():
     return model_setup.cancel()
+
+
+@router.get("/model-capabilities")
+def get_model_capabilities(model: str | None = Query(None, min_length=1, max_length=250)):
+    try:
+        return inspect_model_capabilities(model)
+    except ollama.OllamaError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
 
 
 def _require_idle_execution(db: Session, owner_field: str, owner_id: int) -> None:

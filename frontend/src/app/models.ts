@@ -90,4 +90,7 @@ export interface ModelSetupStatus {
   error: string | null;
   can_retry: boolean;
   auto_setup_enabled: boolean;
+  tool_support?: 'supported' | 'unsupported' | 'unknown';
+  agent_ready?: boolean | null;
+  model_capabilities?: string[];
 }

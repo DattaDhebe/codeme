@@ -4,7 +4,7 @@ Start with the status shown in CodeMe. Model preparation, backend availability, 
 
 ## Installation stops before the app opens
 
-Check `python --version`, `node --version`, and `npm --version` in a new terminal. Python 3.10+ and an Angular 18-supported Node runtime must be installed before `python install.py` can build the app. If an operating-system model-runtime installer is blocked or unavailable, install Ollama yourself and rerun the installer, or use `--skip-ollama` when managing a different local provider.
+Check `python --version`, `node --version`, and `npm --version` in a new terminal. Python 3.10+ and an Angular 21-supported Node runtime must be installed before `python install.py` can build the app; Node.js 24 LTS is recommended. If an operating-system model-runtime installer is blocked or unavailable, install Ollama yourself and rerun the installer, or use `--skip-ollama` when managing a different local provider.
 
 The installer keeps an existing `.env`; an old unsupported setting can therefore stop backend configuration validation. Compare its keys with [`.env.example`](../.env.example). Do not share a file containing local credentials or private paths when reporting a problem.
 

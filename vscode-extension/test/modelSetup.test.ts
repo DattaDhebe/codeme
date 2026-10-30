@@ -86,6 +86,14 @@ describe('automatic local model setup monitor', () => {
 });
 
 describe('model setup transport', () => {
+  it('checks the explicitly selected model using encoded installed inventory identity', async () => {
+    const fetchMock = vi.fn().mockResolvedValue(new Response(JSON.stringify({ model: 'local/coder:7b', agent_ready: true })));
+    vi.stubGlobal('fetch', fetchMock);
+    const client = new BackendClient({ get: (_key, value) => value });
+    await expect(client.getModelCapabilities('local/coder:7b')).resolves.toEqual({ model: 'local/coder:7b', agent_ready: true });
+    expect(fetchMock).toHaveBeenCalledWith('http://127.0.0.1:8000/api/model-capabilities?model=local%2Fcoder%3A7b', expect.objectContaining({ redirect: 'error' }));
+  });
+
   it('uses bodyless local setup endpoints without sending conversation content', async () => {
     const fetchMock = vi.fn().mockImplementation(() => Promise.resolve(new Response(JSON.stringify(status()))));
     vi.stubGlobal('fetch', fetchMock);

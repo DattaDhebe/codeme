@@ -61,6 +61,12 @@ class LocalCompatibleClient:
         if model not in self.list_models(timeout=min(timeout, 5)):
             raise OllamaError(f"Model '{model}' is not in the trusted local server inventory")
 
+    def model_capabilities(self, model: str | None = None, timeout: int = 5) -> list[str] | None:
+        # Compatible inventories have no standard tool-capability declaration.
+        # Verify local availability while keeping unknown distinct from supported.
+        self._require_local_model(model or self.default_model, timeout=timeout)
+        return None
+
     def _payload(self, messages: list[dict], model: str, stream: bool, tools: list[dict] | None = None,
                  options: dict | None = None) -> dict:
         try:

@@ -70,12 +70,21 @@ def test_instruction_symlink_cannot_read_outside_workspace(tmp_path: Path):
 
 
 def test_read_file_returns_requested_line_window(tmp_path: Path):
-    (tmp_path / "app.py").write_text("one\ntwo\nthree\nfour\n", encoding="utf-8")
+    (tmp_path / "app.py").write_bytes(b"one\ntwo\nthree\nfour\n")
     result = workspace.read_file(tmp_path, "app.py", 2, 3)
     assert result["content"] == "two\nthree\n"
     assert result["total_lines"] == 4 and result["has_more"]
     with pytest.raises(WorkspaceSecurityError):
         workspace.read_file(tmp_path, "app.py", 0, 3)
+
+
+def test_read_file_preserves_crlf_and_binds_ranges_to_complete_file_hash(tmp_path: Path):
+    from codeme_agent.changesets import sha256_text
+    content = "one\r\ntwo\r\nthree\r\n"
+    (tmp_path / "windows.txt").write_bytes(content.encode("utf-8"))
+    result = workspace.read_file(tmp_path, "windows.txt", 2, 2)
+    assert result["content"] == "two\r\n"
+    assert result["content_sha256"] == sha256_text(content)
 
 
 @pytest.mark.skipif(shutil.which("rg") is None, reason="ripgrep is required")

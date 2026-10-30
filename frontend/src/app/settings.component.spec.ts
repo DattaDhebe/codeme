@@ -3,7 +3,7 @@ import { provideRouter } from '@angular/router';
 import { of, Subject } from 'rxjs';
 import { ApiService } from './api.service';
 import { SettingsComponent } from './settings.component';
-import { FileRead, WorkspaceRead } from './models';
+import { FileRead, GitStatusResponse, WorkspaceRead } from './models';
 
 const workspace = (id: number): WorkspaceRead => ({ id, display_name: 'Repository ' + id, root_path: 'C:/Projects/' + id, created_at: '', updated_at: '' });
 const file = (path: string): FileRead => ({ path, content: path, metadata: { path, is_dir: false, size: 1, modified_at: '' } });
@@ -58,5 +58,26 @@ describe('SettingsComponent repository navigation', () => {
     component.workspacePath = '  ';
     component.registerWorkspace();
     expect(api.createWorkspace).not.toHaveBeenCalled();
+  });
+
+  it('does not let an old workspace list erase a newly registered folder', () => {
+    const pending = new Subject<WorkspaceRead[]>();
+    api.listWorkspaces.and.returnValue(pending);
+    api.createWorkspace.and.returnValue(of(workspace(2)));
+    component.loadWorkspaces();
+    component.workspacePath = 'C:/Projects/2';
+    component.registerWorkspace();
+    pending.next([workspace(1)]);
+    expect(component.workspaces.map(item => item.id)).toEqual([2]);
+    expect(component.loadingWorkspaces).toBeFalse();
+  });
+
+  it('retains the latest Git status after an older refresh completes', () => {
+    component.selectWorkspace(workspace(1));
+    const pending = new Subject<GitStatusResponse>();
+    api.getGitStatus.and.returnValues(pending, of({ is_git: true, status: [] }));
+    component.loadGitStatus(); component.loadGitStatus();
+    pending.next({ is_git: true, status: [{ path: 'old.ts', status: 'M' }] });
+    expect(component.gitStatus?.status).toEqual([]);
   });
 });

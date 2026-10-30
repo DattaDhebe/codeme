@@ -1,11 +1,11 @@
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import * as vscode from 'vscode';
 import { ChangeSet } from '../src/changeSet';
 import { ChangeSetManager, sha256Text } from '../src/changeSetManager';
-import { __failWorkspaceEditAfter, __resetDocuments, __setDirty } from '../src/vscodeStub';
+import { __deferEditPersistence, __failNextSave, __failWorkspaceEditAfter, __normalizeEditorLineEndings, __resetDocuments, __setDirty } from '../src/vscodeStub';
 
 const temporaryRoots: string[] = [];
 
@@ -70,11 +70,132 @@ function createOperation(relativePath: string, content: string): ChangeSet['oper
 }
 
 afterEach(() => {
+  vi.restoreAllMocks();
   __resetDocuments();
   for (const root of temporaryRoots.splice(0)) rmSync(root, { recursive: true, force: true });
 });
 
 describe('ChangeSetManager', () => {
+  it('preserves reviewed CRLF and LF despite editor-default line-ending normalization', async () => {
+    const { root, folder, manager } = managerFixture();
+    __normalizeEditorLineEndings(); __deferEditPersistence();
+    const proposal = changeSet([createOperation('nested/crlf.txt', 'one\r\ntwo\r\n'), createOperation('nested/lf.txt', 'one\ntwo\n')]);
+    const applied = await manager.apply(proposal, folder);
+    expect(readFileSync(join(root, 'nested/crlf.txt'), 'utf8')).toBe('one\r\ntwo\r\n');
+    expect(readFileSync(join(root, 'nested/lf.txt'), 'utf8')).toBe('one\ntwo\n');
+    proposal.checkpoint_reference = applied.checkpointReference;
+    await manager.restore(proposal, folder);
+    expect(existsSync(join(root, 'nested'))).toBe(false);
+  });
+
+  it('rejects unrepresentable mixed line endings before mutating files', async () => {
+    const { root, folder, manager } = managerFixture();
+    await expect(manager.apply(changeSet([createOperation('new.txt', 'one\r\ntwo\n')]), folder)).rejects.toThrow(/Mixed/);
+    expect(existsSync(join(root, 'new.txt'))).toBe(false);
+  });
+
+  it('does not delete a file created concurrently when VS Code rejects application', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'new.txt');
+    vi.spyOn(vscode.workspace, 'applyEdit').mockImplementationOnce(async () => {
+      writeFileSync(target, 'user created this file');
+      return false;
+    });
+    await expect(manager.apply(changeSet([createOperation('new.txt', 'proposal')]), folder)).rejects.toThrow(/Rollback conflict/);
+    expect(readFileSync(target, 'utf8')).toBe('user created this file');
+  });
+
+  it('preserves even an empty concurrently created file after a rejected edit', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'new.txt');
+    vi.spyOn(vscode.workspace, 'applyEdit').mockImplementationOnce(async () => {
+      writeFileSync(target, '');
+      return false;
+    });
+    await expect(manager.apply(changeSet([createOperation('new.txt', 'proposal')]), folder)).rejects.toThrow(/ownership of empty/);
+    expect(existsSync(target)).toBe(true);
+    expect(readFileSync(target, 'utf8')).toBe('');
+  });
+
+  it('does not overwrite newer external content when editor saving fails', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'app.txt');
+    writeFileSync(target, 'before');
+    const document = await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+    vi.spyOn(document, 'save').mockImplementationOnce(async () => {
+      writeFileSync(target, 'new external content');
+      return false;
+    });
+    await expect(manager.apply(changeSet([modifyOperation('app.txt', 'before', 'proposal')]), folder)).rejects.toThrow(/Recovery checkpoint/);
+    expect(readFileSync(target, 'utf8')).toBe('new external content');
+  });
+
+  it('saves dirty editor changes to disk before reporting application or restore success', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'app.txt');
+    writeFileSync(target, 'before');
+    __deferEditPersistence();
+    const proposal = changeSet([modifyOperation('app.txt', 'before', 'after')]);
+    const applied = await manager.apply(proposal, folder);
+    expect(readFileSync(target, 'utf8')).toBe('after');
+    expect(vscode.workspace.textDocuments.every(document => !document.isDirty)).toBe(true);
+    proposal.checkpoint_reference = applied.checkpointReference;
+    await manager.restore(proposal, folder);
+    expect(readFileSync(target, 'utf8')).toBe('before');
+    expect(vscode.workspace.textDocuments.every(document => !document.isDirty)).toBe(true);
+  });
+
+  it('rolls back editor and disk contents when a file cannot be saved', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'app.txt');
+    writeFileSync(target, 'before');
+    __deferEditPersistence(); __failNextSave();
+    await expect(manager.apply(changeSet([modifyOperation('app.txt', 'before', 'after')]), folder)).rejects.toThrow(/Could not save/);
+    expect(readFileSync(target, 'utf8')).toBe('before');
+    expect((await vscode.workspace.openTextDocument(vscode.Uri.file(target))).getText()).toBe('before');
+  });
+
+  it('refuses stale open-document contents when the disk file changed independently', async () => {
+    const { root, folder, manager } = managerFixture();
+    const target = join(root, 'app.txt');
+    writeFileSync(target, 'before');
+    await vscode.workspace.openTextDocument(vscode.Uri.file(target));
+    writeFileSync(target, 'external change');
+    await expect(manager.apply(changeSet([modifyOperation('app.txt', 'before', 'after')]), folder)).rejects.toThrow(/disk file changed/);
+    expect(readFileSync(target, 'utf8')).toBe('external change');
+  });
+
+  it('previews missing parents without writes and creates them only when applying', async () => {
+    const { root, folder, manager } = managerFixture();
+    const proposal = changeSet([createOperation('src/new/module.ts', 'export const value = 1;\n')]);
+    await manager.assertPreviewable(proposal, folder);
+    expect(existsSync(join(root, 'src'))).toBe(false);
+    const applied = await manager.apply(proposal, folder);
+    expect(readFileSync(join(root, 'src/new/module.ts'), 'utf8')).toBe('export const value = 1;\n');
+    proposal.checkpoint_reference = applied.checkpointReference;
+    await manager.restore(proposal, folder);
+    expect(existsSync(join(root, 'src'))).toBe(false);
+  });
+
+  it('keeps user files added under a newly created directory during restore', async () => {
+    const { root, folder, manager } = managerFixture();
+    const proposal = changeSet([createOperation('src/new/module.ts', 'approved')]);
+    const applied = await manager.apply(proposal, folder);
+    writeFileSync(join(root, 'src/new/notes.txt'), 'user notes');
+    proposal.checkpoint_reference = applied.checkpointReference;
+    await manager.restore(proposal, folder);
+    expect(readFileSync(join(root, 'src/new/notes.txt'), 'utf8')).toBe('user notes');
+    expect(existsSync(join(root, 'src/new/module.ts'))).toBe(false);
+  });
+
+  it('cleans up only owned empty parents when application fails', async () => {
+    const { root, folder, manager } = managerFixture();
+    const proposal = changeSet([createOperation('src/new/module.ts', 'approved')]);
+    __failWorkspaceEditAfter(2);
+    await expect(manager.apply(proposal, folder)).rejects.toThrow(/rejected/);
+    expect(existsSync(join(root, 'src'))).toBe(false);
+  });
+
   it('atomically applies and restores modify and create operations', async () => {
     const { root, folder, manager } = managerFixture();
     writeFileSync(join(root, 'app.txt'), 'before\n', 'utf8');

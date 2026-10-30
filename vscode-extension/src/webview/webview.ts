@@ -18,7 +18,7 @@ import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
 import type { CommandRun } from '../commandRun';
 import type { VerificationSession } from '../verification';
-import type { AgentRun, ModelSetupStatus } from '../backendClient';
+import type { AgentRun, ModelCapabilities, ModelSetupStatus } from '../backendClient';
 import { setupActive } from '../modelSetupMonitor';
 
 declare const acquireVsCodeApi: any;
@@ -82,6 +82,8 @@ interface UiState {
   ollama: boolean;
   provider: string;
   modelSetup: ModelSetupStatus | null;
+  modelCapabilities: ModelCapabilities | null;
+  checkingModelCapabilities: boolean;
   agentRuns: AgentRun[];
   workspace: string | null;
   rootPath: string | null;
@@ -113,6 +115,8 @@ const state: UiState = {
   ollama: false,
   provider: persisted.provider || 'Local provider',
   modelSetup: null,
+  modelCapabilities: null,
+  checkingModelCapabilities: false,
   agentRuns: persisted.agentRuns || [],
   workspace: persisted.workspace || null,
   rootPath: persisted.rootPath || null,
@@ -134,6 +138,14 @@ let renderFrame: number | undefined;
 let activeRequestId: string | null = null;
 let requestSequence = 0;
 let historySearchTimer: number | undefined;
+let modelCapabilityRequest = 0;
+
+function checkSelectedModel(): void {
+  state.modelCapabilities = null;
+  state.checkingModelCapabilities = !!state.selectedModel && state.online;
+  modelCapabilityRequest++;
+  if (state.checkingModelCapabilities) vscode.postMessage({ command: 'checkModelCapabilities', args: { model: state.selectedModel, requestId: modelCapabilityRequest } });
+}
 
 function scheduleRender(): void {
   if (renderFrame !== undefined) return;
@@ -356,6 +368,7 @@ function renderSetupCard(): string {
     return `<section class="setup-card model-setup-card" aria-label="Local model setup"><div role="status" aria-live="polite"><strong>${title}</strong><span>${escapeHtml(setup.message)}</span>${setup.model ? `<code>${escapeHtml(setup.model)}</code>` : ''}${progress}${setup.error && setup.error !== setup.message ? `<span class="model-setup-error">${escapeHtml(setup.error)}</span>` : ''}${setup.state === 'runtime_missing' ? '<span>From the CodeMe folder, run <code>python install.py</code>, then retry.</span>' : ''}<small>Installed models are reused. New model downloads need internet; your code stays local.</small></div>${active ? '<button class="secondary" data-action="cancelModelSetup">Cancel setup</button>' : '<button data-action="setupModel" ' + (!setup.can_retry ? 'disabled' : '') + '>' + (!setup.can_retry ? 'Finishing cancellation...' : setup.state === 'idle' ? 'Set up model' : 'Retry setup') + '</button>'}</section>`;
   }
   if (!state.ollama) return '<section class="setup-card"><div><strong>Prepare your local model</strong><span>CodeMe can find an installed model or download one through Ollama.</span></div><button data-action="setupModel">Set up model</button></section>';
+  if (state.mode === 'agent' && state.modelCapabilities?.agent_ready === false) return '<section class="setup-card"><div><strong>This model is ready for chat</strong><span>It does not advertise Agent tool support. Choose Ask mode, or select a local model with native tools.</span></div><button data-action="setMode" data-mode="ask">Switch to Ask</button></section>';
   if (state.models.length === 0) return '<section class="setup-card"><div><strong>Install a local model</strong><span>No local models were found. Load a coding model in your local provider, then check again.</span></div><button data-action="health">Check models</button></section>';
   if (state.mode === 'agent' && state.workspaceFolders !== 1) return '<section class="setup-card"><div><strong>Open one workspace folder</strong><span>Agent mode inspects one local repository. Use Ask with attached context for other files.</span></div></section>';
   if (state.mode === 'agent' && !state.workspaceRegistered) return '<section class="setup-card"><div><strong>Connect this workspace</strong><span>Allow local repository inspection. Changes and commands need your review.</span></div><button data-action="registerWorkspace">Register workspace</button></section>';
@@ -524,7 +537,7 @@ function renderComposer(): string {
       <div class="mode-switch" role="group" aria-label="Chat mode">
         <button data-action="setMode" data-mode="ask" aria-pressed="${state.mode === 'ask'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'ask' ? 'active' : ''}">Ask</button>
         <button data-action="setMode" data-mode="agent" aria-pressed="${state.mode === 'agent'}" ${state.streaming ? 'disabled' : ''} class="${state.mode === 'agent' ? 'active' : ''}">${icon('spark', 12)} Agent</button>
-        <span>${state.mode === 'agent' ? (state.workspaceRegistered ? 'Inspect · propose · review · verify' : state.workspace ? 'Register to inspect local files' : 'Open one workspace folder') : 'Chat with attached context'}</span>
+        <span>${state.mode === 'agent' ? (state.checkingModelCapabilities ? 'Checking tool support…' : state.modelCapabilities?.agent_ready === false ? 'Choose a tool-capable model' : state.modelCapabilities?.tool_support === 'unknown' ? 'Tool support unverified · try a focused task' : state.workspaceRegistered ? 'Inspect · propose · review · verify' : state.workspace ? 'Register to inspect local files' : 'Open one workspace folder') : 'Chat with attached context'}</span>
       </div>
       ${attachments ? `<div class="attachment-list">${attachments}</div>` : ''}
       <div class="composer ${state.streaming ? 'streaming' : ''}">
@@ -536,7 +549,7 @@ function renderComposer(): string {
           </div>
           ${state.streaming
             ? `<button class="send-button stop" data-action="stop" title="Stop generation (Esc)" aria-label="Stop generation">${icon('stop', 16)}</button>`
-            : `<button class="send-button" data-action="send" title="Send message" aria-label="Send message" ${!state.online || !state.ollama || !state.selectedModel || !state.composer.trim() ? 'disabled' : ''}>${icon('send', 16)}</button>`}
+            : `<button class="send-button" data-action="send" title="Send message" aria-label="Send message" ${!state.online || !state.ollama || !state.selectedModel || !state.composer.trim() || state.mode === 'agent' && (state.checkingModelCapabilities || state.modelCapabilities?.agent_ready === false) ? 'disabled' : ''}>${icon('send', 16)}</button>`}
         </div>
         ${contextMenu}
       </div>
@@ -674,6 +687,10 @@ function submitPrompt(): void {
     return;
   }
   if (!state.selectedModel || !state.models.includes(state.selectedModel)) { showToast('Set up and select a local coding model before sending.'); return; }
+  if (state.mode === 'agent' && (state.checkingModelCapabilities || state.modelCapabilities?.agent_ready === false)) {
+    showToast(state.checkingModelCapabilities ? 'Checking this model’s tool support.' : 'Choose Ask mode or a tool-capable model for Agent tasks.');
+    return;
+  }
   if (prompt.length > 100_000) { showToast('Keep your request below 100,000 characters.'); return; }
   const attachments = [...state.attachments];
   activeRequestId = `${Date.now()}-${++requestSequence}`;
@@ -926,6 +943,8 @@ if (app) {
     const select = event.target as HTMLSelectElement;
     if (select.id === 'model-select') {
       state.selectedModel = select.value;
+      checkSelectedModel();
+      render();
       persistState();
     }
   });
@@ -974,7 +993,29 @@ window.addEventListener('message', (event) => {
       state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel
         : state.models.includes(state.modelSetup.model || '') ? state.modelSetup.model! : state.models[0] || '';
       if (state.taskStatus !== 'error') state.lastError = null;
+      if (state.modelSetup.state === 'ready' && state.selectedModel) {
+        if (state.selectedModel === state.modelSetup.model) {
+          modelCapabilityRequest++;
+          state.checkingModelCapabilities = false;
+          state.modelCapabilities = { model: state.selectedModel, provider: state.modelSetup.provider,
+            agent_ready: state.modelSetup.agent_ready ?? null, tool_support: state.modelSetup.tool_support || 'unknown',
+            model_capabilities: state.modelSetup.model_capabilities || [] };
+        } else checkSelectedModel();
+      }
       render();
+      break;
+    case 'modelCapabilities':
+      if (message.payload?.requestId !== modelCapabilityRequest || message.payload?.model !== state.selectedModel || !state.online) break;
+      state.modelCapabilities = message.payload as ModelCapabilities;
+      state.checkingModelCapabilities = false;
+      render();
+      break;
+    case 'modelCapabilityError':
+      if (message.payload?.requestId !== modelCapabilityRequest || message.payload?.model !== state.selectedModel || !state.online) break;
+      state.modelCapabilities = null;
+      state.checkingModelCapabilities = false;
+      render();
+      showToast('Tool support could not be checked. Agent mode will validate the model before starting.');
       break;
     case 'backendStatus':
       state.online = Boolean(message.payload?.online);
