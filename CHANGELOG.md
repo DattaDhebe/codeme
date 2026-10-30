@@ -25,6 +25,7 @@ This file records notable development changes. **Unreleased** means changes in t
 
 ### Fixed
 
+- Matched extension TypeScript checking to its esbuild pipeline and explicit ES2022 APIs, including newer compiler and Node declaration compatibility.
 - Adapted extension Markdown rendering to Marked 18 token callbacks while preserving escaping, safe links, disabled images and synchronous output.
 - Aligned the installed VS Code API types with the advertised 1.90 compatibility floor and retained Python 3.10 support when updating Pydantic Settings.
 - Source-read evidence must actually reach a model turn before it can justify an edit; partial reads cannot authorize whole-file replacement.
