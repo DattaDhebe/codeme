@@ -12,6 +12,7 @@ import {
   GitStatusResponse,
   MessageRead,
   ModelSetupStatus,
+  ModelCatalog,
   SearchResult,
   WorkspaceRead,
 } from './models';
@@ -49,8 +50,12 @@ export class ApiService {
     return this.http.get<ModelSetupStatus>(`${this.baseUrl}/model-setup`);
   }
 
-  startModelSetup(): Observable<ModelSetupStatus> {
-    return this.http.post<ModelSetupStatus>(`${this.baseUrl}/model-setup`, {});
+  startModelSetup(catalogId?: string): Observable<ModelSetupStatus> {
+    return this.http.post<ModelSetupStatus>(`${this.baseUrl}/model-setup`, catalogId ? { catalog_id: catalogId } : {});
+  }
+
+  getModelCatalog(): Observable<ModelCatalog> {
+    return this.http.get<ModelCatalog>(`${this.baseUrl}/model-catalog`);
   }
 
   cancelModelSetup(): Observable<ModelSetupStatus> {

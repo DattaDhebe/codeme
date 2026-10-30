@@ -11,7 +11,8 @@ from starlette.background import BackgroundTask
 from codeme_agent import agent, agent_runs, changesets, command_runs, crud, models, ollama, repair_agent, schemas, verification, workspace
 from codeme_agent.db import get_db
 from codeme_agent.model_client import create_model_client, inspect_model_capabilities
-from codeme_agent.model_setup import model_setup
+from codeme_agent.model_setup import SetupConflict, model_setup
+from codeme_agent.model_catalog import catalog_status
 
 router = APIRouter(prefix="/api")
 
@@ -22,8 +23,18 @@ def get_model_setup():
 
 
 @router.post("/model-setup")
-def start_model_setup():
-    return model_setup.start()
+def start_model_setup(request: schemas.ModelSetupRequest | None = None):
+    try:
+        return model_setup.start(request.catalog_id) if request is not None and request.catalog_id is not None else model_setup.start()
+    except SetupConflict as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+@router.get("/model-catalog")
+def get_model_catalog():
+    return catalog_status(model_setup.status())
 
 
 @router.delete("/model-setup")

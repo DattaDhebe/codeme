@@ -68,6 +68,7 @@ Startup applies Alembic upgrades. An existing SQLite schema receives a consisten
 | `POST /api/model-setup` | Start/retry preparation without creating duplicate work |
 | `DELETE /api/model-setup` | Cancel preparation; already downloaded layers remain reusable |
 | `GET /api/model-capabilities?model=...` | Inspect installed-model Agent suitability without downloading or generating |
+| `GET /api/model-catalog` | Inspect reviewed local coding models, research sources, memory guidance and installed state; no downloads or generation |
 | `/api/conversations` | Conversation management and messages |
 | `POST /api/conversations/{id}/chat` | Normal chat stream |
 | `POST /api/conversations/{id}/agent` | Initial coding-task stream |

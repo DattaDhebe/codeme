@@ -45,6 +45,7 @@ var vscode = __toESM(require("vscode"));
 function webviewHtml(webview, extensionUri) {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "dist", "webview.js"));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "webview.css"));
+  const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, "media", "codeme-logo.svg"));
   const nonce = getNonce();
   return `<!DOCTYPE html>
 <html lang="en">
@@ -53,10 +54,10 @@ function webviewHtml(webview, extensionUri) {
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${styleUri}" rel="stylesheet" />
-  <title>Personal Codeme</title>
+  <title>CodeMe \u2014 Local coding, your control</title>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app" data-logo-uri="${logoUri}"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;
@@ -1218,7 +1219,7 @@ var PersonalCodexSidebarProvider = class {
       return;
     }
     const accept = await vscode3.window.showInformationMessage(
-      `Register '${folder.name}' with Personal Codeme?`,
+      `Register '${folder.name}' with CodeMe?`,
       "Register",
       "Cancel"
     );
@@ -1234,7 +1235,7 @@ var PersonalCodexSidebarProvider = class {
   async startBackend() {
     try {
       await this.backend.checkConnection(false);
-      void vscode3.window.showInformationMessage("Personal Codeme backend is already running.");
+      void vscode3.window.showInformationMessage("CodeMe backend is already running.");
       await this.refreshBackendStatus(false);
       return;
     } catch {
@@ -1246,7 +1247,7 @@ var PersonalCodexSidebarProvider = class {
       return;
     }
     await vscode3.tasks.executeTask(backendTask);
-    void vscode3.window.showInformationMessage("Starting the Personal Codeme backend\u2026");
+    void vscode3.window.showInformationMessage("Starting the CodeMe backend\u2026");
     setTimeout(() => void this.refreshBackendStatus(false), 2500);
   }
   async refreshWorkspaceState() {
@@ -1312,7 +1313,7 @@ var PersonalCodexSidebarProvider = class {
     const rememberedConsent = this.context.workspaceState.get(this.workspaceConsentKey(folder), false);
     if (!rememberedConsent) {
       const choice = await vscode3.window.showInformationMessage(
-        `Personal Codeme needs permission to register '${folder.name}' before Agent mode can inspect it.`,
+        `CodeMe needs permission to register '${folder.name}' before Agent mode can inspect it.`,
         { modal: true },
         "Register workspace"
       );
@@ -1357,7 +1358,7 @@ var PersonalCodexSidebarProvider = class {
         return;
       await this.send({ command: "conversationsUpdated", payload: conversations });
     } catch (error) {
-      console.warn("Unable to load Personal Codeme conversations.", error);
+      console.warn("Unable to load CodeMe conversations.", error);
     }
   }
   async loadConversation(conversationId) {
@@ -1596,6 +1597,33 @@ var PersonalCodexSidebarProvider = class {
       case "setupModel":
         await this.setupMonitor().refresh("start");
         break;
+      case "getModelCatalog": {
+        const requestId = message.args?.requestId;
+        try {
+          await this.send({ command: "modelCatalog", payload: { catalog: await this.backend.getModelCatalog(), requestId } });
+        } catch (error) {
+          await this.send({ command: "modelCatalogError", payload: { message: error.message, requestId } });
+        }
+        break;
+      }
+      case "chooseCatalogModel": {
+        const catalogId = message.args?.catalogId;
+        if (typeof catalogId !== "string" || !/^[a-z0-9-]{1,80}$/.test(catalogId)) {
+          await this.send({ command: "modelCatalogActionDone", payload: { error: "Choose a model from the catalog." } });
+          break;
+        }
+        const monitor = this.setupMonitor();
+        monitor.stop();
+        try {
+          const status = await this.backend.startModelSetup(catalogId);
+          await this.send({ command: "modelSetupStatus", payload: status });
+          await this.send({ command: "modelCatalogActionDone", payload: {} });
+        } catch (error) {
+          await this.send({ command: "modelCatalogActionDone", payload: { error: error.message } });
+        }
+        await monitor.refresh();
+        break;
+      }
       case "cancelModelSetup":
         await this.setupMonitor().refresh("cancel");
         break;
@@ -1777,7 +1805,7 @@ var PersonalCodexSidebarProvider = class {
         await this.startBackend();
         break;
       default:
-        console.warn("Unknown command from Personal Codeme webview:", message.command);
+        console.warn("Unknown command from CodeMe webview:", message.command);
     }
   }
   async handleContextRequest(kind) {
@@ -2666,7 +2694,7 @@ function localBackendUrl(value) {
     throw new Error("Use a valid local backend URL, such as http://127.0.0.1:8000.");
   }
   if (!["http:", "https:"].includes(url.protocol) || !["localhost", "127.0.0.1", "[::1]"].includes(url.hostname) || url.username || url.password || url.search || url.hash) {
-    throw new Error("Personal Codeme only connects to a local backend on localhost, 127.0.0.1, or [::1].");
+    throw new Error("CodeMe only connects to a local backend on localhost, 127.0.0.1, or [::1].");
   }
   return url.toString().replace(/\/+$/, "");
 }
@@ -2689,12 +2717,12 @@ var BackendClient = class {
       const response = await this.request("/health", void 0, 3e3, 3);
       if (response.status === "ok" && this.showNotifications && userTriggered) {
         const target = response.model ? `${response.model} through ${response.provider || "Ollama"}` : "the local backend";
-        void vscode4.window.showInformationMessage(`Personal Codeme is connected to ${target}.`);
+        void vscode4.window.showInformationMessage(`CodeMe is connected to ${target}.`);
       }
       return response;
     } catch (error) {
       if (userTriggered) {
-        void vscode4.window.showErrorMessage("Unable to connect to the Personal Codeme backend.");
+        void vscode4.window.showErrorMessage("Unable to connect to the CodeMe backend.");
       }
       throw error;
     }
@@ -2702,8 +2730,14 @@ var BackendClient = class {
   getModelSetup() {
     return this.request("/model-setup");
   }
-  startModelSetup() {
-    return this.request("/model-setup", { method: "POST" });
+  startModelSetup(catalogId) {
+    return this.request("/model-setup", {
+      method: "POST",
+      ...catalogId ? { headers: { "Content-Type": "application/json" }, body: JSON.stringify({ catalog_id: catalogId }) } : {}
+    });
+  }
+  getModelCatalog() {
+    return this.request("/model-catalog", void 0, 15e3);
   }
   cancelModelSetup() {
     return this.request("/model-setup", { method: "DELETE" });

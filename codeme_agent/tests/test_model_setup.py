@@ -16,7 +16,8 @@ DEFAULT = "qwen2.5-coder:7b"
 
 
 @pytest.fixture(autouse=True)
-def isolated_settings(monkeypatch):
+def isolated_settings(monkeypatch, tmp_path):
+    monkeypatch.setattr(setup.model_catalog, "MODEL_CHOICE_PATH", tmp_path / ".runtime/model-choice.json")
     monkeypatch.setattr(setup.settings, "default_model", DEFAULT)
     monkeypatch.setattr(setup.settings, "model_provider", "ollama")
     monkeypatch.setattr(setup.settings, "auto_model_setup", False)

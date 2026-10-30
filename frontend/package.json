@@ -1,6 +1,6 @@
 {
-  "name": "frontend",
-  "version": "0.0.0",
+  "name": "codeme-browser",
+  "version": "0.7.0",
   "scripts": {
     "ng": "ng",
     "start": "ng serve --host 127.0.0.1",
@@ -38,5 +38,16 @@
     "karma-jasmine": "~5.1.0",
     "karma-jasmine-html-reporter": "~2.1.0",
     "typescript": "~5.9.3"
+  },
+  "description": "CodeMe local browser workspace by DHEBE Studios",
+  "license": "UNLICENSED",
+  "author": "DattaDhebe",
+  "homepage": "https://www.dhebe.com/",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DattaDhebe/codeme.git"
+  },
+  "bugs": {
+    "url": "https://github.com/DattaDhebe/codeme/issues"
   }
 }

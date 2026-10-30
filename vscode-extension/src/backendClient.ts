@@ -33,6 +33,36 @@ export interface ModelSetupStatus {
   tool_support?: 'supported' | 'unsupported' | 'unknown';
   agent_ready?: boolean | null;
   model_capabilities?: string[];
+  catalog_id?: string | null;
+  explicit_selection?: boolean;
+  preference_saved?: boolean | null;
+}
+
+export interface CodingModel {
+  id: string;
+  name: string;
+  ollama_model: string;
+  hugging_face_url: string;
+  ollama_url: string;
+  license: string;
+  download_size_gb: number;
+  memory_guidance: string;
+  tier: string;
+  description: string;
+  validation_note?: string;
+  recommended: boolean;
+  installed: boolean | null;
+  active: boolean;
+}
+
+export interface ModelCatalog {
+  provider: string;
+  download_supported: boolean;
+  setup_active: boolean;
+  inventory_available: boolean;
+  inventory_error?: string | null;
+  researched_at: string;
+  models: CodingModel[];
 }
 
 export interface ModelCapabilities {
@@ -110,7 +140,7 @@ export function localBackendUrl(value: string): string {
   try { url = new URL(value); } catch { throw new Error('Use a valid local backend URL, such as http://127.0.0.1:8000.'); }
   if (!['http:', 'https:'].includes(url.protocol) || !['localhost', '127.0.0.1', '[::1]'].includes(url.hostname)
     || url.username || url.password || url.search || url.hash) {
-    throw new Error('Personal Codeme only connects to a local backend on localhost, 127.0.0.1, or [::1].');
+    throw new Error('CodeMe only connects to a local backend on localhost, 127.0.0.1, or [::1].');
   }
   return url.toString().replace(/\/+$/, '');
 }
@@ -137,12 +167,12 @@ export class BackendClient {
       const response = await this.request<HealthResponse>('/health', undefined, 3000, 3);
       if (response.status === 'ok' && this.showNotifications && userTriggered) {
         const target = response.model ? `${response.model} through ${response.provider || 'Ollama'}` : 'the local backend';
-        void vscode.window.showInformationMessage(`Personal Codeme is connected to ${target}.`);
+        void vscode.window.showInformationMessage(`CodeMe is connected to ${target}.`);
       }
       return response;
     } catch (error) {
       if (userTriggered) {
-        void vscode.window.showErrorMessage('Unable to connect to the Personal Codeme backend.');
+        void vscode.window.showErrorMessage('Unable to connect to the CodeMe backend.');
       }
       throw error;
     }
@@ -152,8 +182,14 @@ export class BackendClient {
     return this.request<ModelSetupStatus>('/model-setup');
   }
 
-  public startModelSetup(): Promise<ModelSetupStatus> {
-    return this.request<ModelSetupStatus>('/model-setup', { method: 'POST' });
+  public startModelSetup(catalogId?: string): Promise<ModelSetupStatus> {
+    return this.request<ModelSetupStatus>('/model-setup', {
+      method: 'POST', ...(catalogId ? { headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ catalog_id: catalogId }) } : {}),
+    });
+  }
+
+  public getModelCatalog(): Promise<ModelCatalog> {
+    return this.request<ModelCatalog>('/model-catalog', undefined, 15_000);
   }
 
   public cancelModelSetup(): Promise<ModelSetupStatus> {

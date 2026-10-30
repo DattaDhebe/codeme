@@ -1,0 +1,36 @@
+CodeMe by DHEBE Studios
+Maintainer: DattaDhebe
+Repository: https://github.com/DattaDhebe/codeme
+Website: https://www.dhebe.com/
+Contact: support@dhebe.com
+
+LICENSE SCOPE
+
+Original main application code, documentation and branding are covered by the
+root CodeMe Proprietary License (LicenseRef-CodeMe-Proprietary). The existing
+extension MIT notice is preserved in vscode-extension/LICENSE and in packaged
+VSIX files. This notice does not replace an explicit license on any component
+or revoke previously granted rights.
+
+THIRD-PARTY COMPONENTS
+
+The application uses FastAPI, Uvicorn, Pydantic, SQLAlchemy, Alembic, HTTPX,
+Angular, RxJS, Marked, Prism and other dependencies listed in requirements.txt
+and the browser/extension package manifests and lockfiles. Their own licenses
+and attribution requirements apply. Browser build output includes generated
+3rdpartylicenses.txt; distribution packaging preserves available notices.
+Dependency versions and their license texts should be reviewed for each
+release rather than inferred from this list.
+
+LOCAL MODELS
+
+Ollama and compatible local servers are separate products. Model weights are
+not bundled with CodeMe. Each chosen model retains its upstream license;
+docs/coding-models.md links to the reviewed official model cards and runtime
+variants. The application package fee is not a sale of ownership in those
+models and does not replace their terms.
+
+BRAND
+
+CodeMe is the application name and DHEBE Studios is the product brand. No
+affiliation with another coding-agent vendor or model author is implied.

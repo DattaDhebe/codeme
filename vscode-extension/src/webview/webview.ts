@@ -18,8 +18,9 @@ import { inferCodeBlockTargets } from '../editTarget';
 import type { ChangeSet } from '../changeSet';
 import type { CommandRun } from '../commandRun';
 import type { VerificationSession } from '../verification';
-import type { AgentRun, ModelCapabilities, ModelSetupStatus } from '../backendClient';
+import type { AgentRun, ModelCapabilities, ModelSetupStatus, ModelCatalog } from '../backendClient';
 import { setupActive } from '../modelSetupMonitor';
+import { readyCatalogModel, renderModelCatalog } from './modelCatalog';
 
 declare const acquireVsCodeApi: any;
 
@@ -82,6 +83,12 @@ interface UiState {
   ollama: boolean;
   provider: string;
   modelSetup: ModelSetupStatus | null;
+  modelCatalog: ModelCatalog | null;
+  catalogOpen: boolean;
+  catalogLoading: boolean;
+  catalogPending: boolean;
+  catalogError: string;
+  pendingCatalogId: string | null;
   modelCapabilities: ModelCapabilities | null;
   checkingModelCapabilities: boolean;
   agentRuns: AgentRun[];
@@ -115,6 +122,12 @@ const state: UiState = {
   ollama: false,
   provider: persisted.provider || 'Local provider',
   modelSetup: null,
+  modelCatalog: null,
+  catalogOpen: false,
+  catalogLoading: false,
+  catalogPending: false,
+  catalogError: '',
+  pendingCatalogId: persisted.pendingCatalogId || null,
   modelCapabilities: null,
   checkingModelCapabilities: false,
   agentRuns: persisted.agentRuns || [],
@@ -138,6 +151,13 @@ let renderFrame: number | undefined;
 let activeRequestId: string | null = null;
 let requestSequence = 0;
 let historySearchTimer: number | undefined;
+let catalogRequestId = 0;
+
+function requestModelCatalog(): void {
+  state.catalogLoading = true;
+  state.catalogError = '';
+  vscode.postMessage({ command: 'getModelCatalog', args: { requestId: ++catalogRequestId } });
+}
 let modelCapabilityRequest = 0;
 
 function checkSelectedModel(): void {
@@ -154,6 +174,7 @@ function scheduleRender(): void {
 
 const icons: Record<string, string> = {
   plus: '<path d="M12 5v14M5 12h14"/>',
+  download: '<path d="M12 3v12m-5-5 5 5 5-5M4 17v4h16v-4"/>',
   history: '<path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/>',
   settings: '<circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.7 1.7 0 0 0 .3 1.9l.1.1-2.8 2.8-.1-.1a1.7 1.7 0 0 0-1.9-.3 1.7 1.7 0 0 0-1 1.6v.2h-4V21a1.7 1.7 0 0 0-1-1.6 1.7 1.7 0 0 0-1.9.3l-.1.1L4.2 17l.1-.1a1.7 1.7 0 0 0 .3-1.9A1.7 1.7 0 0 0 3 14H2.8v-4H3a1.7 1.7 0 0 0 1.6-1 1.7 1.7 0 0 0-.3-1.9L4.2 7 7 4.2l.1.1A1.7 1.7 0 0 0 9 4.6 1.7 1.7 0 0 0 10 3V2.8h4V3a1.7 1.7 0 0 0 1 1.6 1.7 1.7 0 0 0 1.9-.3l.1-.1L19.8 7l-.1.1a1.7 1.7 0 0 0-.3 1.9 1.7 1.7 0 0 0 1.6 1h.2v4H21a1.7 1.7 0 0 0-1.6 1Z"/>',
   send: '<path d="m22 2-7 20-4-9-9-4 20-7Z"/><path d="M22 2 11 13"/>',
@@ -181,6 +202,11 @@ function icon(name: string, size = 16): string {
   return `<svg class="icon" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[name] || ''}</svg>`;
 }
 
+function brandMark(size: number): string {
+  const source = app?.dataset.logoUri;
+  return source ? `<img class="codeme-logo" src="${escapeHtml(source)}" alt="" width="${size}" height="${size}" />` : icon('code', size);
+}
+
 function render(): void {
   if (!app) return;
   const previousScroller = document.getElementById('chat-scroll');
@@ -196,6 +222,7 @@ function render(): void {
       ${renderHeader()}
       ${renderHistoryDrawer()}
       <main class="chat-scroll" id="chat-scroll" aria-label="Conversation" aria-busy="${state.streaming || state.loadingConversation}">
+        ${state.catalogOpen ? renderModelCatalog(state.modelCatalog, state.modelSetup, { loading: state.catalogLoading, pending: state.catalogPending, streaming: state.streaming, error: state.catalogError }) : ''}
         ${renderChat()}
         <div class="jump-wrap"><button class="jump-latest" data-action="scrollLatest" aria-label="Jump to latest response">${icon('chevron', 13)} Latest</button></div>
       </main>
@@ -227,10 +254,11 @@ function renderHeader(): string {
   return `
     <header class="topbar">
       <div class="brand">
-        <div class="brand-mark">${icon('spark', 18)}</div>
-        <div class="brand-copy"><strong>CODEME</strong><span>Local coding agent</span></div>
+        <div class="brand-mark">${brandMark(32)}</div>
+        <div class="brand-copy"><strong>CodeMe</strong><span>By DHEBE Studios</span></div>
       </div>
       <div class="topbar-actions">
+        <button id="model-catalog-toggle" class="icon-button ${state.catalogOpen ? 'active' : ''}" data-action="toggleModelCatalog" title="Choose coding models" aria-label="Choose coding models" aria-expanded="${state.catalogOpen}">${icon('download')}</button>
         <button class="icon-button" data-action="newChat" title="New chat" aria-label="New chat">${icon('plus')}</button>
         <button class="icon-button ${state.historyOpen ? 'active' : ''}" data-action="toggleHistory" title="Chat history" aria-label="Chat history" aria-expanded="${state.historyOpen}">${icon('history')}</button>
         <button class="icon-button" data-action="settings" title="Settings" aria-label="Settings">${icon('settings')}</button>
@@ -378,7 +406,7 @@ function renderSetupCard(): string {
 function renderEmptyState(): string {
   return `
     <section class="empty-state">
-      <div class="hero-mark"><span></span>${icon('spark', 30)}</div>
+      <div class="hero-mark"><span></span>${brandMark(64)}</div>
       <div class="local-badge">On your machine · Local models</div>
       <h1>What should we build?</h1>
       <p>Explore your repository, make a focused change, and review every step.</p>
@@ -420,7 +448,7 @@ function renderMessage(message: ChatMessage, index: number): string {
   </div>` : '';
   const proposals = message.proposals?.map((proposal, proposalIndex) => renderProposal(proposal, index, proposalIndex)).join('') || '';
   return `<article class="message-row assistant-row ${message.error ? 'has-error' : ''}" data-message-index="${index}">
-    <div class="assistant-avatar">${icon('spark', 15)}</div>
+    <div class="assistant-avatar">${brandMark(25)}</div>
     <div class="assistant-content">
       <div class="assistant-label">CODEME <span>${escapeHtml(message.model || 'Local model')}</span></div>
       ${activities}
@@ -630,6 +658,7 @@ function persistState(): void {
     currentConversationId: state.currentConversationId,
     composer: state.composer,
     selectedModel: state.selectedModel,
+    pendingCatalogId: state.pendingCatalogId,
     models: state.models,
     workspace: state.workspace,
     rootPath: state.rootPath,
@@ -794,6 +823,22 @@ if (app) {
     }
     if (action === 'registerWorkspace') vscode.postMessage({ command: 'registerWorkspace' });
     if (action === 'setupModel' || action === 'cancelModelSetup') vscode.postMessage({ command: action });
+    if (action === 'toggleModelCatalog') {
+      state.catalogOpen = !state.catalogOpen;
+      if (state.catalogOpen) requestModelCatalog();
+      render();
+      document.getElementById(state.catalogOpen ? 'coding-models-title' : 'model-catalog-toggle')?.focus();
+    }
+    if (action === 'refreshModelCatalog') { requestModelCatalog(); render(); }
+    if (action === 'chooseCatalogModel' && !state.catalogPending && !state.streaming) {
+      const entry = state.modelCatalog?.models.find(model => model.id === button.dataset.catalogId);
+      if (!entry || !state.modelCatalog?.download_supported || state.modelSetup && (setupActive(state.modelSetup.state) || !state.modelSetup.can_retry)) return;
+      state.pendingCatalogId = entry.id;
+      state.catalogPending = true;
+      state.catalogError = '';
+      render();
+      vscode.postMessage({ command: 'chooseCatalogModel', args: { catalogId: entry.id } });
+    }
     if (action === 'toggleHistory') { state.historyOpen = !state.historyOpen; state.contextMenuOpen = false; render(); if (state.historyOpen) document.getElementById('history-search')?.focus(); else focusComposer(); }
     if (action === 'settings') vscode.postMessage({ command: 'openSettings' });
     if (action === 'health') vscode.postMessage({ command: 'healthCheck' });
@@ -943,6 +988,7 @@ if (app) {
     const select = event.target as HTMLSelectElement;
     if (select.id === 'model-select') {
       state.selectedModel = select.value;
+      state.pendingCatalogId = null;
       checkSelectedModel();
       render();
       persistState();
@@ -984,6 +1030,25 @@ window.addEventListener('message', (event) => {
   if (requestEvents.includes(message.command || '') && message.payload?.requestId && message.payload.requestId !== activeRequestId) return;
   if (requestEvents.includes(message.command || '') && !message.payload?.requestId && message.payload?.conversationId && message.payload.conversationId !== state.currentConversationId) return;
   switch (message.command) {
+    case 'modelCatalog':
+      if (message.payload?.requestId !== catalogRequestId) break;
+      state.modelCatalog = message.payload.catalog as ModelCatalog;
+      state.catalogLoading = false;
+      state.catalogError = '';
+      render();
+      break;
+    case 'modelCatalogError':
+      if (message.payload?.requestId !== catalogRequestId) break;
+      state.catalogLoading = false;
+      state.catalogError = message.payload.message || 'Could not load coding models. Try Refresh models.';
+      render();
+      break;
+    case 'modelCatalogActionDone':
+      state.catalogPending = false;
+      state.catalogError = message.payload?.error || '';
+      if (state.catalogError) state.pendingCatalogId = null;
+      render();
+      break;
     case 'modelSetupStatus':
       state.modelSetup = message.payload as ModelSetupStatus;
       state.online = true;
@@ -992,6 +1057,12 @@ window.addEventListener('message', (event) => {
       state.models = state.modelSetup.available_models;
       state.selectedModel = state.models.includes(state.selectedModel) ? state.selectedModel
         : state.models.includes(state.modelSetup.model || '') ? state.modelSetup.model! : state.models[0] || '';
+      const preparedCatalogModel = readyCatalogModel(state.pendingCatalogId, state.modelSetup);
+      if (preparedCatalogModel) {
+        state.selectedModel = preparedCatalogModel;
+        state.pendingCatalogId = null;
+        if (state.catalogOpen) requestModelCatalog();
+      }
       if (state.taskStatus !== 'error') state.lastError = null;
       if (state.modelSetup.state === 'ready' && state.selectedModel) {
         if (state.selectedModel === state.modelSetup.model) {

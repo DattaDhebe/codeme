@@ -1,7 +1,7 @@
 """One process-owned first-run job for installing and loading a local model.
 
 Only Ollama's configured loopback daemon can download weights. The job has no
-caller-supplied URLs, shell commands, or model names. Downloads are separate from
+caller-supplied URLs, shell commands, or arbitrary model names. Downloads are separate from
 inference: no conversation or repository content is sent during setup.
 """
 
@@ -18,7 +18,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
-from codeme_agent.config import settings
+from codeme_agent.config import configured_default_model, settings
+from codeme_agent import model_catalog
 from codeme_agent.local_access import validate_local_url
 from codeme_agent.model_client import capability_summary, create_model_client
 from codeme_agent.model_messages import cloud_model_name, normalize_assistant
@@ -32,6 +33,10 @@ OLLAMA_FALLBACK_PATHS = (
 
 
 class SetupCancelled(Exception):
+    pass
+
+
+class SetupConflict(Exception):
     pass
 
 
@@ -64,11 +69,16 @@ class ModelSetup:
         self._ready_checked_at = 0.0
         self._ready_check_in_progress = False
         self._capabilities: dict[str, list[str] | None] = {}
+        saved_choice = model_catalog.saved_model_choice(configured_default_model, settings.model_provider)
+        self._catalog_id = (saved_choice.id if saved_choice is not None
+                            and settings.default_model == saved_choice.ollama_model else None)
         self._status = {
             "state": "idle", "provider": settings.model_provider, "model": None,
             "available_models": [], "message": "Ready to check your local model.",
             "completed_bytes": 0, "total_bytes": 0, "percent": None,
             "progress_scope": "layer", "error": None,
+            "catalog_id": self._catalog_id, "explicit_selection": self._catalog_id is not None,
+            "preference_saved": self._catalog_id is not None,
             **capability_summary(None),
         }
 
@@ -119,16 +129,30 @@ class ModelSetup:
         with self._lock:
             self._status.update(changes)
 
-    def start(self) -> dict:
+    def start(self, catalog_id: str | None = None) -> dict:
+        if catalog_id is not None:
+            if settings.model_provider != "ollama":
+                raise ValueError("Automatic catalog downloads require Ollama. Load the model in your configured local server instead.")
+            if model_catalog.get_model(catalog_id) is None:
+                raise ValueError("Unknown coding model catalog entry. Choose a model from the catalog.")
         with self._lock:
             if self._thread and self._thread.is_alive():
+                if catalog_id is not None and catalog_id != self._catalog_id:
+                    raise SetupConflict("Another model setup is active. Cancel it or wait for it to finish before choosing another model.")
                 return self.status()
+            if catalog_id is not None:
+                self._catalog_id = catalog_id
+            elif settings.model_provider != "ollama":
+                self._catalog_id = None
+            selected_entry = model_catalog.get_model(self._catalog_id) if self._catalog_id else None
             self._cancel = threading.Event()
             self._capabilities = {}
             self._status.update(
-                state="checking", provider=settings.model_provider, model=None,
+                state="checking", provider=settings.model_provider, model=selected_entry.ollama_model if selected_entry else None,
                 available_models=[], message="Checking for an installed local model…",
                 completed_bytes=0, total_bytes=0, percent=None, error=None,
+                catalog_id=self._catalog_id, explicit_selection=self._catalog_id is not None,
+                preference_saved=False,
                 **capability_summary(None),
             )
             self._thread = threading.Thread(target=self._run, name="codeme-model-setup", daemon=True)
@@ -294,7 +318,10 @@ class ModelSetup:
         try:
             self._capabilities = {}
             provider = settings.model_provider
-            desired = settings.default_model
+            entry = model_catalog.get_model(self._catalog_id) if self._catalog_id else None
+            if self._catalog_id and (entry is None or provider != "ollama"):
+                raise OllamaError("The selected catalog model requires the configured local Ollama server.")
+            desired = entry.ollama_model if entry else settings.default_model
             client = create_model_client()
             try:
                 installed = client.list_models()
@@ -310,7 +337,10 @@ class ModelSetup:
             self._update(available_models=installed)
             if provider == "ollama":
                 base_url = validate_local_url(str(settings.ollama_url)).rstrip("/")
-                selected = self._choose_ollama_model(base_url, installed, desired)
+                # An explicit catalog request is exact. Reusing another installed
+                # model would silently ignore the user's download/selection.
+                selected = (next((name for name in installed if OllamaClient._model_key(name) == OllamaClient._model_key(desired)), None)
+                            if entry else self._choose_ollama_model(base_url, installed, desired))
                 if selected is None:
                     if any(OllamaClient._model_key(name) == OllamaClient._model_key(desired) for name in installed):
                         raise OllamaError("The configured model is installed but cannot generate chat. Set DEFAULT_MODEL to a text-generation coding model, then choose Retry.")
@@ -357,10 +387,19 @@ class ModelSetup:
             self._check_cancelled()
             with self._lock:
                 self._check_cancelled()
+                preference_saved = False
+                if entry:
+                    try:
+                        model_catalog.save_model_choice(entry.id, configured_default_model)
+                        preference_saved = True
+                    except (OSError, ValueError):
+                        pass  # Installed weights remain usable for this run.
                 settings.default_model = selected
                 self._ready_checked_at = monotonic()
                 self._status.update(state="ready", model=selected, available_models=installed, percent=100,
-                                    message=f"{selected} is ready. You can start chatting.", error=None,
+                                    message=(f"{selected} is ready. You can start chatting."
+                                             + (" The selection could not be saved for restart; check application-folder permissions." if entry and not preference_saved else "")),
+                                    error=None, preference_saved=preference_saved,
                                     **capability_summary(capabilities))
         except SetupCancelled:
             self._update(state="cancelled", message="Model setup cancelled. Downloaded layers can be reused on retry.", error=None)

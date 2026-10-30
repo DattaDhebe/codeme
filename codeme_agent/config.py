@@ -4,13 +4,14 @@ from pydantic import AnyHttpUrl, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from codeme_agent.local_access import is_loopback_host, validate_local_origin, validate_local_url
+from codeme_agent.model_catalog import saved_model_choice
 
 
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="forbid")
 
-    app_name: str = "Personal Codex"
-    description: str = "Local ChatGPT-style coding agent"
+    app_name: str = "CodeMe"
+    description: str = "A local coding workspace by DHEBE Studios"
     version: str = "0.7.0"
     host: str = "127.0.0.1"
     port: int = Field(8000, ge=1, le=65535)
@@ -53,3 +54,10 @@ class Settings(BaseSettings):
         return value
 
 settings = Settings()
+
+# An explicit in-app catalog choice survives restarts without rewriting .env.
+# A changed DEFAULT_MODEL or provider takes precedence over this preference.
+configured_default_model = settings.default_model
+_saved_choice = saved_model_choice(configured_default_model, settings.model_provider)
+if _saved_choice is not None:
+    settings.default_model = _saved_choice.ollama_model

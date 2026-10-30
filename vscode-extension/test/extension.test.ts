@@ -155,9 +155,17 @@ describe('extension manifest', () => {
     expect(manifest.activationEvents).toContain('onView:personalCodemeSidebar');
     expect(manifest.contributes.views.personalCodeme).toContainEqual({
       id: 'personalCodemeSidebar',
-      name: 'Personal Codeme',
+      name: 'CodeMe',
       type: 'webview',
     });
+  });
+
+  it('uses the CodeMe identity without breaking installed extension identifiers', () => {
+    expect(manifest.name).toBe('personal-codeme');
+    expect(manifest.publisher).toBe('personal-codex-local');
+    expect(manifest.displayName).toBe('CodeMe');
+    expect(manifest.repository.url).toBe('https://github.com/DattaDhebe/codeme.git');
+    expect(manifest.icon).toBe('media/codeme.png');
   });
 
   it('disables legacy raw command execution by default', () => {

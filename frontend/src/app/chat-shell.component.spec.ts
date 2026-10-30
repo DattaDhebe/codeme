@@ -4,13 +4,24 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { of, Subject, throwError } from 'rxjs';
 import { ApiService } from './api.service';
 import { ChatShellComponent } from './chat-shell.component';
-import { ConversationSummary, MessageRead, ModelSetupStatus } from './models';
+import { ConversationSummary, MessageRead, ModelSetupStatus, CodingModel, ModelCatalog } from './models';
 
 const conversation = (id: number): ConversationSummary => ({ id, title: 'Conversation ' + id, created_at: '', updated_at: '' });
 const setupStatus = (changes: Partial<ModelSetupStatus> = {}): ModelSetupStatus => ({
   state: 'ready', provider: 'ollama', model: 'local-model', available_models: ['local-model'],
   message: 'Your local model is ready.', completed_bytes: 0, total_bytes: 0, percent: null,
   error: null, can_retry: false, auto_setup_enabled: true, ...changes,
+});
+const codingModel: CodingModel = {
+  id: 'coding-workstation', name: 'Local coding option', ollama_model: 'fixture-coder:30b',
+  hugging_face_url: 'https://huggingface.co/example/coder', ollama_url: 'https://ollama.com/library/fixture-coder',
+  license: 'Apache-2.0', download_size_gb: 18, memory_guidance: 'Needs a larger machine.',
+  tier: 'Workstation', description: 'Local coding model.', validation_note: 'Research only; evaluate it on your machine.',
+  recommended: true, installed: false, active: false,
+};
+const catalog = (changes: Partial<ModelCatalog> = {}): ModelCatalog => ({
+  provider: 'ollama', download_supported: true, setup_active: false, inventory_available: true,
+  researched_at: '2026-10-30', models: [codingModel], ...changes,
 });
 const response = (text = 'Hello'): Response => new Response(new ReadableStream<Uint8Array>({ start(controller) {
   controller.enqueue(new TextEncoder().encode('data: ' + JSON.stringify(text) + '\n\nevent: done\ndata: {}\n\n'));
@@ -23,12 +34,13 @@ describe('ChatShellComponent request ownership', () => {
   let api: jasmine.SpyObj<ApiService>;
 
   beforeEach(async () => {
-    api = jasmine.createSpyObj<ApiService>('ApiService', ['listConversations', 'createConversation', 'getMessages', 'getHealth', 'chatStreamUrl', 'renameConversation', 'deleteConversation', 'getModelSetup', 'startModelSetup', 'cancelModelSetup'], { defaultModel: 'local-model', isBrowser: true });
+    api = jasmine.createSpyObj<ApiService>('ApiService', ['listConversations', 'createConversation', 'getMessages', 'getHealth', 'chatStreamUrl', 'renameConversation', 'deleteConversation', 'getModelSetup', 'startModelSetup', 'cancelModelSetup', 'getModelCatalog'], { defaultModel: 'local-model', isBrowser: true });
     api.listConversations.and.returnValue(of([]));
     api.createConversation.and.returnValue(of(conversation(1)));
     api.getMessages.and.returnValue(of([]));
     api.getHealth.and.returnValue(of({ status: 'ok', ollama: 'ok', model: 'local-model', models: ['local-model'] }));
     api.getModelSetup.and.returnValue(of(setupStatus()));
+    api.getModelCatalog.and.returnValue(of(catalog()));
     api.startModelSetup.and.returnValue(of(setupStatus()));
     api.cancelModelSetup.and.returnValue(of(setupStatus({ state: 'cancelled', can_retry: true })));
     api.chatStreamUrl.and.returnValue('http://127.0.0.1:8000/chat');
@@ -303,4 +315,126 @@ describe('ChatShellComponent request ownership', () => {
     expect(component.error).toContain('three minutes');
     expect(component.messages.some(message => message.role === 'user' && message.content === 'Explain this code')).toBeTrue();
   }));
+
+  it('opens model choices only when requested without starting a download', () => {
+    fixture.detectChanges();
+    expect(api.getModelCatalog).not.toHaveBeenCalled();
+    component.toggleModelCatalog();
+    fixture.detectChanges();
+    expect(api.getModelCatalog).toHaveBeenCalledTimes(1);
+    expect(api.startModelSetup).not.toHaveBeenCalled();
+    expect(fixture.nativeElement.textContent).toContain('Hugging Face card');
+    expect(fixture.nativeElement.textContent).toContain('Weight size is approximate');
+  });
+
+  it('sends the chosen catalog ID and switches to its ready installed model', () => {
+    component.modelCatalog = catalog({ models: [{ ...codingModel, installed: true }] });
+    component.modelSetup = setupStatus();
+    api.startModelSetup.and.returnValue(of(setupStatus({
+      model: codingModel.ollama_model, available_models: ['local-model', codingModel.ollama_model],
+      catalog_id: codingModel.id, explicit_selection: true,
+    })));
+    component.chooseCatalogModel(codingModel);
+    expect(api.startModelSetup).toHaveBeenCalledOnceWith(codingModel.id);
+    expect(component.model).toBe(codingModel.ollama_model);
+    expect(component.connection).toBe('ready');
+  });
+
+  it('does not overwrite a later manual model choice during passive ready polling', () => {
+    const ready = setupStatus({ model: codingModel.ollama_model, available_models: ['local-model', codingModel.ollama_model], catalog_id: codingModel.id, explicit_selection: true });
+    component.modelSetup = ready;
+    component.model = 'local-model';
+    api.getModelSetup.and.returnValue(of(ready));
+    component.refreshModelSetup();
+    expect(component.model).toBe('local-model');
+    component.modelCatalog = catalog();
+    api.startModelSetup.and.returnValue(of(ready));
+    component.chooseCatalogModel(codingModel);
+    expect(component.model).toBe(codingModel.ollama_model);
+  });
+
+  it('keeps the prior model until a requested download is ready and prevents duplicate starts', () => {
+    component.modelCatalog = catalog();
+    component.modelSetup = setupStatus();
+    const pending = new Subject<ModelSetupStatus>();
+    api.startModelSetup.and.returnValue(pending);
+    component.chooseCatalogModel(codingModel);
+    component.chooseCatalogModel(codingModel);
+    expect(api.startModelSetup).toHaveBeenCalledTimes(1);
+    expect(component.model).toBe('local-model');
+    expect(component.setupRequestPending).toBeTrue();
+    pending.next(setupStatus({ model: codingModel.ollama_model, available_models: ['local-model', codingModel.ollama_model], catalog_id: codingModel.id, explicit_selection: true }));
+    expect(component.model).toBe(codingModel.ollama_model);
+    expect(component.setupRequestPending).toBeFalse();
+  });
+
+  it('keeps catalog connection errors separate from an already working chat', () => {
+    component.inputText = 'Keep this draft';
+    api.getModelCatalog.and.returnValue(throwError(() => new Error('catalog unavailable')));
+    component.toggleModelCatalog();
+    expect(component.catalogError).toContain('current chat model is unchanged');
+    expect(component.setupError).toBe('');
+    expect(component.canSend).toBeTrue();
+    expect(component.inputText).toBe('Keep this draft');
+  });
+
+  it('handles another-client setup conflict without changing the selected chat model', () => {
+    component.modelCatalog = catalog();
+    api.startModelSetup.and.returnValue(throwError(() => new HttpErrorResponse({ status: 409 })));
+    api.getModelSetup.and.returnValue(of(setupStatus({ state: 'checking', catalog_id: 'another-choice', explicit_selection: true })));
+    component.chooseCatalogModel(codingModel);
+    expect(component.catalogError).toContain('Another model setup is running');
+    expect(component.model).toBe('local-model');
+    expect(component.modelSetup?.catalog_id).toBe('another-choice');
+    expect(component.setupError).toBe('');
+  });
+
+  it('never starts a catalog download for a compatible server or while setup is active', () => {
+    fixture.detectChanges();
+    component.modelCatalog = catalog({ provider: 'openai_compatible', download_supported: false });
+    component.chooseCatalogModel(codingModel);
+    component.modelCatalog = catalog({ setup_active: true });
+    component.chooseCatalogModel(codingModel);
+    expect(api.startModelSetup).not.toHaveBeenCalled();
+    component.provider = 'openai_compatible';
+    component.catalogOpen = true;
+    component.modelCatalog = catalog({ provider: 'openai_compatible', download_supported: false });
+    fixture.detectChanges();
+    expect(fixture.nativeElement.textContent).toContain('Your local server manages model installation');
+    expect(fixture.nativeElement.querySelector('app-model-catalog article button')).toBeNull();
+  });
+
+  it('retries a cancelled selected model through the existing selection-aware setup coordinator', () => {
+    component.modelSetup = setupStatus({ state: 'cancelled', catalog_id: codingModel.id, explicit_selection: true });
+    api.startModelSetup.and.returnValue(of(setupStatus({ model: codingModel.ollama_model, available_models: ['local-model', codingModel.ollama_model], catalog_id: codingModel.id, explicit_selection: true })));
+    component.startModelSetup();
+    expect(api.startModelSetup).toHaveBeenCalledOnceWith();
+    expect(component.model).toBe(codingModel.ollama_model);
+  });
+
+  it('ignores a stale catalog response after reopening the panel', () => {
+    const first = new Subject<ModelCatalog>();
+    const second = new Subject<ModelCatalog>();
+    api.getModelCatalog.and.returnValues(first, second);
+    component.toggleModelCatalog(); component.toggleModelCatalog(); component.toggleModelCatalog();
+    second.next(catalog({ models: [{ ...codingModel, name: 'Current catalog' }] }));
+    first.next(catalog({ models: [{ ...codingModel, name: 'Stale catalog' }] }));
+    expect(component.modelCatalog?.models[0].name).toBe('Current catalog');
+  });
+
+  it('recovers the selected job after its POST response is lost without repeatedly overriding manual choices', () => {
+    const ready = setupStatus({ model: codingModel.ollama_model, available_models: ['local-model', codingModel.ollama_model], catalog_id: codingModel.id, explicit_selection: true });
+    component.modelCatalog = catalog();
+    component.modelSetup = ready;
+    component.model = 'local-model';
+    api.startModelSetup.and.returnValue(throwError(() => new HttpErrorResponse({ status: 0 })));
+    api.getModelSetup.and.returnValue(of(ready));
+    component.chooseCatalogModel(codingModel);
+    expect(api.getModelSetup).toHaveBeenCalledTimes(1);
+    expect(component.model).toBe(codingModel.ollama_model);
+    expect(component.catalogError).toBe('');
+    component.model = 'local-model';
+    component.refreshModelSetup();
+    expect(component.model).toBe('local-model');
+  });
 });

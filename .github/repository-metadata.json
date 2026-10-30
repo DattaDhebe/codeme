@@ -1,0 +1,16 @@
+{
+  "repository": "DattaDhebe/codeme",
+  "description": "CodeMe by DHEBE Studios: a local coding workspace with Ollama models, reviewed edits, approved commands, and a VS Code extension.",
+  "homepage": "https://www.dhebe.com/",
+  "topics": [
+    "codeme",
+    "local-ai",
+    "coding-assistant",
+    "ollama",
+    "local-llm",
+    "vscode-extension",
+    "fastapi",
+    "angular",
+    "developer-tools"
+  ]
+}

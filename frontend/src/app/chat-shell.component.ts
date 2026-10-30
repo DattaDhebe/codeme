@@ -6,15 +6,16 @@ import { HttpErrorResponse } from '@angular/common/http';
 import { takeUntilDestroyed } from '@angular/core/rxjs-interop';
 import { firstValueFrom, Subscription } from 'rxjs';
 import { ApiService } from './api.service';
-import { ConversationSummary, MessageRead, ChatRequest, HealthRead, ModelSetupStatus } from './models';
+import { ConversationSummary, MessageRead, ChatRequest, HealthRead, ModelSetupStatus, CodingModel, ModelCatalog } from './models';
 import { MarkdownPipe } from './markdown.pipe';
 import { SseEvent, SseParser } from './sse-parser';
 import { ModelSetupComponent } from './model-setup.component';
+import { ModelCatalogComponent } from './model-catalog.component';
 
 @Component({
   selector: 'app-chat-shell',
   standalone: true,
-  imports: [CommonModule, FormsModule, RouterModule, MarkdownPipe, ModelSetupComponent],
+  imports: [CommonModule, FormsModule, RouterModule, MarkdownPipe, ModelSetupComponent, ModelCatalogComponent],
   templateUrl: './chat-shell.component.html',
   styleUrls: ['./chat-shell.component.scss'],
 })
@@ -47,6 +48,10 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   modelSetup: ModelSetupStatus | null = null;
   setupRequestPending = false;
   setupError = '';
+  catalogOpen = false;
+  modelCatalog: ModelCatalog | null = null;
+  catalogLoading = false;
+  catalogError = '';
   private readonly destroyRef = inject(DestroyRef);
   private abortController: AbortController | null = null;
   private messageLoadId = 0;
@@ -63,6 +68,7 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
   private setupSubscription?: Subscription;
   private setupAction: 'check' | 'start' | 'cancel' = 'check';
   private automaticSetupAttempted = false;
+  private catalogRequestId = 0;
   private readonly drafts = new Map<number | 'new', string>();
 
   constructor(private readonly api: ApiService) {
@@ -178,6 +184,38 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.requestModelSetup(true);
   }
 
+  toggleModelCatalog(): void {
+    this.catalogOpen = !this.catalogOpen;
+    if (this.catalogOpen) this.loadModelCatalog();
+  }
+
+  loadModelCatalog(): void {
+    if (this.destroyed) return;
+    const request = ++this.catalogRequestId;
+    this.catalogLoading = true;
+    this.catalogError = '';
+    this.api.getModelCatalog().pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
+      next: catalog => {
+        if (this.destroyed || request !== this.catalogRequestId) return;
+        this.modelCatalog = catalog;
+        this.catalogLoading = false;
+      },
+      error: () => {
+        if (this.destroyed || request !== this.catalogRequestId) return;
+        this.catalogLoading = false;
+        this.catalogError = 'Could not load model choices. Your current chat model is unchanged. Check the backend and try again.';
+      },
+    });
+  }
+
+  chooseCatalogModel(model: CodingModel): void {
+    if (this.provider !== 'ollama' || !this.modelCatalog?.download_supported || this.modelCatalog.setup_active || this.setupBusy || this.streaming
+        || !this.modelCatalog.models.some(item => item.id === model.id)) return;
+    this.automaticSetupAttempted = true;
+    this.catalogError = '';
+    this.requestModelSetup(true, false, model.id);
+  }
+
   cancelModelSetup(): void {
     this.requestModelSetup(false, true);
   }
@@ -187,7 +225,7 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.refreshHealth();
   }
 
-  private requestModelSetup(start: boolean, cancel = false): void {
+  private requestModelSetup(start: boolean, cancel = false, catalogId?: string): void {
     if (this.destroyed || this.setupRequestPending && !cancel) return;
     if (cancel) this.setupSubscription?.unsubscribe();
     if (this.setupTimer) { clearTimeout(this.setupTimer); this.setupTimer = undefined; }
@@ -196,23 +234,32 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
     this.setupRevision++;
     this.setupRequestPending = true;
     this.setupError = '';
+    const previousConnection = this.connection;
     if (this.connection !== 'ready' || start) this.connection = 'checking';
-    const source = cancel ? this.api.cancelModelSetup() : start ? this.api.startModelSetup() : this.api.getModelSetup();
+    const source = cancel ? this.api.cancelModelSetup() : start ? catalogId ? this.api.startModelSetup(catalogId) : this.api.startModelSetup() : this.api.getModelSetup();
     this.setupSubscription = source.pipe(takeUntilDestroyed(this.destroyRef)).subscribe({
       next: status => {
         if (this.destroyed || request !== this.setupRequestId) return;
         this.setupRevision++;
         this.setupRequestPending = false;
+        const previous = this.modelSetup;
         this.modelSetup = status;
+        if (catalogId && catalogId === status.catalog_id) this.catalogError = '';
         this.provider = status.provider;
         this.connectionDetail = status.message;
         if (status.state === 'ready') {
           this.automaticSetupAttempted = false;
           this.models = status.available_models;
-          if (!this.models.includes(this.model)) this.model = status.model || this.models[0] || this.api.defaultModel;
+          const requestedSelectionReady = !!catalogId && catalogId === status.catalog_id;
+          const newlyPreparedSelection = status.explicit_selection && (requestedSelectionReady || previous?.state !== 'ready'
+            || previous.catalog_id !== status.catalog_id || previous.model !== status.model);
+          if (newlyPreparedSelection || !this.models.includes(this.model)) this.model = status.model || this.models[0] || this.api.defaultModel;
+          if (newlyPreparedSelection) this.notice = status.preference_saved === false ? status.message : `Ready to use ${this.model}.`;
           this.connection = this.models.includes(this.model) ? 'ready' : 'model-missing';
+          if (this.catalogOpen && (start || cancel || previous?.state !== 'ready')) this.loadModelCatalog();
           return;
         }
+        if (this.catalogOpen && ['error', 'cancelled'].includes(status.state) && (start || cancel || previous?.state !== status.state)) this.loadModelCatalog();
         this.connection = 'model-missing';
         if (status.state === 'idle' && status.auto_setup_enabled && !this.automaticSetupAttempted) {
           this.automaticSetupAttempted = true;
@@ -221,9 +268,19 @@ export class ChatShellComponent implements OnInit, OnDestroy, AfterViewChecked {
           this.setupTimer = setTimeout(() => this.refreshModelSetup(), 1000);
         }
       },
-      error: () => {
+      error: (failure: HttpErrorResponse) => {
         if (this.destroyed || request !== this.setupRequestId) return;
         this.setupRequestPending = false;
+        if (catalogId && start) {
+          this.connection = previousConnection;
+          this.catalogError = failure.status === 409
+            ? 'Another model setup is running. Finish or cancel it, then choose your model again.'
+            : 'Could not prepare that model. Your current chat model is unchanged. Check model setup and try again.';
+          // The POST may have reached the server even if its response was lost.
+          // Recover its real job state so progress and cancellation stay usable.
+          this.requestModelSetup(false, false, catalogId);
+          return;
+        }
         this.setupError = 'CodeMe could not check model setup. Make sure the local backend is running, then reconnect.';
         this.connection = 'offline';
         this.connectionDetail = this.setupError;

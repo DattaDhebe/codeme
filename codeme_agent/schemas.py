@@ -4,6 +4,12 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
+class ModelSetupRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    catalog_id: str | None = Field(None, min_length=1, max_length=100)
+
+
 class GenerateRequest(BaseModel):
     language: str = Field(..., description="Target programming language for generated code")
     task: str = Field(..., description="Task description to generate code for")

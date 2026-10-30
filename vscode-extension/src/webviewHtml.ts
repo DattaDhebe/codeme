@@ -3,6 +3,7 @@ import * as vscode from 'vscode';
 export function webviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): string {
   const scriptUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'dist', 'webview.js'));
   const styleUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'webview.css'));
+  const logoUri = webview.asWebviewUri(vscode.Uri.joinPath(extensionUri, 'media', 'codeme-logo.svg'));
   const nonce = getNonce();
 
   return `<!DOCTYPE html>
@@ -12,10 +13,10 @@ export function webviewHtml(webview: vscode.Webview, extensionUri: vscode.Uri): 
   <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src ${webview.cspSource}; font-src ${webview.cspSource}; img-src ${webview.cspSource} data:; script-src 'nonce-${nonce}';">
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <link href="${styleUri}" rel="stylesheet" />
-  <title>Personal Codeme</title>
+  <title>CodeMe — Local coding, your control</title>
 </head>
 <body>
-  <div id="app"></div>
+  <div id="app" data-logo-uri="${logoUri}"></div>
   <script nonce="${nonce}" src="${scriptUri}"></script>
 </body>
 </html>`;

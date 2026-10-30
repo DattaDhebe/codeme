@@ -1,0 +1,18 @@
+CodeMe for Visual Studio Code
+Maintainer: DattaDhebe / DHEBE Studios
+Source: https://github.com/DattaDhebe/codeme
+Website: https://www.dhebe.com/
+
+This extension is distributed under the existing MIT license in LICENSE.
+Dependency license notices are preserved separately. The legacy identifier
+personal-codex-local.personal-codeme is retained for installed-extension
+compatibility; it is not a claim of Marketplace publication or affiliation.
+
+CodeMe and DHEBE Studios identify the original project. Reusing extension
+code does not imply that a modified or unrelated product is an official
+CodeMe release or is endorsed by DHEBE Studios.
+
+The separately installed CodeMe backend, browser application and customer
+distribution are governed by their own root LICENSE and NOTICE. The
+extension's MIT license does not grant rights to those separate components.
+Model weights and local runtimes are not included and retain their licenses.

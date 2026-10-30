@@ -93,4 +93,34 @@ export interface ModelSetupStatus {
   tool_support?: 'supported' | 'unsupported' | 'unknown';
   agent_ready?: boolean | null;
   model_capabilities?: string[];
+  catalog_id?: string | null;
+  explicit_selection?: boolean;
+  preference_saved?: boolean | null;
+}
+
+export interface CodingModel {
+  id: string;
+  name: string;
+  ollama_model: string;
+  hugging_face_url: string;
+  ollama_url: string;
+  license: string;
+  download_size_gb: number;
+  memory_guidance: string;
+  tier: string;
+  description: string;
+  validation_note: string;
+  recommended: boolean;
+  installed: boolean | null;
+  active: boolean;
+}
+
+export interface ModelCatalog {
+  provider: 'ollama' | 'openai_compatible';
+  download_supported: boolean;
+  setup_active: boolean;
+  inventory_available: boolean;
+  inventory_error?: string | null;
+  researched_at: string;
+  models: CodingModel[];
 }

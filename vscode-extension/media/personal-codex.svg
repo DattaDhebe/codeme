@@ -1,6 +1,1 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64">
-  <rect width="64" height="64" rx="12" fill="#282c34"/>
-  <path d="M20 16h24v32H20z" fill="#61dafb" opacity="0.15"/>
-  <path d="M24 18h16v28H24z" fill="#61dafb"/>
-  <path d="M29 24h6v2h-6zM29 28h6v2h-6zM29 32h6v2h-6z" fill="#282c34"/>
-</svg>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 128 128" fill="currentColor"><title id="title">CodeMe — local coding by DHEBE Studios</title><polygon points="51,28 37,28 12,64 37,100 51,100 27,64" fill="currentColor"/><polygon points="61,100 61,28 74,28 89,51 104,28 116,28 116,100 103,100 103,51 89,72 74,51 74,100" fill="currentColor"/></svg>

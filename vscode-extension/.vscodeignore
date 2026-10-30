@@ -2,7 +2,6 @@ node_modules
 .vscode
 dist/test
 out
-README.md
 **/*.ts
 **/*.map
 coverage
@@ -15,3 +14,4 @@ npm-debug.log*
 .pytest_cache/**
 tsconfig.json
 scripts/native-test-runner.cjs
+scripts/build-notices.cjs

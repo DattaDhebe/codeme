@@ -1,10 +1,21 @@
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/brand/codeme-wordmark-dark.svg">
+  <img src="docs/brand/codeme-wordmark-light.svg" alt="CodeMe" width="340">
+</picture>
+
 # CodeMe
 
 A coding assistant that works with models and projects on your own computer. CodeMe includes a browser chat app and a VS Code extension for inspecting repositories, reviewing edits, running approved checks, and repairing failures.
 
+Maintained by [DattaDhebe](https://github.com/DattaDhebe) under the DHEBE Studios brand. **Development version: 0.7.0.** A public release, Marketplace listing, and paid website download have not yet been published.
+
+[Getting started](docs/getting-started.md) · [Documentation](docs/index.md) · [Report a bug](https://github.com/DattaDhebe/codeme/issues/new/choose) · [DHEBE Studios](https://www.dhebe.com/)
+
 Inference uses **Ollama** or a trusted **local OpenAI-compatible server**, such as LM Studio or llama.cpp. No hosted model account or API key is required. Installing dependencies and downloading model weights requires an internet connection; prompts and code are sent to the local model server.
 
 ## Start here
+
+These setup instructions are for authorized users and contributors with the maintainer's permission. See [Distribution and licensing](#distribution-and-licensing) before using or redistributing the main application.
 
 You need Python 3.10+ and Node.js/npm for the initial installation. Python 3.12 and Node.js 24 LTS are recommended. The Angular 21 browser also supports Node.js 20.19+ and 22.12+ within those major versions. Git and ripgrep enable the repository tools.
 
@@ -55,6 +66,7 @@ CodeMe shows work summaries, tool results, and outcomes. Private model reasoning
 ## What is implemented
 
 - Ollama and loopback OpenAI-compatible chat/tool transports, local model discovery, and automatic Ollama model preparation.
+- A researched optional coding-model catalog with Hugging Face sources, download sizes, memory guidance, explicit selection, and installed-model reuse.
 - Persistent conversations, workspaces, task plans, review decisions, command results, and verification history in SQLite.
 - Workspace-bounded file reads, ranged previews, bounded ripgrep search, Git inspection, and scoped project instructions.
 - Bounded, task-ranked repository navigation with file-selection reasons, symbol hints, and import links. Exact source reads remain required before editing.
@@ -67,10 +79,14 @@ The current limits include one VS Code workspace folder at a time, estimated rat
 
 ## Documentation
 
+Start with the [documentation index](docs/index.md) for guides grouped by task.
+
 | Need | Guide |
 | --- | --- |
 | Install, launch, and connect VS Code | [Getting started](docs/getting-started.md) |
 | Choose a model or local server | [Configuration](docs/configuration.md) |
+| Understand local storage, network use and deletion | [Privacy and local data](docs/privacy.md) |
+| Choose and optionally download a researched coding model | [Coding model catalog](docs/coding-models.md) |
 | Fix startup, download, or connection problems | [Troubleshooting](docs/troubleshooting.md) |
 | Understand ownership, data, and API contracts | [Architecture](docs/architecture.md) |
 | Develop, test, and package changes | [Development](docs/development.md) |
@@ -81,5 +97,17 @@ The current limits include one VS Code workspace folder at a time, estimated rat
 | Read the earlier implementation report | [Implementation report](CURRENT_IMPLEMENTATION_REPORT.md) |
 | See delivered capabilities and remaining work | [Development plan](PLAN.md) |
 | Inspect database migrations | [Migration guide](alembic/README.md) |
+| Build and review a customer distribution | [Release checklist](docs/release-checklist.md) |
+| Use the logo and application identity | [Brand guide](docs/brand/README.md) |
 
 These guides describe the current source. The [original implementation audit](docs/archive/implementation-audit-historical.md) is retained unchanged for historical reference; its readiness estimate and missing-feature list do not describe the current implementation.
+
+## Contribute, get help, and report problems
+
+Read [Contributing](CONTRIBUTING.md) before proposing changes and [Support](SUPPORT.md) for the right reporting route. Reproducible bug reports and focused pull requests are welcome. The [Code of conduct](CODE_OF_CONDUCT.md) applies to repository participation. Report security weaknesses using the private-first process in [Security](SECURITY.md), rather than publishing credentials or exploit details in an issue.
+
+## Distribution and licensing
+
+The main CodeMe application is restricted software, governed by [LICENSE](LICENSE). Public source visibility is not a general redistribution grant. The existing VS Code extension retains its [MIT license](vscode-extension/LICENSE); dependencies and model weights keep their own terms. [NOTICE](NOTICE) explains these boundaries.
+
+The planned DHEBE Studios product is a **₹499 one-time packaged download**. Its Cashfree checkout and protected download are **not live yet**. A local build or ZIP is not evidence of a published product or completed payment integration. This repository does not include model weights, a standalone Windows executable, or bundled Python/Node/Ollama runtimes.

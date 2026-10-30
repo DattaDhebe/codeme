@@ -206,7 +206,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       return;
     }
     const accept = await vscode.window.showInformationMessage(
-      `Register '${folder.name}' with Personal Codeme?`,
+      `Register '${folder.name}' with CodeMe?`,
       'Register',
       'Cancel'
     );
@@ -223,7 +223,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
   public async startBackend(): Promise<void> {
     try {
       await this.backend.checkConnection(false);
-      void vscode.window.showInformationMessage('Personal Codeme backend is already running.');
+      void vscode.window.showInformationMessage('CodeMe backend is already running.');
       await this.refreshBackendStatus(false);
       return;
     } catch {
@@ -237,7 +237,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       return;
     }
     await vscode.tasks.executeTask(backendTask);
-    void vscode.window.showInformationMessage('Starting the Personal Codeme backend…');
+    void vscode.window.showInformationMessage('Starting the CodeMe backend…');
     setTimeout(() => void this.refreshBackendStatus(false), 2500);
   }
 
@@ -309,7 +309,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
     const rememberedConsent = this.context.workspaceState.get<boolean>(this.workspaceConsentKey(folder), false);
     if (!rememberedConsent) {
       const choice = await vscode.window.showInformationMessage(
-        `Personal Codeme needs permission to register '${folder.name}' before Agent mode can inspect it.`,
+        `CodeMe needs permission to register '${folder.name}' before Agent mode can inspect it.`,
         { modal: true },
         'Register workspace'
       );
@@ -353,7 +353,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       if (generation !== this.historyGeneration) return;
       await this.send({ command: 'conversationsUpdated', payload: conversations });
     } catch (error) {
-      console.warn('Unable to load Personal Codeme conversations.', error);
+      console.warn('Unable to load CodeMe conversations.', error);
     }
   }
 
@@ -568,6 +568,34 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
       case 'setupModel':
         await this.setupMonitor().refresh('start');
         break;
+      case 'getModelCatalog': {
+        const requestId = message.args?.requestId;
+        try {
+          await this.send({ command: 'modelCatalog', payload: { catalog: await this.backend.getModelCatalog(), requestId } });
+        } catch (error) {
+          await this.send({ command: 'modelCatalogError', payload: { message: (error as Error).message, requestId } });
+        }
+        break;
+      }
+      case 'chooseCatalogModel': {
+        const catalogId = message.args?.catalogId;
+        if (typeof catalogId !== 'string' || !/^[a-z0-9-]{1,80}$/.test(catalogId)) {
+          await this.send({ command: 'modelCatalogActionDone', payload: { error: 'Choose a model from the catalog.' } });
+          break;
+        }
+        const monitor = this.setupMonitor();
+        monitor.stop();
+        try {
+          const status = await this.backend.startModelSetup(catalogId);
+          await this.send({ command: 'modelSetupStatus', payload: status });
+          await this.send({ command: 'modelCatalogActionDone', payload: {} });
+        } catch (error) {
+          await this.send({ command: 'modelCatalogActionDone', payload: { error: (error as Error).message } });
+        }
+        // A catalog rejection does not make the existing backend/model offline.
+        await monitor.refresh();
+        break;
+      }
       case 'cancelModelSetup':
         await this.setupMonitor().refresh('cancel');
         break;
@@ -736,7 +764,7 @@ export class PersonalCodexSidebarProvider implements vscode.WebviewViewProvider 
         await this.startBackend();
         break;
       default:
-        console.warn('Unknown command from Personal Codeme webview:', message.command);
+        console.warn('Unknown command from CodeMe webview:', message.command);
     }
   }
 

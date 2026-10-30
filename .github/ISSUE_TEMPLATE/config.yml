@@ -1,0 +1,8 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Setup and troubleshooting
+    url: https://github.com/DattaDhebe/codeme/blob/main/SUPPORT.md
+    about: Start with the support routes and documentation before opening a reproducible bug report.
+  - name: Security reporting
+    url: https://github.com/DattaDhebe/codeme/blob/main/SECURITY.md
+    about: Use the private-first reporting process; do not post vulnerability details in a public issue.

@@ -14,6 +14,8 @@ OLLAMA_CONTEXT_LENGTH=8192
 
 CodeMe automatically checks for local models, reuses a suitable one, or downloads the configured default when none is suitable. It loads the selected model before showing ready. See [Getting started](getting-started.md#what-happens-to-the-model) for the selection and progress behavior.
 
+To choose another freely downloadable model, open **Coding models** in the browser or **Choose coding models** in VS Code. The [researched catalog](coding-models.md) includes official Hugging Face sources, approximate download sizes, memory guidance, and local evaluation limits. **Download and use** prepares exactly that choice through Ollama, with progress, cancel and retry. Merely opening the catalog downloads nothing. Successful explicit choices are remembered locally without rewriting `.env`; an external `DEFAULT_MODEL` change takes precedence.
+
 Ready means the model can load for chat. The extension checks tool support separately before Agent tasks. A known chat-only model stays available in Ask mode; unknown support is shown as unverified. Capability metadata is a compatibility hint, not a benchmark or a guarantee that a small model will complete a complex task.
 
 `AUTO_MODEL_SETUP=false` stops automatic startup/client preparation. You can still explicitly start/retry setup. This is useful when you manage downloads yourself or want to inspect configuration before allowing a download.

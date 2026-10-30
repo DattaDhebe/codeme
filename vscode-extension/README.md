@@ -1,6 +1,8 @@
 # CodeMe for VS Code
 
-The repository-aware client for CodeMe's local backend. Ask questions about code or use Agent mode to inspect a project, review proposed changes, run approved checks, and continue from the results.
+The repository-aware client for CodeMe's local backend, maintained by [DattaDhebe](https://github.com/DattaDhebe) under the DHEBE Studios brand. Ask questions about code or use Agent mode to inspect a project, review proposed changes, run approved checks, and continue from the results.
+
+The source version is **0.7.0**. Install a locally built VSIX as described below; a public Marketplace listing is not claimed. The existing extension identifier `personal-codex-local.personal-codeme` and `personalCodex.*` configuration/command names remain for compatibility. User-facing branding is CodeMe.
 
 ## Install and connect
 
@@ -20,9 +22,11 @@ npm run build
 npm run package
 ```
 
-In VS Code, use **Extensions > Install from VSIX...** and select `personal-codeme-0.7.0.vsix`. Reload when prompted. Open the CodeMe Activity Bar view or run **Personal Codeme: Open Chat**.
+In VS Code, use **Extensions > Install from VSIX...** and select `personal-codeme-0.7.0.vsix`. Reload when prompted. Open the CodeMe Activity Bar view or run **CodeMe: Open Chat**.
 
 The default backend is `http://127.0.0.1:8000`. The sidebar displays automatic model preparation and actual download progress. An installed model is reused; missing Ollama weights are downloaded through the local daemon when setup is enabled. A compatible local server must already have a model loaded. See [Getting started](../docs/getting-started.md) and [Configuration](../docs/configuration.md).
+
+Use **Choose coding models** in the toolbar to browse the optional researched catalog. Each entry links its official Hugging Face/Ollama sources and explains its approximate download size, memory guidance, and local validation status. **Download and use** prepares exactly your choice; it does not download the entire list. The normal setup card shows progress and supports cancel/retry. Other local servers keep their own model installation controls. See [Coding models](../docs/coding-models.md).
 
 ## Work with a project
 
@@ -90,3 +94,9 @@ npm run package
 ```
 
 Vitest uses a VS Code stub. Live-backend and native extension-host checks have separate opt-in/environment requirements. See [Development](../docs/development.md) for shared-contract validation and [Troubleshooting](../docs/troubleshooting.md) for connection, model, conflict, and migration problems.
+
+## Support and license
+
+Use the repository's [support](../SUPPORT.md), [security](../SECURITY.md), and [contribution](../CONTRIBUTING.md) guides. Do not attach credentials, conversation databases, private source, or purchase records to public reports.
+
+This extension retains its [MIT license](LICENSE). The main CodeMe application's restricted terms and separately licensed dependencies/models are described in [the root LICENSE](../LICENSE) and [NOTICE](../NOTICE); the extension license is not a blanket license for the entire repository.

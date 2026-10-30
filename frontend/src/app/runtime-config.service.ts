@@ -49,7 +49,7 @@ export class RuntimeConfigService {
         defaultModel: this.validateModel(loaded.defaultModel),
       };
     } catch (error) {
-      console.warn('Personal Codex runtime configuration was rejected; safe local defaults are active.', error);
+      console.warn('CodeMe runtime configuration was rejected; safe local defaults are active.', error);
       this.value = { ...DEFAULT_CONFIG };
     }
   }

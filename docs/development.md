@@ -89,6 +89,8 @@ git status --short
 
 Run checks appropriate to your change. Shared API changes usually affect the backend and both clients. Report live-model, clean-install, and native UI checks separately from fixture-based tests.
 
+The [CI workflow](../.github/workflows/ci.yml) is configured for pull requests, pushes, and manual runs. It covers backend checks on Windows/Python 3.10 and Linux/Python 3.12, plus browser and extension checks on Node 24. Inspect the actual GitHub run result; a workflow file or passing local check does not establish a passing remote run. [Dependabot](../.github/dependabot.yml) proposes monthly Python, npm, and GitHub Actions updates for review.
+
 ## Evaluate models and installation
 
 These commands show the available cases and installation plan without inference or dependency installation:
@@ -124,3 +126,21 @@ Changes to database tables require a new Alembic revision and a data-preserving 
 ## Documentation maintenance
 
 Update the user-facing guide with the actual behavior and defaults when changing setup, permissions, models, or launch commands. Keep the root README short and put detailed explanations in `docs/`. `PLAN.md` separates delivered features from future work. Keep `CURRENT_IMPLEMENTATION_REPORT.md` aligned with the current source; the original audit under `docs/archive/` is historical and should not be used as the current feature matrix.
+
+Use the [documentation index](index.md), [contribution guide](../CONTRIBUTING.md), and [release checklist](release-checklist.md) for repository navigation, review expectations, and packaging. Preserve historical audits and unrelated owner edits; record new verified behavior in the current guides and review notes. A local build or generated customer ZIP does not establish publication, a Marketplace listing, or a working paid checkout.
+
+## Repository About information
+
+The reviewable description, homepage, and topic list live in [.github/repository-metadata.json](../.github/repository-metadata.json). Inspect the plan without changing GitHub:
+
+```console
+python -B scripts/configure_repository.py
+```
+
+Apply those fields only with authorized repository access:
+
+```console
+python -B scripts/configure_repository.py --apply
+```
+
+The apply command requires a valid `GH_TOKEN`/`GITHUB_TOKEN` or authenticated GitHub CLI session and verifies the saved fields. Keep tokens outside source and logs. Repository visibility, source publication, releases, and checkout activation are separate decisions; editing the local metadata file does not perform them. If authentication is unavailable, retain the plan and report that the remote About fields were not applied.
