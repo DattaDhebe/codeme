@@ -1,0 +1,184 @@
+{
+  "status": "prepared_pending_deployment",
+  "sourceBaseline": {
+    "website": "https://www.dhebe.com/",
+    "homepageBytes": 251338,
+    "homepageSha256": "f6725f63bf03c9c15b8a56b14ee1259d8e920a20333b6fbe4b7d99305782d0dc",
+    "note": "Existing deployed working frontend, not older committed HEAD. Public source copied read-only into isolated CodeMe runtime. The source and output baseline were verified before adding CodeMe.",
+    "checkedAt": "2026-10-30T19:06:34.169Z"
+  },
+  "baselineSourceChecks": [
+    {
+      "relative": "app/page.tsx",
+      "capturedOriginalSha256": "130a5dce767269a827581e01f17f5621c51b823f88f8e495dfe7d8aa55e853fd",
+      "baselineReconstructionVerified": true
+    },
+    {
+      "relative": "components/studios-hub.tsx",
+      "capturedOriginalSha256": "30e45249acebe102af0bde1a39562c35f4713da81b49e574360ddc63121719b3",
+      "baselineReconstructionVerified": true
+    }
+  ],
+  "overlay": {
+    "createdAt": "2026-10-30T19:13:17.728Z",
+    "destination": "/home/u942725982/domains/dhebe.com/public_html",
+    "liveHomepageSha256Precondition": "f6725f63bf03c9c15b8a56b14ee1259d8e920a20333b6fbe4b7d99305782d0dc",
+    "preserveExistingGlobalStylesheet": "/_next/static/chunks/20rqb8lp2chql.css",
+    "generatedGlobalReferenceRemappedFrom": "/_next/static/chunks/0bf2tjd8g8rhc.css",
+    "semanticHomepageOutsideCodeMeUnchanged": true,
+    "noOtherPageOutputsIncluded": true,
+    "noDeletionOrRootReplacement": true,
+    "sourceSnapshot": "F:\\ai_projects\\codeme\\.runtime\\dhebe-codeme-home\\source-current",
+    "overlay": "F:\\ai_projects\\codeme\\.runtime\\dhebe-codeme-home\\homepage-overlay",
+    "files": [
+      {
+        "relative": "_next/static/chunks/0kdqh4qfr9ke7.css",
+        "bytes": 2183,
+        "sha256": "4d95714090ec1a816f3b29aa26d48b1f8312eb0fa2de8687e137a992bc796059",
+        "category": "new-immutable-asset-first"
+      },
+      {
+        "relative": "_next/static/chunks/1yi48_89br7_j.js",
+        "bytes": 41524,
+        "sha256": "40cf52a19b6ae6ced740ee73f1a3d6c1d3ab4a10744df400c0513930a9dc369f",
+        "category": "new-immutable-asset-first"
+      },
+      {
+        "relative": "products/codeme/assets/codeme-logo.svg",
+        "bytes": 412,
+        "sha256": "605f8898e6dbb07abd86d20249edccbbf692bf3e58812fd2ffc33d032634b00b",
+        "category": "codeme-public-asset-first"
+      },
+      {
+        "relative": "__next.__PAGE__.txt",
+        "bytes": 117239,
+        "sha256": "db46e6ad035ba22f3dbd327808d274232e80da3ccff813c472c921d46cde2a3e",
+        "category": "homepage-rsc"
+      },
+      {
+        "relative": "__next._full.txt",
+        "bytes": 124736,
+        "sha256": "d168bd34241e69a8c500e2f1cb893bc4d8a6ca0c71dbbf1a03be9804c057d3ca",
+        "category": "homepage-rsc"
+      },
+      {
+        "relative": "__next._index.txt",
+        "bytes": 8624,
+        "sha256": "2f8974a6efc245f9902a9f3711bf87e9868c46cd0f194b16a6f48738d9fb480c",
+        "category": "homepage-rsc"
+      },
+      {
+        "relative": "__next._tree.txt",
+        "bytes": 402,
+        "sha256": "762fddddadeb38ac30d1de3a177c87d531e722138039719bc092bf6544b2f9ab",
+        "category": "homepage-rsc"
+      },
+      {
+        "relative": "index.txt",
+        "bytes": 124736,
+        "sha256": "d168bd34241e69a8c500e2f1cb893bc4d8a6ca0c71dbbf1a03be9804c057d3ca",
+        "category": "homepage-rsc"
+      },
+      {
+        "relative": "index.html",
+        "bytes": 255817,
+        "sha256": "4c43c63ac525ae5610276eed3dc7549b720fe99bc90b3125a7ec3d46b40e2a0b",
+        "category": "homepage-html-last"
+      }
+    ]
+  },
+  "integrity": {
+    "createdAt": "2026-10-30T19:15:28.240Z",
+    "originalSourceFilesVerifiedUnchanged": 270,
+    "concurrentOriginalSourceChanges": [
+      "app/globals.css",
+      "app/page.tsx",
+      "app/sitemap.ts",
+      "components/company-home.tsx",
+      "lib/company-services.ts"
+    ],
+    "originalSourceNeverWrittenByThisAgent": true,
+    "liveHomepageSha256StillMatches": "f6725f63bf03c9c15b8a56b14ee1259d8e920a20333b6fbe4b7d99305782d0dc",
+    "recheckBeforeUploadRequired": true,
+    "artifacts": [
+      {
+        "file": "F:\\ai_projects\\codeme\\.runtime\\dhebe-codeme-home\\codeme-homepage-overlay.zip",
+        "bytes": 130178,
+        "sha256": "5b01d95139242ac6cac4ce824873846f320b4ef2dae5f74780d4244330bcac72",
+        "entries": [
+          "_next/static/chunks/0kdqh4qfr9ke7.css",
+          "_next/static/chunks/1yi48_89br7_j.js",
+          "products/codeme/assets/codeme-logo.svg",
+          "__next.__PAGE__.txt",
+          "__next._full.txt",
+          "__next._index.txt",
+          "__next._tree.txt",
+          "index.txt",
+          "index.html"
+        ]
+      },
+      {
+        "file": "F:\\ai_projects\\codeme\\.runtime\\dhebe-codeme-home\\codeme-homepage-rollback.zip",
+        "bytes": 111482,
+        "sha256": "c39c80162e5e83efaa770dc9a6b0acd2f2c0e98fc80dfd600f1d31203e71d869",
+        "entries": [
+          "index.html",
+          "index.txt",
+          "__next._full.txt",
+          "__next._index.txt",
+          "__next._tree.txt",
+          "__next.__PAGE__.txt"
+        ]
+      }
+    ]
+  },
+  "browserVerification": {
+    "checkedAt": "2026-10-30T19:15:23.552Z",
+    "checks": [
+      {
+        "viewport": {
+          "width": 1440,
+          "height": 1000
+        },
+        "productVisible": true,
+        "logo": {
+          "width": 150,
+          "complete": true
+        },
+        "href": "https://www.dhebe.com/products/codeme/",
+        "overflow": false,
+        "searchResultLinks": 12,
+        "errors": [],
+        "brokenAssets": []
+      },
+      {
+        "viewport": {
+          "width": 390,
+          "height": 844
+        },
+        "productVisible": true,
+        "logo": {
+          "width": 150,
+          "complete": true
+        },
+        "href": "https://www.dhebe.com/products/codeme/",
+        "overflow": false,
+        "searchResultLinks": 12,
+        "errors": [],
+        "brokenAssets": []
+      }
+    ]
+  },
+  "sourcePatch": {
+    "file": "codeme-homepage.patch",
+    "sha256": "cc02228a4634b2356869bbc778eef6dc593cd29d61d6e29e29be2c1ba4c91af3",
+    "gitApplyCheckPassed": true,
+    "gitApplyReproducesModifiedSourcesAfterLineEndingNormalization": true,
+    "files": [
+      "app/page.tsx",
+      "components/studios-hub.tsx",
+      "components/codeme-product-section.tsx",
+      "components/codeme-product-section.module.css"
+    ]
+  }
+}

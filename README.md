@@ -7,7 +7,7 @@
 
 A coding assistant that works with models and projects on your own computer. CodeMe includes a browser chat app and a VS Code extension for inspecting repositories, reviewing edits, running approved checks, and repairing failures.
 
-Maintained by [DattaDhebe](https://github.com/DattaDhebe) under the DHEBE Studios brand. **Development version: 0.7.0.** A public release, Marketplace listing, and paid website download have not yet been published.
+Maintained by [DattaDhebe](https://github.com/DattaDhebe) under the DHEBE Studios brand. **Development version: 0.7.0.** The INR 499 one-time website package is published at [dhebe.com/products/codeme](https://www.dhebe.com/products/codeme/). A GitHub Release and Marketplace listing remain unpublished.
 
 [Getting started](docs/getting-started.md) · [Documentation](docs/index.md) · [Report a bug](https://github.com/DattaDhebe/codeme/issues/new/choose) · [DHEBE Studios](https://www.dhebe.com/)
 
@@ -110,4 +110,4 @@ Read [Contributing](CONTRIBUTING.md) before proposing changes and [Support](SUPP
 
 The main CodeMe application is restricted software, governed by [LICENSE](LICENSE). Public source visibility is not a general redistribution grant. The existing VS Code extension retains its [MIT license](vscode-extension/LICENSE); dependencies and model weights keep their own terms. [NOTICE](NOTICE) explains these boundaries.
 
-The planned DHEBE Studios product is a **₹499 one-time packaged download**. Its Cashfree checkout and protected download are **not live yet**. A local build or ZIP is not evidence of a published product or completed payment integration. This repository does not include model weights, a standalone Windows executable, or bundled Python/Node/Ollama runtimes.
+The DHEBE Studios product is a **₹499 one-time packaged download**, published with production Cashfree checkout and protected delivery. Server configuration and unpaid-download rejection were verified; a real customer purchase has not been tested. See [deployment verification](web-product/DEPLOYMENT.md). This repository does not include model weights, a standalone Windows executable, or bundled Python/Node/Ollama runtimes.

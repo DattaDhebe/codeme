@@ -1,0 +1,36 @@
+name: Validate paid product
+
+on:
+  push:
+    branches: [main]
+    paths: ['web-product/**', '.github/workflows/paid-product.yml']
+  pull_request:
+    paths: ['web-product/**', '.github/workflows/paid-product.yml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  checkout:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v7
+        with:
+          node-version: '24'
+      - name: Install PHP test runtime
+        run: sudo apt-get update && sudo apt-get install -y php-cli php-curl
+      - name: Lint PHP
+        run: find web-product -name '*.php' -print0 | xargs -0 -n1 php -l
+      - name: Check offline commerce logic
+        run: php web-product/private/tests/commerce.test.php
+      - name: Check isolated HTTP boundaries
+        run: php web-product/private/tests/http.test.php
+      - name: Check checkout syntax and state transitions
+        run: |
+          node --check web-product/public/checkout.mjs
+          node --test web-product/tests/checkout.test.mjs
