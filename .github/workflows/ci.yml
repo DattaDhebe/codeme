@@ -10,7 +10,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: validate-${{ github.workflow }}-${{ github.ref }}
+  group: validate-${{ github.workflow }}-${{ github.event.pull_request.head.ref || github.ref_name }}
   cancel-in-progress: true
 
 jobs:
@@ -46,6 +46,8 @@ jobs:
         run: choco install ripgrep --yes --no-progress
       - name: Check repository documentation and metadata
         run: python -B scripts/check_repository.py
+      - name: Prepare local test output
+        run: python -c "from pathlib import Path; Path('.runtime').mkdir(exist_ok=True)"
       - name: Run offline backend and packaging tests
         run: python -B -m pytest codeme_agent/tests --basetemp=.runtime/ci-tests --junitxml=.runtime/backend-results.xml -q
       - name: Retain test results
